@@ -204,18 +204,21 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     let viz_fullscreen = (app.viz_background || zen) && app.show_viz && layout.main.height > 2;
     if viz_fullscreen {
         let audio = &app.audio;
+        // El fondo se renderiza a media resolución y se escala al pintar: es
+        // decorativo, translúcido, y a 200x56 a resolución completa se comía
+        // el presupuesto de frame del preset `clean`.
         app.viz.render(
-            layout.full.width,
-            layout.full.height,
+            (layout.full.width / VIZ_SCALE).max(20),
+            (layout.full.height / VIZ_SCALE).max(6),
             audio,
             &pal,
             1.0 / app.fps.value().max(1.0),
         );
         // En zen el visualizador es el protagonista: más opaco y sin paneles.
         if zen {
-            blit_viz(app, buf, layout.full, 0, 0.9, 0.85);
+            blit_viz(app, buf, layout.full, 0, 0.9, 0.85, VIZ_SCALE);
         } else {
-            blit_viz(app, buf, layout.full, 0, 0.32, 0.10);
+            blit_viz(app, buf, layout.full, 0, 0.32, 0.10, VIZ_SCALE);
         }
     }
     app.set_art_size_hint(layout.art.width, layout.art.height);
@@ -307,7 +310,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 }
 
 fn put(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: Option<Color>) {
-    let area = buf.area();
+    let area = *buf.area();
     if x >= area.x + area.width || y >= area.y + area.height {
         return;
     }
@@ -321,7 +324,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: Option<Col
 }
 
 fn put_bg(buf: &mut Buffer, x: u16, y: u16, bg: Rgb) {
-    let area = buf.area();
+    let area = *buf.area();
     if x >= area.x + area.width || y >= area.y + area.height {
         return;
     }
@@ -344,13 +347,25 @@ fn fill(buf: &mut Buffer, rect: Rect, bg: Rgb) {
 /// deja ver el visualizador de fondo a través de los paneles.
 fn fill_soft(buf: &mut Buffer, rect: Rect, target: Rgb, amount: f32, fallback: Rgb) {
     let amount = amount.clamp(0.0, 1.0);
+    let area = *buf.area();
     for y in rect.y..rect.y + rect.height {
         for x in rect.x..rect.x + rect.width {
-            let under = match buf.cell((x, y)).map(|cell| cell.bg) {
-                Some(Color::Rgb(r, g, b)) => (r, g, b),
+            if x >= area.x + area.width || y >= area.y + area.height {
+                continue;
+            }
+            // Una sola búsqueda de celda por píxel: es el bucle más caliente
+            // con los paneles translúcidos y el fondo del visualizador.
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            let under = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
                 _ => fallback,
             };
-            put_bg(buf, x, y, mix(under, target, amount));
+            let mixed = mix(under, target, amount);
+            cell.set_symbol(" ");
+            cell.set_fg(color(mixed));
+            cell.set_bg(color(mixed));
         }
     }
 }

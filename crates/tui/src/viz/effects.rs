@@ -5,7 +5,8 @@
 
 use super::{Effect, Layer, Params, Rng, VizCtx};
 use spote_core::audio::{AudioFrame, BANDS};
-use spote_core::util::mix_oklab;
+use spote_core::artwork::Rgb;
+use spote_core::util::{mix, mix_oklab};
 
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
@@ -136,6 +137,24 @@ impl Effect for Bars {
         }
         let dt = ctx.dt;
         let width_per_bar = layer.w as f32 / count as f32;
+        // Precalcular sombras por fila y color base por barra: antes se hacía
+        // `mix_oklab` + `shade` por celda y en pantalla completa (200x56) el
+        // preset clean perdía fps. Con tablas es el mismo dibujo, mucho menos
+        // trabajo por frame.
+        let row_shades: Vec<Rgb> = (0..h as usize)
+            .map(|row| ctx.shade(0.30 + (row as f32 / h as f32) * 0.62))
+            .collect();
+        let bases: Vec<Rgb> = (0..count)
+            .map(|i| {
+                // Colores de la propia portada, no solo primary/secondary: en
+                // pantalla completa las barras se veían todas del mismo tono.
+                // Ciclo rápido por barra: con solo unas pocas barras con señal
+                // un gradiente suave las dejaba todas del mismo tono. Así cada
+                // barra recorre la paleta de la portada.
+                let hue = (i as f32 * 0.37 + ctx.time * 0.05) % 1.0;
+                mix_oklab(ctx.palette.ramp_at(hue), ctx.palette.accent, 0.15)
+            })
+            .collect();
         for i in 0..count {
             let t = i as f32 / count as f32;
             let band_index = (t.powf(1.35) * BANDS as f32).min(BANDS as f32 - 1.0);
@@ -153,21 +172,16 @@ impl Effect for Bars {
             let x1 = (((i + 1) as f32 * width_per_bar).ceil() as i32).max(x0 + 1);
             for x in x0..x1 {
                 let full = height.floor() as i32;
-                // Degradado de color por columna: sin esto, en el modo de
-                // fondo todas las barras salían del mismo tono y quedaba plano.
-                let hue = (t * 1.35 + ctx.time * 0.04) % 1.0;
-                let base = if hue < 0.5 {
-                    mix_oklab(ctx.palette.primary, ctx.palette.secondary, hue * 2.0)
-                } else {
-                    mix_oklab(ctx.palette.secondary, ctx.palette.accent, (hue - 0.5) * 2.0)
-                };
+                let base = bases[i];
                 for row in 0..full {
                     let y = h - 1 - row;
                     let level = row as f32 / h as f32;
-                    let ramp = ctx.shade(0.38 + level * 0.5);
-                    let mut color = mix_oklab(ramp, base, 0.55);
+                    let ramp = row_shades[row as usize];
+                    // `mix` lineal en vez de oklab: es un degradado interno de
+                    // barra con miles de celdas por frame y no se nota.
+                    let mut color = mix(ramp, base, 0.5);
                     if level > 0.72 {
-                        color = mix_oklab(color, ctx.palette.text, 0.45);
+                        color = mix(color, ctx.palette.text, 0.42);
                     }
                     layer.put(x, y, '█', color, 1.0);
                 }
@@ -176,7 +190,7 @@ impl Effect for Bars {
                 let extra = (fraction * 8.0) as usize;
                 if extra > 0 {
                     let y = h - 1 - full;
-                    layer.put(x, y, BLOCKS[extra.min(8)], mix_oklab(base, ctx.palette.text, 0.35), 1.0);
+                    layer.put(x, y, BLOCKS[extra.min(8)], mix(base, ctx.palette.text, 0.35), 1.0);
                 }
                 // Pico flotante.
                 let peak_row = self.peaks[i];

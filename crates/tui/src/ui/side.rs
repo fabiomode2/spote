@@ -334,12 +334,16 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         let audio = &app.audio;
         let dt = 1.0 / app.fps.value().max(1.0);
         app.viz.render(rect.width, rect.height, audio, pal, dt);
-        blit_viz(app, buf, rect, 0, 1.0, 0.0);
+        blit_viz(app, buf, rect, 0, 1.0, 0.0, 1);
     } else {
         // El fondo ya renderizó el canvas a pantalla completa: la franja es
         // una cosecha de sus últimas filas, así el efecto es continuo.
-        let src_y = app.viz.output.h.saturating_sub(rect.height);
-        blit_viz(app, buf, rect, src_y, 1.0, 0.0);
+        let src_y = app
+            .viz
+            .output
+            .h
+            .saturating_sub((rect.height / VIZ_SCALE).max(1));
+        blit_viz(app, buf, rect, src_y, 1.0, 0.0, VIZ_SCALE);
     }
     let label = format!("{} · {}", app.viz.preset_name(), app.viz.preset_description());
     let width = label.chars().count() as u16;
@@ -353,34 +357,57 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
 
 /// Copia el canvas del visualizador a la pantalla. `src_y0` permite dibujar
 /// solo una franja; `amount` controla cuánto color se suma al fondo.
-pub(super) fn blit_viz(app: &App, buf: &mut Buffer, dst: Rect, src_y0: u16, fg_amount: f32, bg_amount: f32) {
+/// Escala del canvas de fondo respecto a la pantalla.
+pub(super) const VIZ_SCALE: u16 = 2;
+
+pub(super) fn blit_viz(
+    app: &App,
+    buf: &mut Buffer,
+    dst: Rect,
+    src_y0: u16,
+    fg_amount: f32,
+    bg_amount: f32,
+    scale: u16,
+) {
     let layer = &app.viz.output;
     if layer.w == 0 || layer.h == 0 {
         return;
     }
+    // El fondo del visualizador puede ser de 200x56: se escribe la celda
+    // directamente en vez de pasar por `put` (bounds + área) por píxel.
+    let area = *buf.area();
     for y in 0..dst.height {
+        let py = dst.y + y;
+        if py >= area.y + area.height {
+            break;
+        }
         for x in 0..dst.width {
-            let sx = x.min(layer.w.saturating_sub(1));
-            let sy = (src_y0 + y).min(layer.h.saturating_sub(1));
-            let Some(cell) = layer.get(sx as i32, sy as i32) else {
+            let px = dst.x + x;
+            if px >= area.x + area.width {
+                break;
+            }
+            let sx = (x / scale).min(layer.w.saturating_sub(1));
+            let sy = (src_y0 + y / scale).min(layer.h.saturating_sub(1));
+            let Some(src) = layer.get(sx as i32, sy as i32) else {
                 continue;
             };
-            if cell.alpha <= 0.01 {
+            if src.alpha <= 0.01 {
                 continue;
             }
+            let Some(cell) = buf.cell_mut((px, py)) else {
+                continue;
+            };
             let pal_hint = (11u8, 11u8, 16u8);
-            let fg = mix(pal_hint, cell.fg, cell.alpha * fg_amount);
-            let bg = mix(pal_hint, cell.fg, cell.alpha * bg_amount);
+            let fg = mix(pal_hint, src.fg, src.alpha * fg_amount);
+            let bg = if bg_amount <= 0.001 {
+                pal_hint
+            } else {
+                mix(pal_hint, src.fg, src.alpha * bg_amount)
+            };
             let mut glyph = [0u8; 4];
-            let symbol: &str = cell.ch.encode_utf8(&mut glyph);
-            put(
-                buf,
-                dst.x + x,
-                dst.y + y,
-                symbol,
-                color(fg),
-                Some(color(bg)),
-            );
+            cell.set_symbol(src.ch.encode_utf8(&mut glyph));
+            cell.set_fg(color(fg));
+            cell.set_bg(color(bg));
         }
     }
 }
