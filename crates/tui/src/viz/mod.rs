@@ -343,12 +343,12 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         name: "clean",
-        description: "marea + onda",
+        description: "barras limpias + marea",
         layers: &[
-            // Sin barras de bloques: dos ondas suaves superpuestas, con la
-            // segunda más tenue para dar profundidad y color.
-            ("wave", Blend::Normal, 0.95, Mask::Full),
-            ("wave", Blend::Screen, 0.48, Mask::Bottom),
+            // El clean original: barras suaves que respiran con el bajo y una
+            // marea encima para que no se quede en un ecualizador plano.
+            ("bars", Blend::Normal, 0.86, Mask::Bottom),
+            ("wave", Blend::Screen, 0.58, Mask::Full),
         ],
     },
     Preset {

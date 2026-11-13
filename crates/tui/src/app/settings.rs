@@ -14,6 +14,7 @@ impl App {
         match row {
             SettingRow::Rotate => onoff(self.art_rotate),
             SettingRow::RotateSecs => format!("{} s", self.cfg.ui.art_rotate_secs.max(5)),
+            SettingRow::RotateOff => onoff(self.art_rotate_off),
             SettingRow::ArtMode => self.art_mode.label().to_string(),
             SettingRow::VizPreset => format!("{} · {}", self.viz.preset_name(), self.viz.preset_description()),
             SettingRow::Ambient => self.cfg.ui.fx.ambient.clone(),
@@ -78,7 +79,7 @@ impl App {
             }
             SettingRow::Ambient => {
                 const AMBIENTS: [&str; 7] =
-                    ["off", "void", "aurora", "neural", "glitch", "cover", "lyrics"];
+                    ["off", "void", "aurora", "neural", "glitch", "lyrics", "cover"];
                 let current = AMBIENTS
                     .iter()
                     .position(|name| *name == self.cfg.ui.fx.ambient)
@@ -121,6 +122,7 @@ impl App {
             _ => self.toggle_setting(row),
         }
         self.cfg.save().ok();
+        self.needs_redraw = true;
     }
 
 
@@ -132,6 +134,10 @@ impl App {
             SettingRow::Rotate => {
                 self.art_rotate = !self.art_rotate;
                 self.cfg.ui.art_rotate = self.art_rotate;
+            }
+            SettingRow::RotateOff => {
+                self.art_rotate_off = !self.art_rotate_off;
+                self.cfg.ui.art_rotate_off = self.art_rotate_off;
             }
             SettingRow::VizBackground => {
                 self.viz_background = !self.viz_background;
@@ -172,6 +178,7 @@ impl App {
         }
         if setting != SettingRow::Save {
             self.cfg.save().ok();
+            self.needs_redraw = true;
         }
     }
 
@@ -179,6 +186,11 @@ impl App {
     pub fn set_zen(&mut self, zen: bool) {
         self.zen = zen;
         self.cfg.ui.zen = zen;
+        self.needs_redraw = true;
+    }
+
+    pub fn request_redraw(&mut self) {
+        self.needs_redraw = true;
     }
 
     // ------------------------------------------------------------- Spotify

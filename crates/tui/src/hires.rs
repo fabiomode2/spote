@@ -18,6 +18,20 @@ pub struct HiResState {
     sent_rect: Option<Rect>,
 }
 
+impl HiResState {
+    /// Borra la imagen y olvida el estado: tras un clear de pantalla o un
+    /// cambio de layout hay que volver a colocarla.
+    pub fn reset(&mut self, out: &mut impl Write) {
+        if self.image_id != 0 {
+            let _ = delete(out, self.image_id);
+            self.image_id = 0;
+        }
+        self.sent_key.clear();
+        self.sent_rect = None;
+        let _ = out.flush();
+    }
+}
+
 fn kitty_enabled() -> bool {
     if std::env::var_os("SPOTE_NO_KITTY").is_some() {
         return false;
@@ -95,8 +109,9 @@ pub fn render(out: &mut impl Write, app: &App, state: &mut HiResState) {
     let wanted = app
         .art_visible_rect
         .filter(|_| app.overlay == Overlay::None)
-        .filter(|_| app.fullscreen != Fullscreen::Viz && !app.zen)
-        .filter(|_| matches!(app.art_mode, ArtMode::Plain | ArtMode::Half))
+        .filter(|_| app.fullscreen != Fullscreen::Viz)
+        .filter(|_| !app.zen || app.fullscreen == Fullscreen::Art)
+        .filter(|_| app.art_mode == ArtMode::Plain)
         .filter(|rect| rect.width >= 12 && rect.height >= 6)
         .and_then(|rect| {
             let png = app.art_png.as_ref()?;

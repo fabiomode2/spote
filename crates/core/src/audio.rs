@@ -214,7 +214,7 @@ impl Analyzer {
         self.time += dt;
         self.energy *= (-dt / 0.35).exp();
         self.beat = false;
-        self.beat_pulse *= (-dt / 0.09).exp();
+        self.beat_pulse *= (-dt / 0.22).exp();
         let release = 1.0 - (-dt / 0.25).exp();
         for band in &mut self.bands {
             *band += (0.0 - *band) * release;
@@ -223,7 +223,7 @@ impl Analyzer {
             *sample *= 1.0 - release;
         }
         for i in 0..4 {
-            self.group_pulse[i] *= (-dt / 0.14).exp();
+            self.group_pulse[i] *= (-dt / 0.34).exp();
             self.group_cooldown[i] = (self.group_cooldown[i] - dt).max(0.0);
         }
         if self.bands.iter().all(|b| *b < 0.005) {
@@ -331,7 +331,9 @@ impl Analyzer {
             mean(&self.bands[40..]),    // hats  ~7-16 kHz
             mean(&self.bands[12..30]),  // voz   ~300-3 kHz
         ];
-        let taus = [0.16f32, 0.11, 0.07, 0.22];
+        // Colas más largas: antes el bombo/charles desaparecían en una décima
+        // de segundo y la UI parecía dar tirones aunque fuera a 120 fps.
+        let taus = [0.34f32, 0.28, 0.20, 0.42];
         let thresholds = [1.30f32, 1.34, 1.42, 1.18];
         for i in 0..4 {
             let level = groups[i] * self.params_sensitivity();
@@ -386,7 +388,7 @@ impl Analyzer {
             self.last_beat = self.time;
             self.beat_pulse = 1.0;
         } else {
-            self.beat_pulse *= (-dt / 0.09).exp();
+            self.beat_pulse *= (-dt / 0.22).exp();
         }
         let _ = self.rate;
     }

@@ -201,12 +201,14 @@ impl App {
         }
         self.vcenter = self.cfg.ui.layout.vcenter;
         self.cfg.save().ok();
+        self.needs_redraw = true;
     }
 
     fn reset_layout(&mut self) {
         self.cfg.ui.layout = LayoutCfg::default();
         self.vcenter = self.cfg.ui.layout.vcenter;
         self.cfg.save().ok();
+        self.needs_redraw = true;
         self.toast("diseño restaurado", ToastKind::Ok);
     }
 }

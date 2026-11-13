@@ -5,14 +5,13 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     use crate::app::{CenterFocus, Fullscreen};
 
     if app.fullscreen == Fullscreen::Art {
-        let h = layout.full.height.saturating_sub(4);
-        let w = (h * 2).min(layout.full.width.saturating_sub(4));
-        let art_rect = Rect::new(
-            layout.full.x + (layout.full.width.saturating_sub(w)) / 2,
-            layout.full.y + (layout.full.height.saturating_sub(h)) / 2,
-            w,
-            h,
-        );
+        // Pantalla completa de verdad, pero por encima del transporte: si la
+        // portada ocupa también esas filas, la imagen Kitty tapa los botones.
+        let area = layout.main;
+        let inner = inset(area, 2, 1);
+        let h = inner.height.saturating_sub(1);
+        let w = (h * 2).min(inner.width);
+        let art_rect = centered(inner, w, h);
         draw_art(app, buf, art_rect, pal, 1.0);
         frame_art(buf, art_rect, pal);
         app.hit.add(layout.full, Action::ArtFullscreen);
@@ -169,6 +168,21 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         .into_iter()
         .map(|(label, fg)| (label, fg, None))
         .collect();
+    let trim_label = if app.trim_start_ms > 0 || app.trim_end_ms.is_some() {
+        let start = if app.trim_start_ms > 0 {
+            spote_core::util::format_ms(app.trim_start_ms)
+        } else {
+            "0:00".to_string()
+        };
+        let end = app
+            .trim_end_ms
+            .map(spote_core::util::format_ms)
+            .unwrap_or_else(|| "fin".to_string());
+        format!("✂ {start}–{end}")
+    } else {
+        "✂ recorte".to_string()
+    };
+    items.push((trim_label, pal.warn, Some(Action::OpenTrim)));
     items.push((
         if favorite { "♥".into() } else { "♡".into() },
         if favorite { pal.error } else { pal.dim },
@@ -346,7 +360,7 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
     };
     let text_w = (rect.width * pct / 100).max(24).min(rect.width);
     let x0 = rect.x + (rect.width.saturating_sub(text_w)) / 2;
-    let position = app.now.position_ms;
+    let position = app.display_position_ms();
     let active = doc.index_at(position);
     let scroll = app.lyrics_scroll.value;
     let center = rect.y as f32 + rect.height as f32 / 2.0;
@@ -386,6 +400,8 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         // Clic en una frase: salta a ese momento. El muelle de scroll anima el
         // salto; no hay corte seco.
         app.hit.add(line_rect, Action::SeekLyrics(line.start_ms));
+        // El clic derecho también sirve para sincronizar; no abre el menú
+        // contextual de la pista desde una línea de letra.
     }
 
     // Progreso de la línea activa, discreto, bajo la letra.
@@ -419,17 +435,17 @@ fn draw_active_line(
     line: &spote_core::lyrics::LyricLine,
     pal: &Palette,
 ) {
-    let position = app.now.position_ms;
+    let position = app.display_position_ms();
     let prefix = "▸ ";
     let suffix = " ◂";
-    let mut cells: Vec<(char, f32, bool)> = Vec::new();
+    let mut cells: Vec<(char, f32, bool, bool)> = Vec::new();
     for ch in prefix.chars() {
-        cells.push((ch, 0.0, false));
+        cells.push((ch, 0.0, false, false));
     }
     if line.words.len() >= 2 {
         for (i, word) in line.words.iter().enumerate() {
             if i > 0 {
-                cells.push((' ', 1.0, false));
+                cells.push((' ', 1.0, false, false));
             }
             let span = word.end_ms.saturating_sub(word.start_ms).max(1);
             let word_progress =
@@ -443,7 +459,7 @@ fn draw_active_line(
                 } else {
                     0.0
                 };
-                cells.push((ch, lit, started && word_progress < 1.0));
+                cells.push((ch, lit, started && word_progress < 1.0, word.optional));
             }
         }
     } else {
@@ -453,11 +469,11 @@ fn draw_active_line(
         let chars: Vec<char> = line.text.chars().collect();
         let total = chars.len().max(1) as f32;
         for (j, ch) in chars.into_iter().enumerate() {
-            cells.push((ch, ((progress * total) - j as f32).clamp(0.0, 1.0), false));
+            cells.push((ch, ((progress * total) - j as f32).clamp(0.0, 1.0), false, false));
         }
     }
     for ch in suffix.chars() {
-        cells.push((ch, 0.0, false));
+        cells.push((ch, 0.0, false, false));
     }
     let width = cells.len() as u16;
     if width == 0 || rect.width < 4 {
@@ -465,13 +481,16 @@ fn draw_active_line(
     }
     let visible = cells.len().min(rect.width.saturating_sub(1) as usize);
     let start_x = rect.x + (rect.width.saturating_sub(visible as u16)) / 2;
-    for (i, (ch, lit, current)) in cells.into_iter().take(visible).enumerate() {
-        let base = if lit <= 0.001 {
+    for (i, (ch, lit, current, optional)) in cells.into_iter().take(visible).enumerate() {
+        let base = if optional {
+            // Adlib de fondo: se ve, pero no compite con la voz principal.
+            mix_oklab(pal.dim, pal.secondary, 0.22 + lit * 0.18)
+        } else if lit <= 0.001 {
             mix_oklab(pal.dim, pal.muted, 0.4)
         } else {
             mix_oklab(pal.text, pal.primary, 0.28 + lit * 0.45)
         };
-        let fg = if current {
+        let fg = if current && !optional {
             mix_oklab(base, pal.text, 0.45)
         } else {
             base
@@ -479,7 +498,7 @@ fn draw_active_line(
         let mut glyph = [0u8; 4];
         let symbol: &str = ch.encode_utf8(&mut glyph);
         put(buf, start_x + i as u16, rect.y, symbol, color(fg), None);
-        if current && i > 0 {
+        if current && !optional && i > 0 {
             if let Some(cell) = buf.cell_mut((start_x + i as u16, rect.y)) {
                 cell.modifier.insert(Modifier::BOLD);
             }

@@ -16,12 +16,13 @@ pub enum ArtMode {
     /// Pixels ordenados con Bayer 8x8 y cuantizados a la rampa de la paleta.
     /// Es el look "TUI": se lee como arte, no como foto comprimida.
     Dither,
-    /// Media celda: `▀` con color arriba y color abajo. Máxima fidelidad y el
-    /// que mejor aguanta una portada grande como imagen principal.
-    #[default]
+    /// Media celda con la paleta de la portada: foto suavizada por la paleta,
+    /// sin imagen Kitty (half-res real). Es el modo "media".
     Half,
     /// Media celda con los colores originales de la imagen: la portada tal
-    /// cual, sin cuantizar a la paleta ni pulsos. Es el modo "foto".
+    /// cual, sin cuantizar a la paleta ni pulsos. Es el modo "foto" y el que
+    /// usa la imagen Kitty a resolución completa.
+    #[default]
     Plain,
     /// Braille (2x4 puntos por celda), tinta plana del acento.
     Braille,
@@ -33,11 +34,11 @@ pub enum ArtMode {
 }
 
 impl ArtMode {
-    /// Los tres modos de portada grandes: foto fiel, pixel art y braille.
-    /// `Half` se mantiene como alias interno de `Plain`.
+    /// Modos de portada: foto full-res, media resolución, pixel art y braille.
     pub fn next(self) -> Self {
         match self {
-            Self::Plain | Self::Half => Self::Dither,
+            Self::Plain => Self::Half,
+            Self::Half => Self::Dither,
             Self::Dither => Self::Braille,
             Self::Braille => Self::Off,
             Self::Gradient | Self::Off => Self::Plain,
@@ -46,21 +47,25 @@ impl ArtMode {
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Plain | Self::Half | Self::Gradient => Self::Off,
-            Self::Dither => Self::Plain,
+            Self::Plain | Self::Gradient => Self::Off,
+            Self::Half => Self::Plain,
+            Self::Dither => Self::Half,
             Self::Braille => Self::Dither,
             Self::Off => Self::Braille,
         }
     }
 
     /// Modos que participan en la rotación automática. `Gradient` no está:
-    /// es solo el recurso de cuando no hay portada.
-    pub const ROTATION: [ArtMode; 3] = [ArtMode::Plain, ArtMode::Dither, ArtMode::Braille];
+    /// es solo el recurso de cuando no hay portada. `Off` se añade desde el
+    /// ajuste `art_rotate_off` para no apagar la portada sin querer.
+    pub const ROTATION: [ArtMode; 4] =
+        [ArtMode::Plain, ArtMode::Half, ArtMode::Dither, ArtMode::Braille];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Dither => "pixel",
-            Self::Half | Self::Plain => "default",
+            Self::Half => "half",
+            Self::Plain => "default",
             Self::Braille => "braille",
             Self::Off => "off",
             Self::Gradient => "gradient",
@@ -70,7 +75,7 @@ impl ArtMode {
     pub fn from_str(text: &str) -> Option<Self> {
         match text {
             "dither" | "pixel" | "pixelado" => Some(Self::Dither),
-            "half" | "halfblocks" => Some(Self::Half),
+            "half" | "halfblocks" | "media" | "half-res" => Some(Self::Half),
             "plain" | "default" | "foto" | "photo" => Some(Self::Plain),
             "braille" => Some(Self::Braille),
             "off" => Some(Self::Off),

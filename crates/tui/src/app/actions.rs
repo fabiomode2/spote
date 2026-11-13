@@ -23,7 +23,14 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) => {
                 if let Some(action) = self.hit.hit(mouse.column, mouse.row).cloned() {
-                    self.open_context(&action);
+                    // En la letra, el clic derecho sincroniza igual que
+                    // shift/alt+clic. Algunos terminales se quedan el shift
+                    // para la selección y no lo mandan a la aplicación.
+                    if let Action::SeekLyrics(ms) = action {
+                        self.sync_lyrics_to_position(ms);
+                    } else {
+                        self.open_context(&action);
+                    }
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -88,7 +95,9 @@ impl App {
                         return;
                     }
                     Action::SeekLyrics(ms)
-                        if mouse.modifiers.contains(KeyModifiers::SHIFT) =>
+                        if mouse.modifiers.intersects(
+                            KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                        ) =>
                     {
                         self.sync_lyrics_to_position(*ms);
                         return;
@@ -223,6 +232,7 @@ impl App {
             Action::ToggleZen => self.set_zen(!self.zen),
             Action::Tab(tab) => {
                 self.tab = tab;
+                self.needs_redraw = true;
                 if tab != Tab::Library {
                     self.lib_filter = LibFilter::All;
                 }
@@ -277,22 +287,36 @@ impl App {
                     Fullscreen::None
                 } else {
                     Fullscreen::Viz
-                }
+                };
+                self.needs_redraw = true;
             }
             Action::VizToggle => {
                 self.show_viz = !self.show_viz;
                 self.viz.paused = !self.show_viz;
+                self.needs_redraw = true;
             }
             Action::ArtMode => {
                 let next = self.art_mode.next();
                 self.set_art_mode(next);
             }
+            Action::OpenTrim => {
+                if self.now.track.is_some() {
+                    self.overlay = Overlay::Trim;
+                } else {
+                    self.toast("no hay nada sonando", ToastKind::Warn);
+                }
+            }
+            Action::TrimStart => self.trim_start_here(),
+            Action::TrimEnd => self.trim_end_here(),
+            Action::TrimClear => self.clear_trim(),
+            Action::TrimClose => self.overlay = Overlay::None,
             Action::ArtFullscreen => {
                 self.fullscreen = if self.fullscreen == Fullscreen::Art {
                     Fullscreen::None
                 } else {
                     Fullscreen::Art
-                }
+                };
+                self.needs_redraw = true;
             }
             Action::SelectRow(index) => {
                 self.selected = index.min(self.view.len().saturating_sub(1));

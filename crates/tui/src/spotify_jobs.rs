@@ -396,7 +396,9 @@ impl DiscordPresence {
             start_ms: Some(start),
             end_ms: (duration > 0).then_some(start + duration),
             large_image: track.art_url.clone(),
-            large_text: track.album.clone(),
+            // Discord pinta `large_text` como una tercera línea en algunos
+            // clientes; con el álbum repetía el título. El álbum ya va en state.
+            large_text: None,
             small_image: (!self.small_image.is_empty()).then(|| self.small_image.clone()),
             small_text: Some("spote".to_string()),
             buttons,

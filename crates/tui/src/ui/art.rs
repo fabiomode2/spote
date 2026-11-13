@@ -117,7 +117,7 @@ pub(super) fn draw_art(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
     app.set_art_size_hint(rect.width, rect.height);
     app.ensure_art();
     let mode = app.art_mode;
-    if matches!(mode, ArtMode::Plain | ArtMode::Half) && app.art.is_some() {
+    if mode == ArtMode::Plain && app.art.is_some() {
         // El backend de imágenes (Kitty) coloca la foto real encima del
         // half-block; en terminales sin soporte se queda el fallback.
         app.art_visible_rect = Some(rect);

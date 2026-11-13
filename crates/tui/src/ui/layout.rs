@@ -228,7 +228,7 @@ impl Layout {
             return out;
         }
         if out.center.width >= 82 && inner_h >= 12 {
-            let max_art_w = (out.center.width.saturating_sub(44))
+            let max_art_w = (out.center.width.saturating_sub(32))
                 .min((out.center.width as u32 * cfg.art_size.clamp(40, 100) as u32 / 100) as u16);
             let mut art_w = (inner_h * 2).min(max_art_w.max(24));
             let mut art_h = (art_w / 2).min(inner_h);

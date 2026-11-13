@@ -5,6 +5,7 @@ impl App {
     /// Entrar en una pestaña con Tab es equivalente a pulsarla en la barra:
     /// la biblioteca siempre arranca en «todo», no en el filtro que quedó.
     fn enter_tab(&mut self) {
+        self.needs_redraw = true;
         if self.tab == Tab::Library {
             self.lib_filter = LibFilter::All;
             self.selected = 0;
@@ -124,6 +125,7 @@ impl App {
                 self.tab = Tab::Search;
                 self.search.results.clear();
                 self.search.query.clear();
+                self.needs_redraw = true;
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('e') if !upper => self.overlay = Overlay::Effects,
@@ -267,6 +269,7 @@ impl App {
                 } else {
                     Fullscreen::Art
                 };
+                self.needs_redraw = true;
             }
             KeyCode::Char('v') if !upper => {
                 if self.show_viz {
@@ -281,8 +284,16 @@ impl App {
                 } else {
                     Fullscreen::Viz
                 };
+                self.needs_redraw = true;
             }
             KeyCode::Char('i') => self.set_zen(!self.zen),
+            KeyCode::Char('T') if self.tab == Tab::Now => self.overlay = Overlay::Trim,
+            KeyCode::Char('t')
+                if self.tab == Tab::Now
+                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                self.overlay = Overlay::Trim
+            }
             KeyCode::Char('N') => self.open_playlist_form(),
             KeyCode::Char('[') => self.cycle_filter(-1),
             KeyCode::Char(']') => self.cycle_filter(1),

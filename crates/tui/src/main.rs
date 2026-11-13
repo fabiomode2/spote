@@ -621,14 +621,6 @@ fn run_tui(args: Args) -> Result<()> {
     if ArtMode::from_str(&cfg.ui.art_mode).is_none() {
         cfg.ui.art_mode = "plain".into();
     }
-    // Migración suave del default viejo: la rotación venía activada de fábrica
-    // y molestaba. Solo se apaga si la config parece la de antes.
-    if cfg.ui.art_rotate && cfg.ui.art_mode == "half" && cfg.ui.art_rotate_secs == 24 {
-        cfg.ui.art_rotate = false;
-        cfg.ui.art_mode = "plain".into();
-        let _ = cfg.save();
-    }
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -691,6 +683,11 @@ fn event_loop(
         *last = now;
 
         app.tick(dt);
+        if app.needs_redraw {
+            app.needs_redraw = false;
+            terminal.clear()?;
+            hires.reset(&mut stdout);
+        }
         terminal.draw(|frame| {
             let area = frame.area();
             let buffer = frame.buffer_mut();
@@ -713,6 +710,7 @@ fn event_loop(
                     Event::Mouse(mouse) => app.on_mouse(mouse),
                     Event::Resize(_, _) => {
                         app.art_key.clear();
+                        app.request_redraw();
                     }
                     _ => {}
                 }
@@ -803,7 +801,7 @@ fn run_discord(args: &Args) -> Result<()> {
                 ),
                 end_ms: None,
                 large_image: track.art_url.clone(),
-                large_text: track.album.clone(),
+                large_text: None,
                 small_image: None,
                 small_text: Some("spote".into()),
                 buttons: track

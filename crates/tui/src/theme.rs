@@ -126,7 +126,7 @@ impl Pulse {
     }
 
     pub fn update(&mut self, dt: f32) {
-        self.value *= (-dt / 0.16).exp();
+        self.value *= (-dt / 0.30).exp();
         if self.value < 0.001 {
             self.value = 0.0;
         }

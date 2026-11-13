@@ -3,6 +3,11 @@ use super::*;
 
 pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let overlay = app.overlay.clone();
+    if overlay != Overlay::None {
+        // Velo de fondo sólido: los overlays antiguos dejaban traslucir la
+        // lista de debajo en terminales con celdas de fondo incompletas.
+        fill_soft(buf, layout.full, pal.bg_deep, 0.88, pal.bg_deep);
+    }
     match overlay {
         Overlay::None => {}
         Overlay::Help => draw_help(app, buf, layout, pal),
@@ -19,6 +24,7 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::Context => draw_context(app, buf, layout, pal),
         Overlay::Artist => draw_artist(app, buf, layout, pal),
         Overlay::Album => draw_album_page(app, buf, layout, pal),
+        Overlay::Trim => draw_trim(app, buf, layout, pal),
     }
 }
 
@@ -218,6 +224,8 @@ pub(super) fn overlay_frame(layout: &Layout, pal: &Palette, buf: &mut Buffer, wi
     );
     fill(buf, shadow, pal.bg_deep);
     fill(buf, rect, mix(pal.bg, pal.surface, 1.0));
+    mark_redraw(buf, shadow);
+    mark_redraw(buf, rect);
     panel(None, buf, rect, pal, true, 0.0, Some(title), 0.0);
     // La capa interior vuelve a rellenarse por si el borde dejó huecos.
     let inner = Rect::new(
@@ -227,7 +235,23 @@ pub(super) fn overlay_frame(layout: &Layout, pal: &Palette, buf: &mut Buffer, wi
         rect.height.saturating_sub(2),
     );
     fill(buf, inner, mix(pal.bg, pal.surface, 1.0));
+    mark_redraw(buf, inner);
     rect
+}
+
+/// Fuerza a que el terminal reescriba estas celdas: al abrir menús/overlays,
+/// el diff incremental puede dejar restos del contenido anterior en algunas
+/// terminales con gráficos Kitty.
+fn mark_redraw(buf: &mut Buffer, rect: Rect) {
+    let area = *buf.area();
+    let clip = rect.intersection(area);
+    let width = area.width as usize;
+    for y in clip.y..clip.y + clip.height {
+        let start = (y - area.y) as usize * width + (clip.x - area.x) as usize;
+        for cell in &mut buf.content[start..start + clip.width as usize] {
+            cell.diff_option = ratatui::buffer::CellDiffOption::AlwaysUpdate;
+        }
+    }
 }
 
 pub(super) fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
@@ -540,6 +564,84 @@ fn context_label(action: crate::app::ContextAction) -> &'static str {
         ClearQueue => "vaciar la cola",
         Open => "abrir",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Recorte de intro/outro
+// ---------------------------------------------------------------------------
+
+pub(super) fn draw_trim(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let rect = overlay_frame(layout, pal, buf, 88, 12, "recorte · intro / outro");
+    let inner = inset(rect, 3, 2);
+    let position = app.display_position_ms();
+    let start = if app.trim_start_ms > 0 {
+        spote_core::util::format_ms(app.trim_start_ms)
+    } else {
+        "0:00".to_string()
+    };
+    let end = app
+        .trim_end_ms
+        .map(spote_core::util::format_ms)
+        .unwrap_or_else(|| "fin".to_string());
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        format!("posición {pos}  ·  recorte {start}–{end}", pos = spote_core::util::format_ms(position)),
+        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        "marca el punto actual como inicio o fin; se guarda por pista y se puede quitar",
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+    // Barra visual con marcas de inicio/fin y el playhead.
+    let bar = Rect::new(inner.x, inner.y + 3, inner.width, 1);
+    let duration = app.now.duration_ms.max(1);
+    let start_pct = (app.trim_start_ms as f32 / duration as f32).clamp(0.0, 1.0);
+    let end_pct = app
+        .trim_end_ms
+        .map(|ms| (ms as f32 / duration as f32).clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    let pos_pct = (position as f32 / duration as f32).clamp(0.0, 1.0);
+    for x in 0..bar.width {
+        let t = (x as f32 + 0.5) / bar.width.max(1) as f32;
+        let inside = t >= start_pct && t <= end_pct;
+        let color_fg = if inside { pal.primary } else { pal.border_dim };
+        put(buf, bar.x + x, bar.y, if inside { "━" } else { "─" }, color(color_fg), None);
+    }
+    for (pct, glyph, fg) in [
+        (start_pct, "┃", pal.warn),
+        (end_pct, "┃", pal.warn),
+        (pos_pct, "◆", pal.text),
+    ] {
+        let x = bar.x + (pct * bar.width.saturating_sub(1) as f32) as u16;
+        put(buf, x.min(bar.x + bar.width - 1), bar.y, glyph, color(fg), None);
+    }
+    let mut x = inner.x;
+    for (label, action, fg) in [
+        ("a  marcar inicio", Action::TrimStart, pal.primary),
+        ("b  marcar fin", Action::TrimEnd, pal.primary),
+        ("c  quitar recorte", Action::TrimClear, pal.warn),
+        ("esc cerrar", Action::TrimClose, pal.dim),
+    ] {
+        let width = label.chars().count() as u16 + 3;
+        let chip = Rect::new(x, inner.y + 6, width, 1);
+        let hover = app.hover == Some(action.clone());
+        fill(buf, chip, if hover { pal.surface_alt } else { pal.surface });
+        text_at(buf, chip, label, Style::new().fg(color(fg)), Alignment::Center);
+        app.hit.add(chip, action);
+        x += width + 2;
+    }
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 8, inner.width, 1),
+        "atajos: home inicio · end fin · backspace quitar · esc cerrar",
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
 }
 
 // ---------------------------------------------------------------------------

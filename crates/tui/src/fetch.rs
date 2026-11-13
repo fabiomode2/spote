@@ -230,7 +230,7 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
     }
     // La imagen original solo interesa para la portada grande en Kitty. Se
     // convierte a PNG una vez por cambio, no por frame.
-    if matches!(request.mode, ArtMode::Plain | ArtMode::Half)
+    if request.mode == ArtMode::Plain
         && request.w >= 24
         && request.h >= 12
     {
@@ -283,14 +283,20 @@ pub enum LyricsMsg {
     },
 }
 
+#[derive(Debug, Clone)]
+pub struct LyricsRequest {
+    pub track: TrackRef,
+    pub audio: Option<PathBuf>,
+}
+
 pub struct LyricsWorker {
-    requests: Sender<TrackRef>,
+    requests: Sender<LyricsRequest>,
     responses: Receiver<LyricsMsg>,
 }
 
 impl LyricsWorker {
     pub fn start(cfg: spote_core::config::LyricsCfg) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<TrackRef>();
+        let (tx, rx) = std::sync::mpsc::channel::<LyricsRequest>();
         let (response_tx, response_rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("spote-lyrics".into())
@@ -302,8 +308,11 @@ impl LyricsWorker {
                     return;
                 };
                 let service = LyricsService::from_config(&cfg);
-                while let Ok(track) = rx.recv() {
-                    let result = runtime.block_on(service.fetch(&track));
+                while let Ok(request) = rx.recv() {
+                    let track = request.track;
+                    let result = runtime.block_on(
+                        service.fetch_with_audio(&track, request.audio.as_deref()),
+                    );
                     let message = match result {
                         Ok(Some(doc)) => LyricsMsg::Loaded {
                             key: track.key.clone(),
@@ -336,8 +345,8 @@ impl LyricsWorker {
         }
     }
 
-    pub fn request(&self, track: TrackRef) {
-        let _ = self.requests.send(track);
+    pub fn request(&self, track: TrackRef, audio: Option<PathBuf>) {
+        let _ = self.requests.send(LyricsRequest { track, audio });
     }
 
     pub fn try_recv(&self) -> Option<LyricsMsg> {

@@ -38,6 +38,10 @@ const PAUSE: &str = "⏸";
 
 pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     app.art_visible_rect = None;
+    if app.overlay != app.overlay_seen {
+        app.overlay_seen = app.overlay.clone();
+        app.needs_redraw = true;
+    }
     // El fondo limpia y rellena todo el buffer de una pasada: `reset` + fondo
     // era recorrer la pantalla dos veces cada frame.
     // El mismo reparto en todas las vistas: si cambia, la interfaz "salta" al
@@ -58,7 +62,15 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     app.hit.clear();
     let pal = *app.palette.current();
 
-    background(buf, area, &pal, app.intro);
+    background(
+        buf,
+        area,
+        &pal,
+        app.intro,
+        app.audio.bass,
+        app.audio.kick_pulse,
+        app.song_intensity,
+    );
     // Fondo ambiental: un efecto ruidoso (void/neural/glitch/aurora) a baja
     // opacidad detrás de los paneles. Los paneles son translúcidos, así que se
     // lee a través de ellos sin quitar legibilidad.
@@ -69,9 +81,8 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             _ => {
                 let w = (area.width / 2).max(12);
                 let h = (area.height / 2).max(6);
-                let dt = 1.0 / app.fps.value().max(1.0);
                 let audio = app.audio.clone();
-                app.ambient.render(w, h, &audio, &pal, dt);
+                app.ambient.render(w, h, &audio, &pal, app.last_dt);
                 blit_layer(
                     &app.ambient.output,
                     buf,
@@ -95,7 +106,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             layout.full.height.max(6),
             audio,
             &pal,
-            1.0 / app.fps.value().max(1.0),
+            app.last_dt,
         );
         // En zen el visualizador es el protagonista: más opaco y sin paneles.
         if zen {
@@ -108,6 +119,20 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     }
     if layout.main.width < 20 {
         draw_too_small(buf, area, &pal);
+        return;
+    }
+
+    // Visualizador a pantalla completa: el efecto manda. Si se sigue pintando
+    // la vista "ahora" detrás, la portada se queda en half-block (la imagen
+    // Kitty está desactivada en este modo) y parece pixelada.
+    if app.fullscreen == crate::app::Fullscreen::Viz {
+        if layout.transport.height > 0 {
+            draw_transport(app, buf, &layout, &pal);
+        }
+        if layout.hint.height > 0 {
+            draw_hint(app, buf, &layout, &pal);
+        }
+        draw_overlay(app, buf, &layout, &pal);
         return;
     }
 
@@ -297,7 +322,7 @@ fn truncate_chars(text: &mut String, max: usize) {
 /// Icono/etiqueta corta del proveedor de la fuente descargada.
 fn source_tag(provider: Option<&str>) -> &'static str {
     match provider.unwrap_or("") {
-        "youtube" | "yt" | "yt-dlp" => "▶",
+        "youtube" | "yt" | "ytmusic" | "yt-dlp" => "▶",
         "soundcloud" | "sc" => "☁",
         "spotify" => "●",
         "deezer" | "dz" => "◆",
@@ -428,20 +453,36 @@ fn text_at(buf: &mut Buffer, rect: Rect, text: impl Into<String>, s: Style, alig
     line_at(buf, rect, vec![Span::styled(text.into(), s)], align);
 }
 
-fn background(buf: &mut Buffer, area: Rect, pal: &Palette, intro: f32) {
+fn background(
+    buf: &mut Buffer,
+    area: Rect,
+    pal: &Palette,
+    intro: f32,
+    bass: f32,
+    kick: f32,
+    song: f32,
+) {
     let intro = ease_out_cubic(intro);
     let buf_area = *buf.area();
     let width = buf_area.width as usize;
     let height = area.height.min(buf_area.height) as usize;
+    // Luz de ambiente en los bordes: no es un pulso de un frame, sube con el
+    // bajo y se queda unos instantes para que la pantalla "respire" con la
+    // canción. Los paneles tapan el centro y dejan ver el marco.
+    let glow = (bass * 0.10 + kick * 0.08 + song * 0.06).clamp(0.0, 0.16);
     for row in 0..height {
         let y = area.y + row as u16;
         let t = row as f32 / height.max(1) as f32;
         let base = mix_oklab(pal.bg_deep, pal.bg, t * 0.8);
         let base = mix_oklab(pal.bg_deep, base, intro);
-        let fg = color(base);
         let start = (y - buf_area.y) as usize * width;
         let range = start..start + width;
-        for cell in &mut buf.content[range] {
+        let edge_y = ((t * 2.0 - 1.0).abs()).powf(1.7);
+        for (column, cell) in buf.content[range].iter_mut().enumerate() {
+            let nx = column as f32 / width.max(1) as f32;
+            let edge = edge_y.max(((nx * 2.0 - 1.0).abs()).powf(1.7));
+            let lit = mix(base, pal.primary, glow * (0.20 + edge * 0.80));
+            let fg = color(lit);
             cell.set_symbol(" ");
             cell.set_fg(fg);
             cell.set_bg(fg);
@@ -566,7 +607,7 @@ fn panel(app: Option<&App>, buf: &mut Buffer, rect: Rect, pal: &Palette, active:
     let border = if app.is_some_and(|app| app.cfg.ui.fx.instrument_borders) {
         // Un mínimo de tinte hace que los bordes se vean incluso entre golpes;
         // antes solo cambiaban durante un pico y parecían estáticos.
-        let glow = (0.10 + hit * 0.85 + pulse * 0.18 + song * 0.12).min(0.95);
+        let glow = (0.18 + hit * 0.82 + pulse * 0.22 + song * 0.15).min(1.0);
         mix_oklab(base_border, accent, glow)
     } else {
         base_border

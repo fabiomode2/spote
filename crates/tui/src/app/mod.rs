@@ -157,6 +157,8 @@ pub enum Overlay {
     Artist,
     /// Álbum abierto (biblioteca o catálogo remoto).
     Album,
+    /// Editor de recorte de intro/outro.
+    Trim,
 }
 
 /// Campos del formulario de lista nueva. `field` marca dónde está el cursor.
@@ -223,6 +225,11 @@ pub enum Action {
     AlbumPageDownload,
     AlbumPageSave,
     AlbumPageClose,
+    OpenTrim,
+    TrimStart,
+    TrimEnd,
+    TrimClear,
+    TrimClose,
     ContextSelect(usize),
     SearchPlay(usize),
     PlayRow(usize),
@@ -307,16 +314,37 @@ pub struct Toast {
     pub created: Instant,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NowPlaying {
     pub track: Option<TrackRef>,
     pub path: Option<PathBuf>,
     pub position_ms: u64,
     pub duration_ms: u64,
+    /// Última posición recibida del reproductor y cuándo, para interpolar el
+    /// playhead entre eventos sin que la barra vaya a saltos.
+    pub position_at: Instant,
+    pub position_seen_ms: u64,
     pub playing: bool,
     pub volume: f32,
     pub loading: bool,
     pub message: String,
+}
+
+impl Default for NowPlaying {
+    fn default() -> Self {
+        Self {
+            track: None,
+            path: None,
+            position_ms: 0,
+            duration_ms: 0,
+            position_at: Instant::now(),
+            position_seen_ms: 0,
+            playing: false,
+            volume: 0.0,
+            loading: false,
+            message: String::new(),
+        }
+    }
 }
 
 /// Entrada aplanada de la búsqueda mixta (artistas, álbumes y pistas).
@@ -389,6 +417,7 @@ impl ThumbMode {
 pub enum SettingRow {
     Rotate,
     RotateSecs,
+    RotateOff,
     ArtMode,
     VizPreset,
     Ambient,
@@ -413,9 +442,10 @@ pub enum SettingRow {
 }
 
 impl SettingRow {
-    pub const ALL: [SettingRow; 23] = [
+    pub const ALL: [SettingRow; 24] = [
         Self::Rotate,
         Self::RotateSecs,
+        Self::RotateOff,
         Self::ArtMode,
         Self::VizPreset,
         Self::Ambient,
@@ -443,6 +473,7 @@ impl SettingRow {
         match self {
             Self::Rotate => "rotación de arte",
             Self::RotateSecs => "rotar cada",
+            Self::RotateOff => "rotación incluye off",
             Self::ArtMode => "modo de arte",
             Self::VizPreset => "efecto inferior",
             Self::Ambient => "fondo ambiental",
@@ -661,6 +692,8 @@ pub struct App {
     pub focus: Pane,
     pub fullscreen: Fullscreen,
     pub overlay: Overlay,
+    /// Último overlay pintado; al cambiar se fuerza un repintado completo.
+    pub overlay_seen: Overlay,
     pub show_viz: bool,
 
     pub name: String,
@@ -689,6 +722,10 @@ pub struct App {
     pub lyrics_key: String,
     pub lyrics_loading: bool,
     pub lyrics_offset_ms: i64,
+    /// Desplazamiento calculado con el mapa de audio (no persistido).
+    pub lyrics_auto_offset: Option<i64>,
+    /// Pistas cuya letra sin sincronizar ya se intentó mejorar en esta sesión.
+    pub lyrics_retry: std::collections::HashSet<String>,
     pub trim_start_ms: u64,
     pub trim_end_ms: Option<u64>,
     pub lyrics_scroll: Spring,
@@ -707,12 +744,15 @@ pub struct App {
     pub art_fade: f32,
     pub art_fade_active: bool,
     pub art_rotate: bool,
+    pub art_rotate_off: bool,
     pub art_next_at: Instant,
     pub art_variants: std::collections::HashMap<ArtMode, CoverArt>,
     /// PNG de la portada actual para el protocolo de Kitty (full-res).
     pub art_png: Option<Vec<u8>>,
     pub art_png_key: String,
     pub art_png_size: Option<(u32, u32)>,
+    /// Tamaño de celda con el que se generó el PNG actual.
+    pub art_png_hint: (u16, u16),
     /// Rect que ocupa la portada en pantalla este frame; lo consume `hires`.
     pub art_visible_rect: Option<Rect>,
     pub thumbs: std::collections::HashMap<String, CoverArt>,
@@ -739,6 +779,9 @@ pub struct App {
     pub viz: Viz,
     pub fps: FpsMeter,
     pub frame_ms: f32,
+    /// Delta real del último tick; los efectos lo usan para no cambiar de
+    /// velocidad cuando el terminal pierde algún frame.
+    pub last_dt: f32,
     pub pulse: Pulse,
     pub intro: f32,
     pub hit: HitMap,
@@ -777,6 +820,8 @@ pub struct App {
     pub last_spotify_poll: Instant,
     pub spotify_warned: bool,
     pub should_quit: bool,
+    /// Fuerza un repintado completo en el siguiente frame (cambios de layout).
+    pub needs_redraw: bool,
     pub spectrum_at: Instant,
 }
 
@@ -823,9 +868,11 @@ impl App {
             focus: Pane::Center,
             fullscreen: Fullscreen::None,
             overlay: Overlay::None,
+            overlay_seen: Overlay::None,
             show_viz: cfg.ui.viz_enabled,
             now: NowPlaying {
                 volume: player_volume,
+                position_at: Instant::now(),
                 ..Default::default()
             },
             volume_before_mute: player_volume,
@@ -850,6 +897,8 @@ impl App {
             lyrics_key: String::new(),
             lyrics_loading: false,
             lyrics_offset_ms: 0,
+            lyrics_auto_offset: None,
+            lyrics_retry: std::collections::HashSet::new(),
             trim_start_ms: 0,
             trim_end_ms: None,
             lyrics_scroll: Spring::new(0.0),
@@ -867,11 +916,13 @@ impl App {
             art_fade: 1.0,
             art_fade_active: false,
             art_rotate: cfg.ui.art_rotate,
+            art_rotate_off: cfg.ui.art_rotate_off,
             art_next_at: Instant::now() + std::time::Duration::from_secs(cfg.ui.art_rotate_secs.max(5)),
             art_variants: std::collections::HashMap::new(),
             art_png: None,
             art_png_key: String::new(),
             art_png_size: None,
+            art_png_hint: (0, 0),
             art_visible_rect: None,
             thumbs: std::collections::HashMap::new(),
             thumb_requests: std::collections::HashSet::new(),
@@ -896,6 +947,7 @@ impl App {
             viz,
             fps: FpsMeter::new(),
             frame_ms: 0.0,
+            last_dt: 1.0 / 120.0,
             pulse: Pulse::default(),
             intro: 0.0,
             hit: HitMap::default(),
@@ -932,6 +984,7 @@ impl App {
             last_spotify_poll: Instant::now(),
             spotify_warned: false,
             should_quit: false,
+            needs_redraw: false,
             spectrum_at: Instant::now(),
             cfg: cfg.clone(),
         };
@@ -1088,6 +1141,7 @@ impl App {
             self.set_status("mpv no disponible: modo visual");
         }
         self.lyrics_offset_ms = self.lib.lyrics_offset(&track.key).unwrap_or(0);
+        self.lyrics_auto_offset = None;
         self.lyrics = None;
         self.lyrics_status.clear();
         self.lyrics_key.clear();
@@ -1099,6 +1153,7 @@ impl App {
         self.art_png = None;
         self.art_png_key.clear();
         self.art_png_size = None;
+        self.art_png_hint = (0, 0);
         self.art_request_key.clear();
         self.art_request_size = (0, 0);
         self.ambient_art = None;
@@ -1372,7 +1427,9 @@ impl App {
         if self.lyrics_loading {
             return;
         }
-        // 1. Cache SQLite.
+        // 1. Cache SQLite. Si es una letra aproximada y hay audio local, se
+        // muestra mientras se reintenta con ASR: las de Genius repartidas a
+        // ojo fueron justo el problema de sincronización.
         if let Ok(Some((lrc, synced, offset))) = self.lib.lyrics(&track.key) {
             let mut doc = LyricsDoc::from_lrc(&lrc, synced);
             doc.offset_ms = offset;
@@ -1380,6 +1437,15 @@ impl App {
             self.lyrics_status = if synced { "lrclib" } else { "aprox" }.to_string();
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
+            let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
+            if !synced && audio.is_some() && !self.lyrics_retry.contains(&track.key) {
+                self.lyrics_retry.insert(track.key.clone());
+                self.lyrics_loading = true;
+                self.lyrics_status = "aproximada · afinando con el audio…".into();
+                self.lyrics_worker.request(track.clone(), audio);
+            } else {
+                return;
+            }
             return;
         }
         // 2. `.lrc` junto al fichero.
@@ -1397,7 +1463,8 @@ impl App {
         // 3. Red.
         self.lyrics_loading = true;
         self.lyrics_status = "buscando letra…".into();
-        self.lyrics_worker.request(track.clone());
+        let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
+        self.lyrics_worker.request(track.clone(), audio);
     }
 
     /// Marca el inicio del recorte en la posición actual (sáltate la intro).
@@ -1544,6 +1611,11 @@ impl App {
 
     // ---------------------------------------------------------------- tick
     pub fn tick(&mut self, dt: f32) {
+        self.last_dt = dt;
+        if self.now.position_ms != self.now.position_seen_ms {
+            self.now.position_seen_ms = self.now.position_ms;
+            self.now.position_at = Instant::now();
+        }
         self.intro = (self.intro + dt * 2.5).min(1.0);
         let fps = self.fps.tick();
         self.frame_ms = if fps > 0.1 { 1000.0 / fps } else { 0.0 };
@@ -1560,7 +1632,10 @@ impl App {
         if self.art_rotate && self.now.track.is_some() && Instant::now() >= self.art_next_at {
             let secs = self.cfg.ui.art_rotate_secs.max(5);
             self.art_next_at = Instant::now() + std::time::Duration::from_secs(secs);
-            let modes = ArtMode::ROTATION;
+            let mut modes = ArtMode::ROTATION.to_vec();
+            if self.art_rotate_off {
+                modes.push(ArtMode::Off);
+            }
             let current = modes.iter().position(|mode| *mode == self.art_mode).unwrap_or(0);
             let next = modes[(current + 1) % modes.len()];
             self.set_art_mode(next);
@@ -1568,7 +1643,9 @@ impl App {
         self.list_scroll.set_target(self.selected as f32);
         self.list_scroll.update(dt);
         if let Some(doc) = &self.lyrics {
-            let index = doc.index_at(self.now.position_ms).unwrap_or(0) as f32;
+            let index = doc
+                .index_at(self.display_position_ms())
+                .unwrap_or(0) as f32;
             self.lyrics_scroll.set_target(index);
         }
         self.lyrics_scroll.update(dt);
@@ -1838,11 +1915,12 @@ impl App {
         if (response.w, response.h) != self.art_size_hint {
             return;
         }
-        if matches!(response.mode, ArtMode::Plain | ArtMode::Half) {
+        if response.mode == ArtMode::Plain {
             if response.png.is_some() {
                 self.art_png = response.png.take();
                 self.art_png_key = response.key.clone();
                 self.art_png_size = response.png_size;
+                self.art_png_hint = (response.w, response.h);
             }
         }
         if let Some(palette) = response.palette {
@@ -1889,6 +1967,7 @@ impl App {
                     self.song_section = map.section_at(self.now.position_ms).map(|s| s.kind);
                     self.song_map = Some(map);
                     self.song_map_key = key;
+                    self.apply_auto_lyrics_offset();
                     self.refine_lyrics_words();
                 }
                 SongMapEvent::Failed { key, error } => {
@@ -2024,6 +2103,35 @@ impl App {
         }
     }
 
+    /// Ajusta la letra al audio solo cuando el mapa ya está listo y no hay un
+    /// offset manual guardado. El cálculo es conservador; si no hay evidencia
+    /// clara, se deja el LRC tal cual.
+    fn apply_auto_lyrics_offset(&mut self) {
+        if self.lyrics_offset_ms != 0 || self.lyrics_auto_offset.is_some() {
+            return;
+        }
+        let Some(map) = self.song_map.clone() else { return };
+        let Some(doc) = self.lyrics.as_mut() else { return };
+        if doc.offset_ms != 0
+            || doc.aligned
+            || doc.source == spote_core::lyrics::LyricsSource::Local
+        {
+            return;
+        }
+        let Some(offset) = doc.estimate_offset_from_map(&map) else {
+            return;
+        };
+        doc.offset_ms = offset;
+        self.lyrics_auto_offset = Some(offset);
+        self.toast(
+            format!(
+                "letra ajustada al audio ({:+.1} s); shift/alt+clic para afinar",
+                offset as f32 / 1000.0
+            ),
+            ToastKind::Info,
+        );
+    }
+
     fn poll_lyrics(&mut self) {
         while let Some(message) = self.lyrics_worker.try_recv() {
             match message {
@@ -2050,11 +2158,17 @@ impl App {
                             doc.offset_ms = self.lyrics_offset_ms;
                             self.lyrics = Some(doc);
                             self.lyrics_key = key;
+                            self.apply_auto_lyrics_offset();
                             self.refine_lyrics_words();
                         }
                         None => {
-                            self.lyrics = None;
-                            self.lyrics_status = error.unwrap_or_else(|| "sin letra".into());
+                            if self.lyrics_key == key && self.lyrics.is_some() {
+                                self.lyrics_status = error
+                                    .unwrap_or_else(|| "letra aproximada (sin mejorar)".into());
+                            } else {
+                                self.lyrics = None;
+                                self.lyrics_status = error.unwrap_or_else(|| "sin letra".into());
+                            }
                         }
                     }
                 }
@@ -2238,6 +2352,9 @@ impl App {
             self.art_key.clear();
             self.art_png = None;
             self.art_png_key.clear();
+            self.art_png_size = None;
+            self.art_png_hint = (0, 0);
+            self.art_visible_rect = None;
             return;
         }
         let (w, h) = self.art_size_hint;
@@ -2251,11 +2368,15 @@ impl App {
             self.art_prev = None;
             self.art_fade_active = false;
             self.art_variants.clear();
+            self.art_png = None;
+            self.art_png_key.clear();
+            self.art_png_size = None;
+            self.art_png_hint = (0, 0);
         }
-        let needs_png = matches!(mode, ArtMode::Plain | ArtMode::Half)
+        let needs_png = mode == ArtMode::Plain
             && w >= 24
             && h >= 12
-            && self.art_png.is_none();
+            && (self.art_png.is_none() || self.art_png_hint != (w, h));
         let same = self.art_key == track.key
             && self.art_size == (w, h)
             && self.art_mode_seen == mode
@@ -2372,6 +2493,12 @@ impl App {
             self.art_fade_active = false;
             self.art_request_key.clear();
             self.art_request_size = (0, 0);
+            // El PNG anterior tiene otra geometría; usarlo estirado en
+            // pantalla completa es justo lo que se veía pixelado.
+            self.art_png = None;
+            self.art_png_key.clear();
+            self.art_png_size = None;
+            self.art_png_hint = (0, 0);
         }
     }
 
@@ -2445,6 +2572,13 @@ impl App {
         self.cfg.save().ok();
         self.art_request_key.clear();
         self.art_request_size = (0, 0);
+        if mode != ArtMode::Plain {
+            self.art_png = None;
+            self.art_png_key.clear();
+            self.art_png_size = None;
+            self.art_png_hint = (0, 0);
+            self.art_visible_rect = None;
+        }
         if mode == ArtMode::Off {
             self.art_prev = self.art.take();
             self.art_prev_mode = self.art_mode_seen;
@@ -2653,6 +2787,8 @@ impl App {
         self.now.duration_ms = track.duration_ms;
         self.set_status("descargando…");
         self.lyrics = None;
+        self.lyrics_auto_offset = None;
+        self.lyrics_key.clear();
         self.load_lyrics(&track);
     }
 
@@ -2707,7 +2843,11 @@ impl App {
     /// Posición actual lista para pintar (incluye el drag en curso).
     pub fn display_position_ms(&self) -> u64 {
         if let Some(ratio) = self.drag_ratio {
-            (self.now.duration_ms as f32 * ratio) as u64
+            return (self.now.duration_ms as f32 * ratio) as u64;
+        }
+        if self.now.playing && self.now.position_at.elapsed().as_millis() < 500 {
+            let elapsed = self.now.position_at.elapsed().as_millis() as u64;
+            (self.now.position_ms + elapsed).min(self.now.duration_ms.max(1))
         } else {
             self.now.position_ms
         }

@@ -331,7 +331,8 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         (position as f32 / duration as f32).clamp(0.0, 1.0)
     };
     let pulse = (app.pulse.eased() * 0.45 + app.audio.kick_pulse * 0.55).min(1.0);
-    let progress_row = rect.height >= 2 && !app.progress_in_viz;
+    let progress_row =
+        rect.height >= 2 && (!app.progress_in_viz || layout.viz.height < 2);
     if app.progress_in_viz && layout.viz.height >= 2 {
         let y = layout.viz.y + layout.viz.height / 2;
         let width = bar_width(rect.width, app.bar_width_pct);
@@ -707,6 +708,26 @@ pub(super) fn draw_progress_bar(
         Rect::new(bar_rect.x, bar_rect.y, bar_rect.width, 1),
         Action::SeekTo(position),
     );
+    // Marcas del recorte visibles siempre en la barra.
+    let duration = app.now.duration_ms.max(1);
+    for ms in [
+        (app.trim_start_ms > 0).then_some(app.trim_start_ms),
+        app.trim_end_ms,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let pct = (ms as f32 / duration as f32).clamp(0.0, 1.0);
+        let x = bar_rect.x + (pct * bar_rect.width.saturating_sub(1) as f32) as u16;
+        put(
+            buf,
+            x.min(bar_rect.x + bar_rect.width.saturating_sub(1)),
+            bar_rect.y,
+            "┃",
+            color(pal.warn),
+            None,
+        );
+    }
 
     if bar_rect.x > 8 {
         text_at(

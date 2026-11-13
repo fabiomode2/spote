@@ -134,6 +134,8 @@ pub struct UiCfg {
     /// Rota el arte de la portada entre modos con disolución progresiva.
     pub art_rotate: bool,
     pub art_rotate_secs: u64,
+    /// Incluye `off` en la rotación (por defecto se salta).
+    pub art_rotate_off: bool,
     /// Lista en tarjetas de 3 filas con miniatura de portada.
     pub list_cards: bool,
     /// Visualizador como fondo de toda la UI, no solo en la franja.
@@ -264,7 +266,7 @@ pub struct FxCfg {
 impl Default for FxCfg {
     fn default() -> Self {
         Self {
-            ambient: "void".into(),
+            ambient: "cover".into(),
             ambient_opacity: 16,
             instrument_borders: true,
             edge_flame: true,
@@ -287,6 +289,7 @@ impl Default for UiCfg {
             follow_spotify: false,
             art_rotate: false,
             art_rotate_secs: 24,
+            art_rotate_off: false,
             list_cards: false,
             viz_background: false,
             vcenter: true,
@@ -336,9 +339,6 @@ impl Config {
                     cfg.ui.layout = LayoutCfg::default();
                     cfg.ui.layout.vcenter = true;
                     cfg.ui.art_rotate = false;
-                    if cfg.ui.art_mode == "half" {
-                        cfg.ui.art_mode = "plain".into();
-                    }
                     if cfg.ui.thumb_mode == "off" {
                         cfg.ui.thumb_mode = "plain".into();
                     }

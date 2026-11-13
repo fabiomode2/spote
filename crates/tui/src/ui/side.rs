@@ -493,8 +493,7 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     let background_on = app.viz_background && app.show_viz;
     if !background_on {
         let audio = &app.audio;
-        let dt = 1.0 / app.fps.value().max(1.0);
-        app.viz.render(rect.width, rect.height, audio, pal, dt);
+        app.viz.render(rect.width, rect.height, audio, pal, app.last_dt);
         blit_viz(app, buf, rect, 0, 1.0, 0.0, 1);
     } else {
         // El fondo ya renderizó el canvas a pantalla completa: la franja es
@@ -529,7 +528,7 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
 /// solo una franja; `amount` controla cuánto color se suma al fondo.
 /// Cresta de la onda de `clean` derramada sobre los paneles de arriba.
 fn clean_spill(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
-    let spill = 4u16.min(rect.y.saturating_sub(1));
+    let spill = 6u16.min(rect.y.saturating_sub(1));
     if spill == 0 {
         return;
     }
@@ -541,7 +540,7 @@ fn clean_spill(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         let height = level.round() as u16;
         for row in 0..height.min(spill) {
             let y = rect.y - 1 - row;
-            let alpha = 0.58 * (1.0 - row as f32 / spill as f32);
+            let alpha = 0.74 * (1.0 - row as f32 / spill as f32);
             let rgb = mix_oklab(pal.bg_deep, pal.primary, alpha);
             put(buf, x, y, "▁", color(rgb), None);
         }
@@ -555,8 +554,10 @@ fn clean_spill(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
 fn edge_flame(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     let y = rect.y + rect.height.saturating_sub(1);
     let t = app.viz.time;
-    let energy = (app.audio.bass * 0.8 + app.audio.kick_pulse * 0.5)
-        * (0.6 + app.song_intensity * 0.9);
+    let energy = (app.audio.bass * 0.9
+        + app.audio.kick_pulse * 0.75
+        + app.audio.mid * 0.25)
+        * (0.7 + app.song_intensity * 1.1);
     for x in 0..rect.width {
         let nx = x as f32 / rect.width.max(1) as f32;
         let envelope = (1.0 - (nx * 2.0 - 1.0).abs()).max(0.0);

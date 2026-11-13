@@ -33,9 +33,10 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("r", "rotación automática del arte"),
                 ("F", "portada a pantalla completa"),
                 ("i", "zen: solo efectos"),
+                ("T / clic ✂", "abrir editor de recorte"),
                 ("home / end", "recortar intro / outro aquí"),
                 ("backspace", "quitar recorte"),
-                ("shift+clic", "sincronizar la letra con este punto"),
+                ("shift/alt/clic-der", "sincronizar la letra con este punto"),
             ],
         ),
         (
@@ -116,6 +117,12 @@ impl App {
                     Hint { key: "1-9", label: "capas" },
                     Hint { key: "e", label: "cerrar" },
                 ],
+                Overlay::Trim => vec![
+                    Hint { key: "a", label: "marcar inicio" },
+                    Hint { key: "b", label: "marcar fin" },
+                    Hint { key: "c", label: "quitar" },
+                    Hint { key: "esc", label: "cerrar" },
+                ],
                 _ => vec![Hint { key: "esc", label: "cerrar" }],
             };
         }
@@ -125,6 +132,7 @@ impl App {
                 Hint { key: ", .", label: "offset letra" },
                 Hint { key: "↑↓", label: "volumen" },
                 Hint { key: "clic", label: "salta a la frase" },
+                Hint { key: "alt/der", label: "sincronizar letra" },
                 Hint { key: "esc", label: "volver" },
             ];
         }
@@ -138,6 +146,7 @@ impl App {
                     Hint { key: "c", label: "portada" },
                     Hint { key: "C", label: "letra" },
                     Hint { key: "M", label: "arte" },
+                    Hint { key: "T", label: "recorte" },
                     Hint { key: "E", label: "diseño" },
                 ];
                 if self.focus == Pane::Transport {
