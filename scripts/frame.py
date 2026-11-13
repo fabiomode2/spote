@@ -508,7 +508,12 @@ def main() -> int:
         if not data:
             running = False
             return
-        screen.feed(decoder.decode(data))
+        text = decoder.decode(data)
+        raw_out = os.environ.get("SPOTE_RAW_OUT")
+        if raw_out:
+            with open(raw_out, "ab") as fh:
+                fh.write(data)
+        screen.feed(text)
         for response in screen.responses:
             try:
                 os.write(master, response)
@@ -537,6 +542,9 @@ def main() -> int:
                 "right": b"\x1b[C",
                 "left": b"\x1b[D",
                 "backspace": b"\x7f",
+                "delete": b"\x1b[3~",
+                "home": b"\x1b[H",
+                "end": b"\x1b[F",
             }
             payload = mapping.get(name.lower(), name.encode())
             for _ in range(count):

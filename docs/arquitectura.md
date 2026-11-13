@@ -24,6 +24,11 @@ MPRIS, SQLite) vive en un worker.
 | `app/downloads.rs` | estado de descargas y su progreso. |
 | `app/playlists.rs` | formularios de listas, crear/borrar/añadir. |
 | `app/spotify.rs` | modo acompañante por MPRIS. |
+| `app/albums.rs` | página de álbum (biblioteca o catálogo), tracklist, descarga completa y guardar como lista. |
+| `app/artist.rs` | perfil de artista (Spotify/Deezer) y backfill de portada/metadatos. |
+| `app/context.rs` | menú contextual de clic derecho (estado, borrar, descargar, artista). |
+| `app/layout_editor.rs` | editor de diseño en caliente (`E`): paneles, docks y tamaños. |
+| `app/keymap.rs` | fuente única de leyendas y ayuda; la barra inferior no miente. |
 
 Cada frame: `tick()` → sondea workers (`poll_downloads`, `poll_art`,
 `poll_lyrics`, `poll_spotify`, `poll_social`, `poll_spotify_jobs`) → `ui::draw`
@@ -36,11 +41,14 @@ Los workers (`fetch.rs`, `spotify_jobs.rs`, `Downloader`) hablan por canales
 
 | módulo | contiene |
 | --- | --- |
-| `ui/mod.rs` | `Layout`, `draw`, `content_rect`, primitivas (`put`, `fill`, `panel`, `text_at`, `centered`, `truncate_chars`). |
+| `ui/layout.rs` | layout declarativo: `LayoutCfg` → rectángulos, docks, centrado vertical, asas de arrastre y proporción de portada. |
+| `ui/mod.rs` | `draw`, fondo ambiental (void/neural/glitch/cover/lyrics), primitivas (`put`, `fill`, `panel`, `text_at`, `centered`, `truncate_chars`). |
+| `ui/albums.rs` | tarjetas de álbum (1-2 columnas) y detalle con portada. |
+| `hires.rs` | portada PNG real en Kitty (protocolo gráfico, solo cuando cambia). |
 | `ui/art.rs` | portada grande, marco, miniaturas y badges. |
-| `ui/now.rs` | vista «ahora»: cabecera, letra y karaoke. |
-| `ui/lists.rs` | búsqueda, biblioteca, tarjetas y salas. |
-| `ui/side.rs` | cola, sesión y visualizador. |
+| `ui/now.rs` | vista «ahora»: cabecera, letra palabra a palabra, clic para seek y tamaño de letra. |
+| `ui/lists.rs` | búsqueda mixta (artistas/álbumes/pistas), biblioteca, tarjetas y salas. |
+| `ui/side.rs` | cola, amigos/feeling de la canción y visualizador. |
 | `ui/settings.rs` | pestaña de ajustes. |
 | `ui/chrome.rs` | barra superior, navegación, transporte, barra de progreso y leyenda. |
 | `ui/overlays.rs` | ayuda, editor de efectos y formularios modales. |
@@ -81,8 +89,9 @@ gana, así que un botón pequeño debe añadirse **después** de su fila.
 
 ## Reglas
 
-- Un frame no bloquea: presupuesto ~8 ms a 60 fps. Nada de `reqwest`, `yt-dlp`
-  o MPRIS en el hilo de dibujo.
+- Un frame no bloquea: presupuesto ~8 ms a 120 fps. Nada de `reqwest`, `yt-dlp`
+  o MPRIS en el hilo de dibujo. Los contadores y listas de SQLite que se pintan
+  cada frame pasan por una caché corta en `Library`.
 - El texto de usuario se recorta con `truncate_chars`, nunca con
   `String::truncate` (revienta con acentos y emoji).
 - La portada manda: la paleta sale del arte y los colores de la UI se derivan
