@@ -1,0 +1,43 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+authors = ["spote"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "http2", "blocking"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+rustfft = "6"
+ratatui = "0.30"
+crossterm = "0.29"
+uuid = { version = "1", features = ["v4", "serde"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+tokio-tungstenite = "0.30"
+futures-util = "0.3"
+dirs = "6"
+toml = "0.9"
+rand = "0.9"
+zbus = { version = "6", features = ["tokio"] }
+
+[profile.dev]
+# Sin símbolos de depuración: el target de debug pesaba 11 GB y /home está justo.
+debug = 0
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

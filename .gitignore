@@ -1,0 +1,9 @@
+/target
+*.db
+*.db-shm
+*.db-wal
+.venv/
+__pycache__/
+*.png
+*.html
+!docs/**/*.png
