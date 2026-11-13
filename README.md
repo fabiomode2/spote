@@ -55,7 +55,9 @@ name = "tu-nombre"
 invite = "spote"
 
 [ui]
-art_mode = "plain"  # default | pixel | braille | off
+art_mode = "plain"  # default | half | pixel | braille | off
+art_rotate = false  # rotación automática (incluye half)
+art_rotate_off = false  # añadir off a la rotación
 viz = "clean"       # clean, aurora, bloom, inferno (franja inferior)
 fps = 120
 lyrics_size = 1     # 0 compacta, 1 normal, 2 grande
@@ -75,7 +77,7 @@ viz_height = 8
 transport_height = 4
 
 [ui.fx]
-ambient = "lyrics"   # off | void | aurora | neural | glitch | cover | lyrics
+ambient = "cover"    # off | void | aurora | neural | glitch | lyrics | cover
 ambient_opacity = 16
 instrument_borders = true
 edge_flame = true
@@ -94,13 +96,14 @@ cola · `shift ↑/↓` o `, .` mover por la cola · `f` favorita · `/` buscar 
 `V` visualización a pantalla completa · `b` visualizador de fondo ·
 `c` portada a todo el centro · `C`/`l` letra a todo el centro · `e` capas ·
 `M` siguiente modo de arte · `E` editor de diseño · `g` perfil de artista ·
-`r` rotación automática del arte · `z` lista compacta / tarjetas ·
+`r` rotación automática del arte (default/half/pixel/braille) · `z` lista compacta / tarjetas ·
 `F` portada a pantalla completa · `m` mute · `y` copiar letra · `N` crear
 lista · `I` importar lista o álbum de Spotify · `l` añadir a lista · `d`
 borrar lista / bajar álbum · `[` `]` cambiar de filtro/lista · `Delete` o
-clic derecho: acciones de la pista · `Home` / `End` marcan el recorte de
-intro/outro en «ahora» · `Backspace` lo quita · `shift+clic` en una línea de
-la letra la sincroniza con la posición actual · `?` ayuda.
+clic derecho: acciones de la pista · `T` o el chip `✂ recorte` abren el editor
+de intro/outro · `Home` / `End` marcan los puntos · `Backspace` lo quita ·
+`alt/ctrl/shift+clic` o clic derecho en una línea de letra la sincroniza con
+la posición actual · `?` ayuda.
 
 Los nombres de artista y álbum son clicables en la biblioteca, la cola, la
 búsqueda y «ahora»: abren su ficha dentro de spote. En la búsqueda aparecen
@@ -109,13 +112,14 @@ lista compacta.
 
 ## Extras
 
-- **Arte**: los tres modos principales son `default` (foto literal en
-  half-block truecolor), `pixel` (dither de la paleta) y `braille` (tinta
-  adaptativa: invierte portadas claras para que el papel no se llene de
-  puntos). La rotación automática viene apagada; `M` cambia a mano y `r` la
-  activa. En Kitty, `default` transmite la portada original como imagen real
-  a resolución completa mediante el protocolo gráfico del terminal; en otros
-  terminales queda el half-block como fallback.
+- **Arte**: `default` (foto literal en half-block truecolor), `half` (media
+  celda con la paleta, sin imagen Kitty), `pixel` (dither) y `braille` (tinta
+  adaptativa). `off` apaga la portada. La rotación automática viene apagada;
+  `M` cambia a mano y `r` la activa con default/half/pixel/braille. Activa
+  `art_rotate_off` para que `off` también participe. En Kitty, `default`
+  transmite la portada original como imagen real a resolución completa; en
+  otros terminales queda el half-block como fallback. `F` la abre a pantalla
+  completa sin tapar el transporte; `V` es el visualizador.
 - **Miniaturas**: `[ui] thumb_mode = "plain" | "palette" | "off"` (o el ajuste
   «efecto miniaturas»): foto fiel (por defecto), paleta del tema o sin
   miniatura.
@@ -125,14 +129,15 @@ lista compacta.
   bordes, la portada, el playhead y las letras laten con ellos, y el BPM se
   estima con los bombos.
 - **Letras de lyricbar**: si existe `/home/fabio/Code/lyricbar`, spote usa su
-  motor (LRCLIB + Genius + captions) vía `scripts/lyricbar_bridge.py`;
-  `[lyrics] bridge = false` lo desactiva.
+  motor (LRCLIB + Genius + captions) vía `scripts/lyricbar_bridge.py`; si hay
+  audio local, alinea las líneas con faster-whisper (ASR) para que las letras
+  estimadas de Genius no vayan a ojo. `[lyrics] bridge = false` lo desactiva.
 - **Fondo y efectos**: `[ui.fx] ambient` elige `void`, `aurora`, `neural`,
-  `glitch`, `cover` (la portada fundida a pantalla completa) o `lyrics` (la
-  letra actual repetida como textura). Se mezcla solo el fondo de las celdas:
+  `glitch`, `lyrics` (la letra como textura) o `cover` (la portada fundida a
+  pantalla completa, ahora por defecto). Se mezcla solo el fondo de las celdas:
   el texto sigue legible. Los bordes laten con bombo/caja/charles/voz,
   `inferno` asoma como brasa continua en el borde inferior, `bloom` hace de
-  halo del play y `clean` mece dos ondas sobre los paneles.
+  halo del play y `clean` mezcla barras suaves con una marea sobre los paneles.
 - **Zen**: `i` esconde portada y letra y deja la visualización a pantalla
   completa.
 - **Catálogo**: la búsqueda pide metadatos a Spotify (Deezer solo como

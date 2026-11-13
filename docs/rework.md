@@ -6,14 +6,15 @@
   izquierda/derecha, anchos/alto configurables, bloque centrado en vertical
   (`vcenter_pct`) y asas de arrastre. Editor en caliente con `E`; los paneles
   de lista ya no estiran una portada deformada.
-- **Portada**: `default` (foto truecolor), `pixel` y `braille`; rotación
+- **Portada**: `default` (foto truecolor), `half` (media celda con paleta),
+  `pixel` y `braille`; rotación
   apagada por defecto. Braille adaptativo: detecta papel claro/line-art,
   invierte la tinta, usa contraste local y conserva la proporción al cambiar
   de tamaño. En Kitty, `default` se envía como imagen PNG real a resolución
   completa; el half-block queda como fallback. Fondo `cover` fundido a pantalla
-  completa y `lyrics` como textura, ambos mezclando solo el fondo de las
+  completa (por defecto) y `lyrics` como textura, ambos mezclando solo el fondo de las
   celdas para no tapar el texto.
-- **Efectos**: franja reducida a `clean` (marea/onda, sin barras de bloques),
+- **Efectos**: franja reducida a `clean` (barras suaves + marea),
   `aurora`, `bloom` e `inferno`; `void`/`neural`/`glitch` como fondo ambiental
   con opacidad ajustable. Bordes reactivos a bombo/caja/charles/voz, brasa
   continua en el borde inferior, halo de bloom en el play y derrame de `clean`.
@@ -67,3 +68,32 @@
   bloqueado, la discografía sale de Deezer.
 - El mapa de audio decodifica la canción completa con ffmpeg en segundo plano;
   en pistas muy largas tarda unos segundos en aparecer.
+
+## Ronda de pulido (overlays, letras y transporte)
+
+- **Overlays**: fondo sólido + velo completo detrás; las celdas del modal se
+  marcan `AlwaysUpdate` y al abrir/cerrar se fuerza un frame completo. Se
+  acabaron los restos de la vista anterior a través de los bordes.
+- **Letras**: las palabras entre paréntesis son opcionales para el progreso y
+  la línea activa; una línea de adlib nunca roba el turno a la principal. El
+  puente a lyricbar puede alinear la letra contra el audio local con
+  faster-whisper (`aligned=true`) cuando el LRC viene estimado o de Genius.
+  Las letras aproximadas cacheadas se reintentan una vez por sesión si hay
+  audio local. `alt/ctrl/shift+clic` y el clic derecho sincronizan una línea.
+- **Recorte**: chip `✂` en «ahora» y editor `T` con botones para marcar
+  inicio/fin/quitar; marcas `┃` visibles en la barra de progreso.
+- **Arte**: `half` es un modo real (media celda con paleta, sin Kitty) y entra
+  en la rotación; `art_rotate_off` decide si `off` participa. `F` usa la
+  portada full-res dentro del área sobre el transporte; `V` ya no pinta la
+  portada detrás del visualizador (era el pixelado). El PNG se invalida al
+  cambiar de tamaño.
+- **Efectos**: pulsos más largos, brillo de bordes más continuo, luz de fondo
+  ligada al bajo y `clean` recupera barras suaves + marea.
+- **Transporte**: el playhead interpola entre eventos del reproductor y los
+  cambios de layout fuerzan repintado completo para que botones/barra no se
+  queden en posiciones viejas.
+- **Descargas**: matching más estricto por título y artista; tolera intros de
+  hasta 30 s con título exacto y prueba consultas de respaldo (`título`,
+  `título artista`) antes de fallar.
+- **Discord**: se quitó `large_text` del álbum para no duplicar la tercera
+  línea de la actividad.
