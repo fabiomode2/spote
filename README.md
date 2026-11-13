@@ -16,6 +16,8 @@ crates/
 
 ![tarjetas](docs/screenshots/cards.png)
 
+![búsqueda](docs/screenshots/search.png) · ![ajustes](docs/screenshots/settings.png)
+
 ## Requisitos
 
 `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. Para el visualizador con audio del
@@ -84,6 +86,18 @@ letra · `?` ayuda.
   `[lyrics] bridge = false` lo desactiva.
 - **Visualizador de fondo**: `b` pinta los efectos por toda la TUI, con los
   paneles ligeramente translúcidos.
+- **Zen**: `i` esconde portada y letra y deja la visualización a pantalla
+  completa.
+- **Catálogo**: la búsqueda pide metadatos a Spotify (o Deezer si el token
+  anónimo está bloqueado) y descarga con yt-dlp usando artista/título/duración
+  reales; la lista de resultados ya no sale de yt-dlp.
+- **Ajustes**: pestaña propia (`tab` hasta `ajustes`) para el modo de arte, los
+  segundos de rotación, tarjetas, fondo, centrado vertical, zen y Spotify.
+- **Centrado vertical**: `[ui] vcenter = true` centra el contenido de los
+  paneles en vez de pegarlo arriba.
+- **Sala** usa el mismo reparto de columnas que el resto de vistas.
+- **Clics en la cola**: un solo clic en `×` quita la pista (antes hacía falta
+  doble clic porque la fila tapaba el botón).
 
 ## Documentación
 

@@ -34,19 +34,23 @@ impl ArtMode {
         match self {
             Self::Half => Self::Dither,
             Self::Dither => Self::Braille,
-            Self::Braille => Self::Gradient,
-            Self::Gradient => Self::Off,
-            Self::Off => Self::Half,
+            Self::Braille => Self::Off,
+            Self::Gradient | Self::Off => Self::Half,
         }
     }
 
-    /// Modos que participan en la rotación automática.
-    pub const ROTATION: [ArtMode; 4] = [
-        ArtMode::Half,
-        ArtMode::Dither,
-        ArtMode::Braille,
-        ArtMode::Gradient,
-    ];
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Half => Self::Off,
+            Self::Dither => Self::Half,
+            Self::Braille => Self::Dither,
+            Self::Gradient | Self::Off => Self::Braille,
+        }
+    }
+
+    /// Modos que participan en la rotación automática. `Gradient` no está:
+    /// es solo el recurso de cuando no hay portada.
+    pub const ROTATION: [ArtMode; 3] = [ArtMode::Half, ArtMode::Dither, ArtMode::Braille];
 
     pub fn label(self) -> &'static str {
         match self {

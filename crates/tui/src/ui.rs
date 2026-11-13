@@ -158,17 +158,19 @@ impl Layout {
 }
 
 pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
-    let art_ratio = match app.tab {
-        Tab::Now => 6,
-        Tab::Library | Tab::Search => 5,
-        Tab::Room => 4,
-    };
+    // Frame limpio: con paneles translúcidos y textos que cambian de longitud,
+    // sin esto quedan restos del frame anterior (placeholders, valores viejos).
+    buf.reset();
+    // El mismo reparto en todas las vistas: si cambia, la interfaz "salta" al
+    // cambiar de pestaña.
+    let art_ratio = 6;
     let layout = Layout::compute(area, app.show_viz, app.fullscreen, art_ratio);
     app.hit.clear();
     let pal = *app.palette.current();
 
     background(buf, area, &pal, app.intro);
-    let viz_fullscreen = app.viz_background && app.show_viz && layout.main.height > 2;
+    let zen = app.zen && app.show_viz;
+    let viz_fullscreen = (app.viz_background || zen) && app.show_viz && layout.main.height > 2;
     if viz_fullscreen {
         let audio = &app.audio;
         app.viz.render(
@@ -178,7 +180,12 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             &pal,
             1.0 / app.fps.value().max(1.0),
         );
-        blit_viz(app, buf, layout.full, 0, 0.32, 0.10);
+        // En zen el visualizador es el protagonista: más opaco y sin paneles.
+        if zen {
+            blit_viz(app, buf, layout.full, 0, 0.9, 0.85);
+        } else {
+            blit_viz(app, buf, layout.full, 0, 0.32, 0.10);
+        }
     }
     app.set_art_size_hint(layout.art.width, layout.art.height);
     app.ensure_art();
@@ -189,7 +196,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     }
 
     draw_top(app, buf, &layout, &pal);
-    if layout.nav.width > 0 {
+    if !zen && layout.nav.width > 0 {
         draw_nav(app, buf, &layout, &pal);
     }
     match app.tab {
@@ -197,8 +204,9 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         Tab::Search => draw_search(app, buf, &layout, &pal),
         Tab::Library => draw_library(app, buf, &layout, &pal),
         Tab::Room => draw_room(app, buf, &layout, &pal),
+        Tab::Settings => draw_settings(app, buf, &layout, &pal),
     }
-    if layout.side.width > 0 {
+    if !zen && layout.side.width > 0 {
         draw_side(app, buf, &layout, &pal);
     }
     if layout.viz.height > 0 {
@@ -214,8 +222,42 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
 // Helpers de pintura
 // ---------------------------------------------------------------------------
 
+/// Recorta por caracteres, nunca por bytes: los títulos con acentos o
+/// japoneses partían a mitad de un carácter y paniqueaban.
+fn truncate_chars(text: &mut String, max: usize) {
+    if text.chars().count() <= max {
+        return;
+    }
+    let end = text
+        .char_indices()
+        .nth(max)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    text.truncate(end);
+}
+
 fn color(c: Rgb) -> Color {
     Color::Rgb(c.0, c.1, c.2)
+}
+
+/// Rect interior con márgenes simétricos.
+fn inset(rect: Rect, x: u16, y: u16) -> Rect {
+    Rect::new(
+        rect.x + x,
+        rect.y + y,
+        rect.width.saturating_sub(x * 2),
+        rect.height.saturating_sub(y * 2),
+    )
+}
+
+/// Coloca un bloque de `w x h` en el centro exacto de `area`.
+fn centered(area: Rect, w: u16, h: u16) -> Rect {
+    Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    )
 }
 
 fn put(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: Option<Color>) {
@@ -326,9 +368,9 @@ fn panel(buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, alpha: f32, 
             (pulse * 0.35).clamp(0.0, 0.35),
         )
     } else if alpha >= 0.6 {
-        pal.border
+        mix_oklab(pal.border, pal.primary, pulse * 0.12)
     } else {
-        pal.border_dim
+        mix_oklab(pal.border_dim, pal.primary, pulse * 0.10)
     };
     let (x0, y0) = (rect.x, rect.y);
     let (x1, y1) = (rect.x + rect.width - 1, rect.y + rect.height - 1);
@@ -352,7 +394,7 @@ fn panel(buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, alpha: f32, 
         if rect.width > 8 {
             let max = rect.width.saturating_sub(6) as usize;
             let mut label = title.to_uppercase();
-            label.truncate(max);
+            truncate_chars(&mut label, max);
             let fg = if active { pal.text } else { pal.muted };
             if opaque {
                 put(buf, x0 + 2, y0, " ", color(fill_color), bg);
@@ -404,9 +446,17 @@ fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let logo_style = Style::new()
         .fg(color(mix_oklab(pal.primary, pal.text, 0.25)))
         .add_modifier(Modifier::BOLD);
-    put(buf, rect.x + 1, rect.y, "◈", color(pal.primary), None);
+    let kick = app.audio.kick_pulse;
+    put(
+        buf,
+        rect.x + 1,
+        rect.y,
+        "◈",
+        color(mix_oklab(pal.primary, pal.text, kick * 0.45)),
+        None,
+    );
     let mut logo = app.name.clone();
-    logo.truncate(rect.width.saturating_sub(12) as usize);
+    truncate_chars(&mut logo, rect.width.saturating_sub(12) as usize);
     put(buf, rect.x + 3, rect.y, &logo, color(pal.text), None);
     let _ = logo_style;
 
@@ -422,6 +472,11 @@ fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         let active = app.tab == tab;
         let hover = app.hover == Some(Action::Tab(tab));
         chip(buf, tab_rect, pal, active, hover);
+        if active {
+            let glow = mix_oklab(pal.primary, pal.secondary, kick * 0.35);
+            fill(buf, tab_rect, glow);
+            let _ = glow;
+        }
         text_at(
             buf,
             tab_rect,
@@ -456,7 +511,7 @@ fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             buf,
             chip_rect,
             if app.follow_spotify {
-                mix(pal.surface, pal.secondary, 0.35)
+                mix(pal.surface, pal.secondary, 0.30 + app.audio.kick_pulse * 0.20)
             } else if hover {
                 pal.surface_alt
             } else {
@@ -568,12 +623,22 @@ fn local_offset_secs() -> i64 {
 // ---------------------------------------------------------------------------
 
 fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    use crate::app::LibFilter;
     let rect = layout.nav;
     let focused = app.focus == crate::app::Pane::Nav;
     panel(buf, rect, pal, focused, 0.55, Some("vistas"), app.audio.kick_pulse);
     app.hit.add(rect, Action::Focus(crate::app::Pane::Nav));
 
-    let mut y = rect.y + 2;
+    let playlists = app.lib.playlists().unwrap_or_default();
+    let block = (Tab::ALL.len() + 3 + playlists.len().min(6) + 3) as u16;
+    let offset = if app.vcenter {
+        rect.height.saturating_sub(block) / 2
+    } else {
+        0
+    };
+    let mut y = rect.y + 2 + offset;
+    let pulse = app.audio.kick_pulse;
+
     for tab in Tab::ALL {
         if y + 1 >= rect.y + rect.height {
             break;
@@ -581,7 +646,11 @@ fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         let active = app.tab == tab;
         let row = Rect::new(rect.x + 1, y, rect.width - 2, 1);
         if active {
-            fill(buf, row, mix(pal.surface, pal.primary, 0.22));
+            fill(
+                buf,
+                row,
+                mix(pal.surface, pal.primary, 0.22 + pulse * 0.10),
+            );
             put(buf, row.x, y, "▍", color(pal.primary), None);
         }
         let fg = if active {
@@ -615,35 +684,48 @@ fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         );
         y += 1;
     }
-    let playlists = app.lib.playlists().unwrap_or_default();
     for playlist in playlists.iter().take(6) {
         if y + 1 >= rect.y + rect.height {
             break;
         }
         let row = Rect::new(rect.x + 1, y, rect.width - 2, 1);
+        let active = app.lib_filter == LibFilter::Playlist(playlist.id);
+        if active {
+            fill(buf, row, mix(pal.surface, pal.primary, 0.18));
+        }
+        let mut label = format!("· {}", playlist.name);
+        truncate_chars(&mut label, row.width.saturating_sub(4) as usize);
         text_at(
             buf,
             Rect::new(row.x + 2, y, row.width.saturating_sub(2), 1),
-            format!("· {}", playlist.name),
-            Style::new().fg(color(pal.muted)),
+            label,
+            Style::new().fg(color(if active { pal.text } else { pal.muted })),
             Alignment::Left,
         );
-        app.hit.add(row, Action::Tab(Tab::Library));
+        app.hit.add(row, Action::PlaylistOpen(playlist.id));
         y += 1;
     }
-    for label in ["favoritas", "descargadas", "recientes"] {
+    for (label, filter) in [
+        ("favoritas", LibFilter::Favorites),
+        ("descargadas", LibFilter::Downloaded),
+        ("recientes", LibFilter::Recent),
+    ] {
         if y + 1 >= rect.y + rect.height {
             break;
         }
         let row = Rect::new(rect.x + 1, y, rect.width - 2, 1);
+        let active = app.lib_filter == filter;
+        if active {
+            fill(buf, row, mix(pal.surface, pal.primary, 0.18));
+        }
         text_at(
             buf,
             Rect::new(row.x + 2, y, row.width.saturating_sub(2), 1),
-            format!("{} {}", "♪", label),
-            Style::new().fg(color(pal.dim)),
+            format!("{} {label}", if active { "♥" } else { "♪" }),
+            Style::new().fg(color(if active { pal.text } else { pal.dim })),
             Alignment::Left,
         );
-        app.hit.add(row, Action::Tab(Tab::Library));
+        app.hit.add(row, Action::LibraryFilter(filter));
         y += 1;
     }
 
@@ -684,18 +766,35 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         return;
     }
 
-    // Foco de portada: ocupa el centro entero, sin panel de texto.
+    if app.zen {
+        // Zen: solo visualización. La canción sigue sonando, pero el centro
+        // queda limpio y la portada/letra no se pintan.
+        if let Some(track) = &app.now.track {
+            let label = format!("{}  ·  {}", track.title, track.artist);
+            let rect = Rect::new(
+                layout.center.x + 2,
+                layout.center.y + 1,
+                layout.center.width.saturating_sub(4),
+                1,
+            );
+            text_at(
+                buf,
+                rect,
+                format!("{label}   ·   i para salir de zen"),
+                Style::new().fg(color(pal.dim)),
+                Alignment::Right,
+            );
+        }
+        return;
+    }
+
+    // Foco de portada: la portada ocupa TODO el centro, centrada de verdad.
     if app.center_focus == CenterFocus::Art {
-        let rect = layout.content;
-        let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), rect.height.saturating_sub(2));
+        let area = layout.center;
+        let inner = inset(area, 2, 1);
         let h = inner.height.saturating_sub(2);
         let w = (h * 2).min(inner.width);
-        let art_rect = Rect::new(
-            inner.x + inner.width.saturating_sub(w) / 2,
-            inner.y + inner.height.saturating_sub(h + 2) / 2,
-            w,
-            h,
-        );
+        let art_rect = centered(inner, w, h);
         draw_art(app, buf, art_rect, pal, 1.0);
         frame_art(buf, art_rect, pal);
         if let Some(track) = app.now.track.clone() {
@@ -707,30 +806,34 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
                 Style::new().fg(color(pal.muted)),
                 Alignment::Center,
             );
+            app.hit.add(art_rect, Action::PlayPause);
         }
         text_at(
             buf,
-            Rect::new(rect.x + 2, rect.y + rect.height.saturating_sub(1), rect.width.saturating_sub(4), 1),
-            "c / esc  ·  volver  ·  F pantalla completa",
+            Rect::new(area.x + 2, area.y, area.width.saturating_sub(4), 1),
+            "c / esc volver  ·  ⇧F pantalla completa  ·  i zen",
             Style::new().fg(color(pal.dim)),
             Alignment::Right,
         );
-        app.hit.add(rect, Action::CenterArt);
+        app.hit.add(area, Action::CenterArt);
         return;
     }
 
     let lyrics_focus = app.center_focus == CenterFocus::Lyrics;
     let art_rect = layout.art;
-    if !lyrics_focus {
+    let has_track = app.now.track.is_some();
+    if !lyrics_focus && has_track {
         draw_art(app, buf, art_rect, pal, 1.0);
         frame_art(buf, art_rect, pal);
     }
 
+    // Con la letra enfocada ocupa TODO el centro; si no, la columna de texto.
+    let source = if lyrics_focus { layout.center } else { layout.content };
     let rect = Rect::new(
-        layout.content.x,
-        layout.content.y + 1,
-        layout.content.width,
-        layout.content.height.saturating_sub(1),
+        source.x,
+        source.y + 1,
+        source.width,
+        source.height.saturating_sub(1),
     );
     panel(
         buf,
@@ -742,7 +845,7 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         app.audio.kick_pulse,
     );
     app.hit.add(rect, Action::Focus(crate::app::Pane::Center));
-    if !lyrics_focus {
+    if !lyrics_focus && has_track {
         app.hit.add(art_rect, Action::CenterArt);
     }
 
@@ -757,18 +860,25 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         rect.width.saturating_sub(6),
         rect.height.saturating_sub(2),
     );
-    let header_width = if !lyrics_focus
-        && art_rect.width > 0
-        && art_rect.y >= inner.y
-        && art_rect.y < inner.y + 12
-        && art_rect.x > inner.x
-    {
-        inner.width.saturating_sub(art_rect.width + 2)
+    // El panel de texto ya está a la izquierda de la portada: no hay que
+    // recortarlo (el recorte antiguo dejaba la cabecera a 16 columnas).
+    let inner = Rect::new(inner.x, inner.y, inner.width, inner.height);
+
+    // Cabecera compacta: badges arriba a la derecha, título y artista en una
+    // sola línea. Antes cada cosa gastaba una fila y se comía la letra.
+    let lines = app
+        .lyrics
+        .as_ref()
+        .map(|doc| doc.lines.len() as u16)
+        .unwrap_or(6)
+        .min(16);
+    let block = 3 + lines * 2 + 2;
+    let offset = if app.vcenter {
+        inner.height.saturating_sub(block) / 2
     } else {
-        inner.width
+        0
     };
-    let inner = Rect::new(inner.x, inner.y, header_width.max(16), inner.height);
-    let mut y = inner.y + 1;
+    let mut y = inner.y + offset;
 
     text_at(
         buf,
@@ -779,13 +889,52 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
-    let audio = &app.audio;
-    let eq_x = inner.x + 14;
-    for i in 0..10u16 {
-        if eq_x + i >= inner.x + inner.width {
+    // Badges + corazón alineados a la derecha de la primera fila.
+    let favorite = app
+        .lib
+        .track_by_key(&track.key)
+        .ok()
+        .flatten()
+        .map(|row| row.favorite)
+        .unwrap_or(false);
+    let mut items: Vec<(String, Rgb, Option<Action>)> = badges(app, pal)
+        .into_iter()
+        .map(|(label, fg)| (label, fg, None))
+        .collect();
+    items.push((
+        if favorite { "♥".into() } else { "♡".into() },
+        if favorite { pal.error } else { pal.dim },
+        Some(Action::Favorite),
+    ));
+    let mut badge_x = rect.x + rect.width.saturating_sub(3);
+    for (label, fg, action) in items.into_iter().rev() {
+        let width = label.chars().count() as u16 + 2;
+        if badge_x < inner.x + 16 || badge_x < width + inner.x {
             break;
         }
-        let value = audio.band(i as f32 / 10.0 * 48.0);
+        badge_x -= width;
+        let badge_rect = Rect::new(badge_x, y, width, 1);
+        fill(buf, badge_rect, mix(pal.bg, pal.surface_alt, 0.7));
+        text_at(
+            buf,
+            badge_rect,
+            label,
+            Style::new().fg(color(fg)),
+            Alignment::Center,
+        );
+        if let Some(action) = action {
+            app.hit.add(badge_rect, action);
+        }
+        badge_x = badge_x.saturating_sub(1);
+    }
+    // El ecualizador solo ocupa el hueco que dejan los badges.
+    let eq_x = inner.x + 14;
+    let eq_limit = badge_x.saturating_sub(1);
+    for i in 0..10u16 {
+        if eq_x + i >= eq_limit {
+            break;
+        }
+        let value = app.audio.band(i as f32 / 10.0 * 48.0);
         let glyph = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][(value * 7.9) as usize];
         put(
             buf,
@@ -796,84 +945,49 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             None,
         );
     }
-    y += 2;
+    y += 1;
 
-    let title_style = Style::new()
-        .fg(color(mix_oklab(pal.text, pal.primary, 0.22)))
-        .add_modifier(Modifier::BOLD);
-    text_at(
-        buf,
-        Rect::new(inner.x, y, inner.width, if lyrics_focus { 1 } else { 2 }),
-        track.title.clone(),
-        title_style,
-        Alignment::Left,
-    );
-    y += if lyrics_focus { 1 } else { 2 };
-    let subtitle = match &track.album {
+    // Título + artista/álbum en la misma línea (el título manda; lo demás se
+    // recorta si no cabe).
+    let title = track.title.clone();
+    let meta = match &track.album {
         Some(album) if !album.is_empty() => format!("{}  ·  {}", track.artist, album),
         _ => track.artist.clone(),
     };
-    text_at(
-        buf,
-        Rect::new(inner.x, y, inner.width, 1),
-        subtitle,
-        Style::new().fg(color(pal.muted)),
-        Alignment::Left,
-    );
-    y += 1;
-    if !lyrics_focus {
-        let rule = inner.width.min(header_width);
-        for i in 0..rule {
-            let t = i as f32 / rule.max(1) as f32;
-            let rgb = mix_oklab(pal.primary, pal.border_dim, t.powf(0.6));
-            put(buf, inner.x + i, y, "─", color(rgb), None);
-        }
-        y += 2;
-        let mut badge_x = inner.x;
-        for (label, fg) in badges(app, pal) {
-            let width = label.chars().count() as u16 + 2;
-            if badge_x + width > inner.x + inner.width {
-                break;
-            }
-            let badge_rect = Rect::new(badge_x, y, width, 1);
-            fill(buf, badge_rect, mix(pal.bg, pal.surface_alt, 0.7));
-            text_at(
-                buf,
-                badge_rect,
-                label,
-                Style::new().fg(color(fg)),
-                Alignment::Center,
-            );
-            badge_x += width;
-        }
-        // Corazón de la pista actual, clickable.
-        if badge_x + 2 < inner.x + inner.width {
-            let favorite = app
-                .lib
-                .track_by_key(&track.key)
-                .ok()
-                .flatten()
-                .map(|row| row.favorite)
-                .unwrap_or(false);
-            put(
-                buf,
-                badge_x + 1,
-                y,
-                if favorite { "♥" } else { "♡" },
-                color(if favorite { pal.error } else { pal.dim }),
-                None,
-            );
-            app.hit.add(Rect::new(badge_x, y, 2, 1), Action::Favorite);
-        }
-        y += 2;
+    let title_width = title.chars().count() as u16;
+    let mut spans = vec![Span::styled(
+        title,
+        Style::new()
+            .fg(color(mix_oklab(pal.text, pal.primary, 0.22)))
+            .add_modifier(Modifier::BOLD),
+    )];
+    let room = inner.width.saturating_sub(title_width + 3);
+    if room > 10 {
+        let mut meta = meta;
+        truncate_chars(&mut meta, room as usize);
+        spans.push(Span::styled(
+            format!("  ·  {meta}"),
+            Style::new().fg(color(pal.muted)),
+        ));
     }
+    line_at(buf, Rect::new(inner.x, y, inner.width, 1), spans, Alignment::Left);
+    y += 1;
 
-    let lyrics_rect = Rect::new(
-        inner.x,
-        y,
-        inner.width,
-        (inner.y + inner.height).saturating_sub(y),
-    );
+    let rule = inner.width;
+    for i in 0..rule {
+        let t = i as f32 / rule.max(1) as f32;
+        let rgb = mix_oklab(pal.primary, pal.border_dim, t.powf(0.6));
+        put(buf, inner.x + i, y, "─", color(rgb), None);
+    }
+    y += 1;
+
+    let available = (inner.y + inner.height).saturating_sub(y);
+    let lyrics_h = if app.vcenter {
+        available.min(lines * 2 + 2)
+    } else {
+        available
+    };
+    let lyrics_rect = Rect::new(inner.x, y, inner.width, lyrics_h);
     app.hit.add(lyrics_rect, Action::CenterLyrics);
     draw_lyrics(app, buf, lyrics_rect, pal);
 }
@@ -1152,7 +1266,11 @@ fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         let line_rect = Rect::new(rect.x, y as u16, rect.width, 1);
         if is_active {
             // Banda de foco: la línea que se canta respira sobre el fondo.
-            fill(buf, line_rect, mix(pal.bg, pal.surface_alt, 0.9));
+            fill(
+                buf,
+                line_rect,
+                mix(pal.bg, pal.surface_alt, 0.9 + app.audio.vocal_pulse * 0.1),
+            );
             put(buf, line_rect.x, y as u16, "▎", color(pal.primary), None);
             // Karaoke: la parte cantada va en el acento, el resto en el texto.
             let progress = doc
@@ -1238,15 +1356,22 @@ fn karaoke_line(
 
 fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.content;
-    draw_art(app, buf, layout.art, pal, 0.85);
-    frame_art(buf, layout.art, pal);
+    if app.now.track.is_some() {
+        draw_art(app, buf, layout.art, pal, 0.85);
+        frame_art(buf, layout.art, pal);
+    }
+    let title = if app.lib_filter == crate::app::LibFilter::All {
+        "librería".to_string()
+    } else {
+        format!("librería · {}", app.lib_filter.label())
+    };
     panel(
         buf,
         rect,
         pal,
         app.focus == crate::app::Pane::Center,
         0.72,
-        Some("librería"),
+        Some(title.as_str()),
         app.audio.kick_pulse,
     );
     let inner = Rect::new(
@@ -1273,9 +1398,15 @@ fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette)
     let start = (app.list_scroll.value.max(0.0) as usize)
         .saturating_sub(rows / 2)
         .min(app.view.len().saturating_sub(rows.min(app.view.len())));
+    let shown = app.view.len().saturating_sub(start).min(rows) as u16;
+    let y_offset = if app.vcenter {
+        inner.height.saturating_sub(shown) / 2
+    } else {
+        0
+    };
     for (offset, row) in app.view.iter().skip(start).take(rows).enumerate() {
         let index = start + offset;
-        let y = inner.y + offset as u16;
+        let y = inner.y + y_offset + offset as u16;
         let selected = index == app.selected;
         let row_rect = Rect::new(inner.x, y, inner.width, 1);
         let hover = app.hover == Some(Action::SelectRow(index));
@@ -1318,7 +1449,7 @@ fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette)
             .fg(color(if selected { pal.text } else { pal.muted }))
             .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() });
         let mut title = row.track.title.clone();
-        title.truncate(title_width);
+        truncate_chars(&mut title, title_width);
         put(buf, row_rect.x + 4, y, &title, style.fg.unwrap_or(color(pal.text)), None);
         let title_len = title.chars().count() as u16;
         let artist_x = row_rect.x + 4 + title_len + 2;
@@ -1326,7 +1457,7 @@ fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette)
             (heart_x).saturating_sub(artist_x + 1);
         if max_artist > 4 {
             let mut artist = row.track.artist.clone();
-            artist.truncate(max_artist as usize);
+            truncate_chars(&mut artist, max_artist as usize);
             put(buf, artist_x, y, &artist, color(pal.dim), None);
         }
         put(
@@ -1347,7 +1478,6 @@ fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
     let per_page = (inner.height / card_h).max(1) as usize;
     let start = app.selected.saturating_sub(per_page / 2);
     let start = start.min(app.view.len().saturating_sub(per_page.min(app.view.len())));
-    let mut y = inner.y;
     let rows: Vec<spote_core::library::TrackRow> = app
         .view
         .iter()
@@ -1355,6 +1485,12 @@ fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
         .take(per_page)
         .cloned()
         .collect();
+    let mut y = inner.y
+        + if app.vcenter {
+            inner.height.saturating_sub(rows.len() as u16 * card_h) / 2
+        } else {
+            0
+        };
     for (offset, row) in rows.iter().enumerate() {
         let index = start + offset;
         if y + card_h > inner.y + inner.height {
@@ -1384,7 +1520,7 @@ fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
             row.track.title.clone()
         };
         let mut title = title;
-        title.truncate(text_w as usize);
+        truncate_chars(&mut title, text_w as usize);
         put(
             buf,
             text_x,
@@ -1398,7 +1534,7 @@ fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
             artist.push_str("  ·  ");
             artist.push_str(album);
         }
-        artist.truncate(text_w as usize);
+        truncate_chars(&mut artist, text_w as usize);
         put(buf, text_x, y + 1, &artist, color(pal.dim), None);
         let mut meta = format!("{}  ·  {}", format_ms(row.track.duration_ms), status_label(row));
         if row.favorite {
@@ -1407,7 +1543,7 @@ fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
         if !row.playable() {
             meta.push_str("  ·  ↓ pendiente");
         }
-        meta.truncate(text_w as usize);
+        truncate_chars(&mut meta, text_w as usize);
         put(
             buf,
             text_x,
@@ -1496,8 +1632,10 @@ fn draw_thumb(app: &mut App, buf: &mut Buffer, rect: Rect, track: &spote_protoco
 
 fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.content;
-    draw_art(app, buf, layout.art, pal, 0.85);
-    frame_art(buf, layout.art, pal);
+    if app.now.track.is_some() {
+        draw_art(app, buf, layout.art, pal, 0.85);
+        frame_art(buf, layout.art, pal);
+    }
     panel(buf, rect, pal, true, 0.78, Some("buscar"), app.audio.kick_pulse);
     let inner = Rect::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(4), rect.height.saturating_sub(3));
 
@@ -1524,7 +1662,7 @@ fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            "buscando en yt-dlp…",
+            "buscando en el catálogo…",
             Style::new().fg(color(pal.warn)),
             Alignment::Left,
         );
@@ -1558,12 +1696,15 @@ fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
             row_rect.x + 2,
             row_y,
             marker,
-            color(if topic { pal.secondary } else { pal.dim }),
+            color(if selected { pal.secondary } else { pal.dim }),
             None,
         );
+        // Título y artista/álbum en la misma fila: con solo el título no se
+        // sabía qué versión era.
         let title_width = row_rect.width.saturating_sub(6 + duration_width) as usize;
         let mut title = item.title.clone();
-        title.truncate(title_width);
+        let title_chars = title.chars().count();
+        truncate_chars(&mut title, title_width);
         put(
             buf,
             row_rect.x + 4,
@@ -1572,6 +1713,18 @@ fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
             color(if selected { pal.text } else { pal.muted }),
             None,
         );
+        let after = row_rect.x + 4 + title_chars.min(title_width) as u16 + 2;
+        let meta = match &item.album {
+            Some(album) if !album.is_empty() => format!("{}  ·  {}", item.artist, album),
+            _ => item.artist.clone(),
+        };
+        let meta_room = (row_rect.x + row_rect.width - duration_width - 2)
+            .saturating_sub(after);
+        if meta_room > 6 && title_width > title_chars {
+            let mut meta = meta;
+            truncate_chars(&mut meta, meta_room as usize);
+            put(buf, after, row_y, &meta, color(pal.dim), None);
+        }
         put(
             buf,
             row_rect.x + row_rect.width - duration_width,
@@ -1584,10 +1737,87 @@ fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
     }
 }
 
+fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let rect = layout.content;
+    if app.now.track.is_some() {
+        draw_art(app, buf, layout.art, pal, 0.85);
+        frame_art(buf, layout.art, pal);
+    }
+    panel(
+        buf,
+        rect,
+        pal,
+        app.focus == crate::app::Pane::Center,
+        0.85,
+        Some("ajustes"),
+        app.audio.kick_pulse,
+    );
+    app.hit.add(rect, Action::Focus(crate::app::Pane::Center));
+    let inner = inset(rect, 3, 2);
+    let rows = app.settings_rows();
+    let block = rows.len() as u16 * 2 + 2;
+    let offset = if app.vcenter {
+        inner.height.saturating_sub(block) / 2
+    } else {
+        0
+    };
+    let mut y = inner.y + offset;
+    for (index, (label, value)) in rows.iter().enumerate() {
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        let selected = index == app.settings_selected;
+        if selected {
+            fill(buf, row, mix(pal.surface, pal.primary, 0.24));
+            put(buf, row.x, y, "▍", color(pal.primary), None);
+        }
+        put(
+            buf,
+            row.x + 2,
+            y,
+            label,
+            color(if selected { pal.text } else { pal.muted }),
+            None,
+        );
+        let value_width = value.chars().count() as u16;
+        let mut value_x = row.x + row.width.saturating_sub(value_width + 2);
+        if index == 1 || index == 2 {
+            // ◀ valor ▶ para los ajustes que se tocan con izquierda/derecha.
+            let left = Rect::new(value_x.saturating_sub(3), y, 2, 1);
+            let right = Rect::new(row.x + row.width - 2, y, 2, 1);
+            put(buf, left.x, y, "◀", color(pal.dim), None);
+            put(buf, right.x, y, "▶", color(pal.dim), None);
+            app.hit.add(left, Action::SettingsAdjust(index, -1));
+            app.hit.add(right, Action::SettingsAdjust(index, 1));
+            value_x = value_x.min(right.x.saturating_sub(value_width + 1));
+        }
+        put(
+            buf,
+            value_x,
+            y,
+            value,
+            color(if selected { pal.secondary } else { pal.dim }),
+            None,
+        );
+        app.hit.add(row, Action::SettingsRow(index));
+        y += 2;
+    }
+    let footer = "↑↓ mover · ←→ cambiar · enter alterna";
+    if y < rect.y + rect.height.saturating_sub(2) {
+        text_at(
+            buf,
+            Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
+            footer,
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+    }
+}
+
 fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.content;
-    draw_art(app, buf, layout.art, pal, 0.82);
-    frame_art(buf, layout.art, pal);
+    if app.now.track.is_some() {
+        draw_art(app, buf, layout.art, pal, 0.82);
+        frame_art(buf, layout.art, pal);
+    }
     panel(
         buf,
         rect,
@@ -1609,7 +1839,7 @@ fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            "sin servidor · añade [server] url y token en config.toml",
+            "sin servidor · configura [server] url",
             Style::new().fg(color(pal.warn)),
             Alignment::Left,
         );
@@ -1621,7 +1851,7 @@ fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         format!("{}  ·  {}", app.cfg.server.url, app.social_status)
     };
     let mut status = status;
-    status.truncate(inner.width as usize);
+    truncate_chars(&mut status, inner.width as usize);
     text_at(
         buf,
         Rect::new(inner.x, y, inner.width, 1),
@@ -1669,7 +1899,7 @@ fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             if joined { "  ·  dentro" } else { "" }
         );
         let mut label = label;
-        label.truncate(row.width.saturating_sub(3) as usize);
+        truncate_chars(&mut label, row.width.saturating_sub(3) as usize);
         put(
             buf,
             row.x + 2,
@@ -1706,7 +1936,7 @@ fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             track,
             format_ms(state.position_ms)
         );
-        line.truncate(inner.width as usize);
+        truncate_chars(&mut line, inner.width as usize);
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
@@ -1740,7 +1970,7 @@ fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
                     },
                     playing
                 );
-                label.truncate(inner.width as usize);
+                truncate_chars(&mut label, inner.width as usize);
                 text_at(
                     buf,
                     Rect::new(inner.x, y, inner.width, 1),
@@ -1765,7 +1995,7 @@ fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             y += 1;
             for item in app.room_queue.iter().take(4) {
                 let mut label = format!("{:>2} · {}  ·  {}", item.position + 1, item.track.title, item.track.artist);
-                label.truncate(inner.width as usize);
+                truncate_chars(&mut label, inner.width as usize);
                 text_at(
                     buf,
                     Rect::new(inner.x, y, inner.width, 1),
@@ -1817,7 +2047,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     if queue_len == 0 {
         text_at(
             buf,
-            Rect::new(inner.x, inner.y, inner.width, 1),
+            Rect::new(inner.x, inner.y + inner.height / 2, inner.width, 1),
             "vacía · a para encolar",
             Style::new().fg(color(pal.dim)),
             Alignment::Left,
@@ -1827,12 +2057,18 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         let visible = (inner.height / card_h).max(1) as usize;
         let start = app.queue_selected.saturating_sub(visible / 2);
         let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
+        let shown = (queue_len - start).min(visible);
+        let y_offset = if app.vcenter {
+            inner.height.saturating_sub(shown as u16 * card_h) / 2
+        } else {
+            0
+        };
         for offset in 0..visible {
             let index = start + offset;
             if index >= queue_len || inner.y + (offset as u16 + 1) * card_h > inner.y + inner.height {
                 break;
             }
-            let y = inner.y + offset as u16 * card_h;
+            let y = inner.y + y_offset + offset as u16 * card_h;
             let card = Rect::new(inner.x, y, inner.width, card_h);
             fill_soft(buf, card, mix(pal.bg, pal.surface, 0.5), 1.0, pal.bg);
             let selected = index == app.queue_selected;
@@ -1860,7 +2096,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             let text_x = thumb.x + thumb.width + 1;
             let text_w = (card.x + card.width).saturating_sub(text_x + 3);
             let mut title = title;
-            title.truncate(text_w as usize);
+            truncate_chars(&mut title, text_w as usize);
             put(
                 buf,
                 text_x,
@@ -1873,7 +2109,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             if path_pending {
                 artist.push_str("  ·  ↓");
             }
-            artist.truncate(text_w as usize);
+            truncate_chars(&mut artist, text_w as usize);
             put(buf, text_x, y + 1, &artist, color(pal.dim), None);
             put(
                 buf,
@@ -1885,19 +2121,27 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             );
             let remove_rect = Rect::new(card.x + card.width - 2, y, 2, 1);
             put(buf, remove_rect.x, y, "×", color(pal.error), None);
-            app.hit.add(remove_rect, Action::QueueRemove(index));
+            // El último registro gana: la tarjeta primero y el × encima, para
+            // que un solo clic en la cruz quite la pista.
             app.hit.add(card, Action::QueueRow(index));
+            app.hit.add(remove_rect, Action::QueueRemove(index));
         }
     } else {
         let visible = inner.height.saturating_sub(1) as usize;
         let start = app.queue_selected.saturating_sub(visible / 2);
         let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
+        let shown = (queue_len - start).min(visible);
+        let y_offset = if app.vcenter {
+            inner.height.saturating_sub(1).saturating_sub(shown as u16) / 2
+        } else {
+            0
+        };
         for offset in 0..visible {
             let index = start + offset;
             if index >= queue_len || inner.y + offset as u16 >= hint_row {
                 break;
             }
-            let y = inner.y + offset as u16;
+            let y = inner.y + y_offset + offset as u16;
             let row = Rect::new(inner.x, y, inner.width, 1);
             let selected = index == app.queue_selected;
             let hover = app.hover == Some(Action::QueueRow(index));
@@ -1922,6 +2166,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
                 fill(buf, remove_rect, pal.error);
             }
             put(buf, remove_rect.x, y, "×", color(pal.error), None);
+            app.hit.add(row, Action::QueueRow(index));
             app.hit.add(remove_rect, Action::QueueRemove(index));
             put(
                 buf,
@@ -1942,7 +2187,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
                 .saturating_sub(4 + remove_rect.width + artist_w + 1)
                 as usize;
             let mut title = title;
-            title.truncate(title_w);
+            truncate_chars(&mut title, title_w);
             put(
                 buf,
                 row.x + 3,
@@ -1953,7 +2198,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             );
             if room_for_artist && artist_w > 4 {
                 let mut artist = artist;
-                artist.truncate(artist_w.saturating_sub(1) as usize);
+                truncate_chars(&mut artist, artist_w.saturating_sub(1) as usize);
                 put(
                     buf,
                     row.x + 3 + title.chars().count() as u16 + 1,
@@ -1973,7 +2218,6 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
                     None,
                 );
             }
-            app.hit.add(row, Action::QueueRow(index));
         }
         // Ayuda de la cola, en la última fila del panel.
         if hint_row > inner.y {
@@ -1993,7 +2237,7 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     }
 
     // Info: paleta + estado.
-    panel(buf, layout.info, pal, false, 0.45, Some("sesión"), 0.0);
+    panel(buf, layout.info, pal, false, 0.45, Some("sesión"), app.audio.kick_pulse * 0.8);
     let inner = Rect::new(
         layout.info.x + 2,
         layout.info.y + 2,
@@ -2143,12 +2387,15 @@ fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palett
         return;
     }
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
-    let bar_rect = Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1);
     let duration = app.now.duration_ms.max(1);
     let position = app.display_position_ms().min(duration);
     let progress = (position as f32 / duration as f32).clamp(0.0, 1.0);
+    let pulse = (app.pulse.eased() * 0.45 + app.audio.kick_pulse * 0.55).min(1.0);
 
-    // Barra.
+    // Barra centrada: es el elemento principal del transporte, no un adorno
+    // pegado a la izquierda.
+    let bar_width = rect.width.saturating_sub(28).min(104).max(20);
+    let bar_rect = centered(Rect::new(rect.x, rect.y, rect.width, 1), bar_width, 1);
     for x in 0..bar_rect.width {
         let t = x as f32 / bar_rect.width.max(1) as f32;
         let filled = t <= progress;
@@ -2161,7 +2408,6 @@ fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palett
         put(buf, bar_rect.x + x, bar_rect.y, ch, color(fg), Some(color(pal.bg_deep)));
     }
     let head = bar_rect.x + (progress * bar_rect.width as f32) as u16;
-    let pulse = (app.pulse.eased() * 0.55 + app.audio.kick_pulse * 0.45).min(1.0);
     put(
         buf,
         head.min(bar_rect.x + bar_rect.width.saturating_sub(1)),
@@ -2175,23 +2421,45 @@ fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palett
         Action::SeekTo(position),
     );
 
-    // Fila de controles.
+    // Tiempos a los lados de la barra.
+    let time = format!("{} / {}", format_ms(position), format_ms(app.now.duration_ms));
+    let played = format_ms(position);
+    if bar_rect.x > rect.x + 8 {
+        text_at(
+            buf,
+            Rect::new(bar_rect.x - 8, bar_rect.y, 7, 1),
+            played,
+            Style::new().fg(color(pal.muted)),
+            Alignment::Right,
+        );
+        text_at(
+            buf,
+            Rect::new(bar_rect.x + bar_rect.width + 1, bar_rect.y, 7, 1),
+            format_ms(app.now.duration_ms),
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+    } else {
+        text_at(buf, bar_rect, time, Style::new().fg(color(pal.muted)), Alignment::Center);
+    }
+
+    // Controles centrados en la fila inferior del transporte.
     let y = rect.y + 1;
-    let mut x = rect.x + 1;
-    let buttons: [(&str, Action); 3] = [
-        ("◀◀", Action::Prev),
-        (if app.now.playing { PAUSE } else { PLAY }, Action::PlayPause),
-        ("▶▶", Action::Next),
+    let buttons: [(&str, Action, bool); 3] = [
+        ("◀◀", Action::Prev, false),
+        (if app.now.playing { PAUSE } else { PLAY }, Action::PlayPause, true),
+        ("▶▶", Action::Next, false),
     ];
-    for (label, action) in buttons {
+    let widths: u16 = buttons.iter().map(|(label, _, _)| label.chars().count() as u16 + 2).sum();
+    let mut x = rect.x + (rect.width.saturating_sub(widths + 2)) / 2;
+    for (label, action, primary) in buttons {
         let width = label.chars().count() as u16 + 2;
         let button = Rect::new(x, y, width, 1);
         let hover = app.hover == Some(action.clone());
-        let active = matches!(action, Action::PlayPause);
         let bg = if hover {
             pal.surface_alt
-        } else if active {
-            mix(pal.surface, pal.primary, 0.28)
+        } else if primary {
+            mix_oklab(pal.surface, pal.primary, 0.22 + pulse * 0.28)
         } else {
             pal.surface
         };
@@ -2201,7 +2469,7 @@ fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palett
             button,
             label.to_string(),
             Style::new()
-                .fg(color(if active { pal.primary } else { pal.text }))
+                .fg(color(if primary { pal.primary } else { pal.text }))
                 .add_modifier(Modifier::BOLD),
             Alignment::Center,
         );
@@ -2209,57 +2477,41 @@ fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palett
         x += width + 1;
     }
 
-    // Volumen.
-    x += 2;
+    // Volumen a la izquierda.
+    let mut vx = rect.x + 2;
     let vol_label = if app.now.volume <= 0.001 { "🔇" } else { "♪" };
-    put(buf, x, y, vol_label, color(pal.muted), None);
-    x += 2;
-    let cells = 10u16;
+    put(buf, vx, y, vol_label, color(pal.muted), None);
+    vx += 2;
+    let cells = 8u16;
     for i in 0..cells {
         let threshold = i as f32 / cells as f32;
         let on = app.now.volume > threshold;
-        let ch = if on { "▮" } else { "▯" };
         put(
             buf,
-            x + i,
+            vx + i,
             y,
-            ch,
+            if on { "▮" } else { "▯" },
             color(if on { pal.secondary } else { pal.border_dim }),
             None,
         );
-        let value = (i + 1) as f32 / cells as f32;
-        app.hit.add(Rect::new(x + i, y, 1, 1), Action::Volume(value));
+        app.hit.add(
+            Rect::new(vx + i, y, 1, 1),
+            Action::Volume((i + 1) as f32 / cells as f32),
+        );
     }
-    x += cells + 2;
 
-    // Tiempo.
-    let time = format!(
-        "{} / {}",
-        format_ms(app.display_position_ms()),
-        format_ms(app.now.duration_ms)
-    );
-    put(buf, x, y, &time, color(pal.muted), None);
-
-    // Derecha: viz, arte, fps.
+    // Derecha: viz, arte, spotify (separados del resto).
     let mut right = rect.x + rect.width.saturating_sub(2);
     let mut items: Vec<(String, Action, Rgb)> = vec![
-        (
-            format!("{}", app.viz.preset_name()),
-            Action::VizNext,
-            pal.primary,
-        ),
-        (
-            format!("arte {}", app.art_mode.label()),
-            Action::ArtMode,
-            pal.dim,
-        ),
+        (app.viz.preset_name().to_string(), Action::VizNext, pal.primary),
+        (format!("arte {}", app.art_mode.label()), Action::ArtMode, pal.dim),
     ];
     if app.follow_spotify {
         items.push(("spotify".into(), Action::ToggleFollow, pal.secondary));
     }
     for (label, action, fg) in items {
         let width = label.chars().count() as u16 + 2;
-        if right < rect.x + x + width + 4 {
+        if right < vx + cells + 4 + width {
             break;
         }
         right -= width;
@@ -2312,6 +2564,13 @@ fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         "descargando…".to_string()
     } else if app.now.loading {
         "cargando…".to_string()
+    } else if let Some(track) = &app.now.track {
+        format!(
+            "♪ {}  ·  {}{}",
+            track.title,
+            track.artist,
+            if app.follow_spotify { "  ·  spotify" } else { "" }
+        )
     } else if app.follow_spotify {
         "modo acompañante de spotify".to_string()
     } else {
@@ -2435,6 +2694,7 @@ fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
         ("r", "rotación automática del arte"),
         ("z", "lista compacta / tarjetas"),
         ("b", "visualizador de fondo"),
+        ("i", "zen: ocultar portada y letra"),
         ("m", "silenciar"),
         ("+ / -", "volumen"),
         ("y", "copiar letra"),
@@ -2583,6 +2843,16 @@ fn mask_label(mask: crate::viz::Mask) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::Fullscreen;
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        let mut text = "Río · 東京".to_string();
+        truncate_chars(&mut text, 4);
+        assert_eq!(text, "Río ");
+        let mut short = "abc".to_string();
+        truncate_chars(&mut short, 10);
+        assert_eq!(short, "abc");
+    }
 
     #[test]
     fn layout_is_sane_at_many_sizes() {

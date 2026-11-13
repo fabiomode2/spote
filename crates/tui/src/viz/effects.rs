@@ -5,6 +5,7 @@
 
 use super::{Effect, Layer, Params, Rng, VizCtx};
 use spote_core::audio::{AudioFrame, BANDS};
+use spote_core::util::mix_oklab;
 
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
@@ -152,14 +153,22 @@ impl Effect for Bars {
             let x1 = (((i + 1) as f32 * width_per_bar).ceil() as i32).max(x0 + 1);
             for x in x0..x1 {
                 let full = height.floor() as i32;
+                // Degradado de color por columna: sin esto, en el modo de
+                // fondo todas las barras salían del mismo tono y quedaba plano.
+                let hue = (t * 1.35 + ctx.time * 0.04) % 1.0;
+                let base = if hue < 0.5 {
+                    mix_oklab(ctx.palette.primary, ctx.palette.secondary, hue * 2.0)
+                } else {
+                    mix_oklab(ctx.palette.secondary, ctx.palette.accent, (hue - 0.5) * 2.0)
+                };
                 for row in 0..full {
                     let y = h - 1 - row;
                     let level = row as f32 / h as f32;
-                    let color = if level > 0.72 {
-                        ctx.shade(0.95)
-                    } else {
-                        ctx.shade(0.42 + level * 0.45 + t * 0.06)
-                    };
+                    let ramp = ctx.shade(0.38 + level * 0.5);
+                    let mut color = mix_oklab(ramp, base, 0.55);
+                    if level > 0.72 {
+                        color = mix_oklab(color, ctx.palette.text, 0.45);
+                    }
                     layer.put(x, y, '█', color, 1.0);
                 }
                 // Sub-celda: el bloque parcial da la sensación de altura continua.
@@ -167,7 +176,7 @@ impl Effect for Bars {
                 let extra = (fraction * 8.0) as usize;
                 if extra > 0 {
                     let y = h - 1 - full;
-                    layer.put(x, y, BLOCKS[extra.min(8)], ctx.shade(0.72), 1.0);
+                    layer.put(x, y, BLOCKS[extra.min(8)], mix_oklab(base, ctx.palette.text, 0.35), 1.0);
                 }
                 // Pico flotante.
                 let peak_row = self.peaks[i];

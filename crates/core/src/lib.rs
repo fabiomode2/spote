@@ -16,6 +16,7 @@ pub mod mpris;
 pub mod player;
 pub mod record;
 pub mod spotify;
+pub mod spotify_api;
 pub mod util;
 
 pub use spote_protocol as protocol;

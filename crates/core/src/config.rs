@@ -138,6 +138,10 @@ pub struct UiCfg {
     pub list_cards: bool,
     /// Visualizador como fondo de toda la UI, no solo en la franja.
     pub viz_background: bool,
+    /// Centra verticalmente el contenido de los paneles.
+    pub vcenter: bool,
+    /// Arranca en modo zen (solo visualización, sin portada ni letra).
+    pub zen: bool,
     /// Número de bandas del ecualizador del header.
     pub show_bpm: bool,
 }
@@ -156,6 +160,8 @@ impl Default for UiCfg {
             art_rotate_secs: 24,
             list_cards: false,
             viz_background: false,
+            vcenter: true,
+            zen: false,
             show_bpm: true,
         }
     }

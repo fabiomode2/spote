@@ -278,6 +278,34 @@ impl Library {
         Ok(row)
     }
 
+    /// Busca una pista local por artista/título tolerando diferencias de
+    /// duración (MPRIS y el fichero no siempre coinciden al segundo). Sirve
+    /// para reutilizar la clave y la portada locales cuando suena en Spotify.
+    pub fn find_by_meta(
+        &self,
+        artist: &str,
+        title: &str,
+        duration_ms: u64,
+    ) -> Result<Option<TrackRow>> {
+        let artist = artist.trim().to_lowercase();
+        let title = title.trim().to_lowercase();
+        if title.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "{SELECT_TRACK}
+             WHERE lower(t.title) = ?1
+               AND lower(t.artist) = ?2
+               AND abs(t.duration_ms - ?3) < 8000
+             ORDER BY abs(t.duration_ms - ?3)
+             LIMIT 1"
+        ))?;
+        let row = stmt
+            .query_row(params![title, artist, duration_ms as i64], row_to_track)
+            .optional()?;
+        Ok(row)
+    }
+
     pub fn track_by_id(&self, id: i64) -> Result<Option<TrackRow>> {
         let mut stmt = self.conn.prepare_cached(&format!("{SELECT_TRACK} WHERE t.id = ?1"))?;
         Ok(stmt.query_row(params![id], row_to_track).optional()?)

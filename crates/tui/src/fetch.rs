@@ -8,8 +8,67 @@ use spote_core::artwork::{decode_image, render_cover, ArtMode, CoverArt, Palette
 use spote_core::config;
 use spote_core::lyrics::{LyricsDoc, LyricsService};
 use spote_core::spotify::{SpotifyState, SpotifyWatcher};
+use spote_core::spotify_api;
+use spote_core::downloader::SearchItem;
 use spote_core::util;
 use spote_protocol::TrackRef;
+
+// ---------------------------------------------------------------------------
+// Búsqueda (Spotify con respaldo Deezer)
+// ---------------------------------------------------------------------------
+
+pub struct SearchWorker {
+    requests: Sender<(u64, String)>,
+    responses: Receiver<(u64, Result<Vec<SearchItem>, String>)>,
+}
+
+impl SearchWorker {
+    pub fn start() -> Self {
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<(u64, String)>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("spote-search".into())
+            .spawn(move || {
+                while let Ok((id, query)) = request_rx.recv() {
+                    let result = spotify_api::search(&query, 12)
+                        .map(|tracks| {
+                            tracks
+                                .into_iter()
+                                .map(|track| SearchItem {
+                                    provider_id: track.id,
+                                    provider: track.provider,
+                                    title: track.title,
+                                    artist: track.artists,
+                                    album: Some(track.album),
+                                    duration_ms: track.duration_ms,
+                                    channel: String::new(),
+                                    url: String::new(),
+                                    art_url: track.art_url,
+                                    isrc: track.isrc,
+                                })
+                                .collect()
+                        })
+                        .map_err(|err| err.to_string());
+                    if response_tx.send((id, result)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            requests: request_tx,
+            responses: response_rx,
+        }
+    }
+
+    pub fn search(&self, id: u64, query: String) {
+        let _ = self.requests.send((id, query));
+    }
+
+    pub fn try_recv(&self) -> Option<(u64, Result<Vec<SearchItem>, String>)> {
+        self.responses.try_recv().ok()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Portada
@@ -38,13 +97,15 @@ pub struct ArtResponse {
 }
 
 pub struct ArtWorker {
-    requests: Sender<ArtRequest>,
+    big: Sender<ArtRequest>,
+    thumbs: Sender<ArtRequest>,
     responses: Receiver<ArtResponse>,
 }
 
 impl ArtWorker {
     pub fn start() -> Self {
-        let (request_tx, request_rx) = std::sync::mpsc::channel::<ArtRequest>();
+        let (big_tx, big_rx) = std::sync::mpsc::channel::<ArtRequest>();
+        let (thumb_tx, thumb_rx) = std::sync::mpsc::channel::<ArtRequest>();
         let (response_tx, response_rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("spote-art".into())
@@ -54,9 +115,20 @@ impl ArtWorker {
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
                     .ok();
-                // Sin coalescing: las miniaturas de la lista son peticiones
-                // independientes y se perderían si solo se procesara la última.
-                while let Ok(request) = request_rx.recv() {
+                // Dos colas: la portada grande manda. Antes, una lista en
+                // tarjetas encolaba 8 miniaturas y la portada de la canción
+                // nueva llegaba segundos tarde (o no llegaba).
+                loop {
+                    let request = match big_rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                        Ok(request) => request,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            match thumb_rx.try_recv() {
+                                Ok(request) => request,
+                                Err(_) => continue,
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    };
                     let response = process(&request, client.as_ref());
                     if response_tx.send(response).is_err() {
                         return;
@@ -65,13 +137,18 @@ impl ArtWorker {
             })
             .ok();
         Self {
-            requests: request_tx,
+            big: big_tx,
+            thumbs: thumb_tx,
             responses: response_rx,
         }
     }
 
     pub fn request(&self, request: ArtRequest) {
-        let _ = self.requests.send(request);
+        if request.w <= 8 && request.h <= 4 {
+            let _ = self.thumbs.send(request);
+        } else {
+            let _ = self.big.send(request);
+        }
     }
 
     pub fn try_recv(&self) -> Option<ArtResponse> {
@@ -284,22 +361,12 @@ impl SpotifyWorker {
             .name("spote-spotify".into())
             .spawn(move || {
                 let mut watcher = SpotifyWatcher::new();
-                let mut last_track: Option<String> = None;
-                let mut last_playing: Option<bool> = None;
                 while flag.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(state) = watcher.poll() {
-                        let track_changed = state
-                            .track
-                            .as_ref()
-                            .map(|track| track.key.clone())
-                            != last_track;
-                        let playing_changed = Some(state.playing) != last_playing;
-                        if track_changed || playing_changed {
-                            last_track = state.track.as_ref().map(|track| track.key.clone());
-                            last_playing = Some(state.playing);
-                            if tx.send(state).is_err() {
-                                return;
-                            }
+                        // Se manda SIEMPRE, también cuando solo cambia la
+                        // posición: de esto depende la letra sincronizada.
+                        if tx.send(state).is_err() {
+                            return;
                         }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(400));

@@ -21,24 +21,33 @@ use crate::util;
 #[derive(Debug, Clone)]
 pub struct SearchItem {
     pub provider_id: String,
+    pub provider: String,
     pub title: String,
     pub artist: String,
+    pub album: Option<String>,
     pub duration_ms: u64,
     pub channel: String,
     pub url: String,
+    pub art_url: Option<String>,
+    pub isrc: Option<String>,
 }
 
 impl SearchItem {
     pub fn to_track(&self) -> TrackRef {
+        let key = self
+            .isrc
+            .as_ref()
+            .map(|isrc| format!("isrc:{}", isrc.to_lowercase()))
+            .unwrap_or_else(|| util::fallback_key(&self.artist, &self.title, self.duration_ms));
         TrackRef {
-            key: util::fallback_key(&self.artist, &self.title, self.duration_ms),
+            key,
             title: self.title.clone(),
             artist: self.artist.clone(),
-            album: None,
+            album: self.album.clone(),
             duration_ms: self.duration_ms,
-            art_url: None,
+            art_url: self.art_url.clone(),
             source_hint: Some(spote_protocol::SourceHint {
-                provider: "ytmusic".to_string(),
+                provider: self.provider.clone(),
                 id: self.provider_id.clone(),
                 duration_ms: self.duration_ms,
             }),
@@ -330,8 +339,12 @@ fn search(query: &str) -> Result<Vec<SearchItem>> {
             let (artist, title) = split_artist_title(&raw_title, &channel);
             SearchItem {
                 provider_id: entry.id.clone(),
+                provider: "ytmusic".into(),
                 title,
                 artist,
+                album: None,
+                art_url: None,
+                isrc: None,
                 duration_ms: (entry.duration.unwrap_or(0.0) * 1000.0) as u64,
                 channel,
                 url: entry

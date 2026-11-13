@@ -424,11 +424,15 @@ mod tests {
     fn item(title: &str, artist: &str, channel: &str, duration_ms: u64) -> SearchItem {
         SearchItem {
             provider_id: "x".into(),
+            provider: "spotify".into(),
             title: title.into(),
             artist: artist.into(),
+            album: None,
             duration_ms,
             channel: channel.into(),
             url: "https://youtu.be/x".into(),
+            art_url: None,
+            isrc: None,
         }
     }
 

@@ -850,6 +850,30 @@ defaults de este documento.
   respetan shift.
 - `run.sh` y repo git inicializado.
 
+### Ronda 3 (13-nov, mañana)
+
+- Gradiente fuera de la rotación: solo se usa cuando no hay portada.
+- Arte robusto: se limpia al cambiar de pista, la petición grande tiene
+  prioridad sobre las miniaturas, y en modo Spotify se reutiliza la clave/arte
+  local por artista+título+duración.
+- Foco de portada centrado de verdad; letra a todo el centro.
+- Cabecera compacta (badges arriba, título + artista en una línea).
+- Transporte centrado en el panel inferior; leyenda al pie.
+- Zen (`i`): oculta portada/letra y deja el visualizador a pantalla completa.
+- Pestaña de ajustes: rotación, segundos, modo de arte, tarjetas, fondo,
+  centrado vertical, zen y Spotify.
+- Búsqueda con metadatos de Spotify (client credentials o token anónimo) y
+  Deezer como respaldo; descarga con yt-dlp a partir de esos datos.
+- Seguir Spotify separado del modo local: al activar se pausa mpv; al
+  desactivar se restaura la pista local. Seek/Next/Prev/Play van por MPRIS.
+- Arreglada la congelación de letras: MPRIS manda la posición en cada sondeo y
+  el reloj interpola sin cortar a los 3 s; solo se resincroniza con deriva real.
+- Cola: el `×` gana al clic de la fila (un clic quita).
+- Sala y biblioteca con el mismo ancho; filtros de favoritas/descargadas/
+  recientes y playlists funcionando.
+- Visualizador `clean` con degradado de color; pulsos de instrumentos en toda
+  la UI (paneles, tabs, transporte, letra, cola).
+
 ### Nota sobre trabajo en paralelo
 
 El repo lo están tocando dos agentes a la vez. En la sesión del 13-nov, además

@@ -18,7 +18,7 @@ use spote_core::util;
 use spote_core::ToolStatus;
 use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackRef};
 
-use crate::fetch::{ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, SpotifyWorker};
+use crate::fetch::{ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, SearchWorker, SpotifyWorker};
 use crate::social::{Social, SocialCmd, SocialEvent};
 use crate::theme::{FpsMeter, PaletteRuntime, Pulse, Spring};
 use crate::viz::Viz;
@@ -29,10 +29,33 @@ pub enum Tab {
     Search,
     Library,
     Room,
+    Settings,
+}
+
+/// Filtro activo de la biblioteca (favoritas, descargadas, recientes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibFilter {
+    All,
+    Favorites,
+    Downloaded,
+    Recent,
+    Playlist(i64),
+}
+
+impl LibFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "todo",
+            Self::Favorites => "favoritas",
+            Self::Downloaded => "descargadas",
+            Self::Recent => "recientes",
+            Self::Playlist(_) => "lista",
+        }
+    }
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Now, Tab::Search, Tab::Library, Tab::Room];
+    pub const ALL: [Tab; 5] = [Tab::Now, Tab::Search, Tab::Library, Tab::Room, Tab::Settings];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -40,6 +63,7 @@ impl Tab {
             Self::Search => "buscar",
             Self::Library => "librería",
             Self::Room => "sala",
+            Self::Settings => "ajustes",
         }
     }
 
@@ -48,7 +72,8 @@ impl Tab {
             Self::Now => "◉",
             Self::Search => "/",
             Self::Library => "≡",
-            Self::Room => "⌂",
+            Self::Room => "◎",
+            Self::Settings => "✧",
         }
     }
 
@@ -58,6 +83,7 @@ impl Tab {
             Self::Search => 1,
             Self::Library => 2,
             Self::Room => 3,
+            Self::Settings => 4,
         }
     }
 }
@@ -96,6 +122,12 @@ pub enum Overlay {
 #[allow(dead_code)]
 pub enum Action {
     Tab(Tab),
+    LibraryFilter(LibFilter),
+    PlaylistOpen(i64),
+    SettingsRow(usize),
+    SettingsAdjust(usize, i32),
+    SettingsToggle(usize),
+    ToggleZen,
     PlayPause,
     Next,
     Prev,
@@ -238,6 +270,7 @@ pub struct App {
     pub queue_selected: usize,
     pub queue_drag: Option<usize>,
     pub view: Vec<TrackRow>,
+    pub lib_filter: LibFilter,
     pub selected: usize,
     pub list_scroll: Spring,
     pub search: SearchState,
@@ -266,11 +299,15 @@ pub struct App {
     pub thumbs: std::collections::HashMap<String, CoverArt>,
     pub thumb_requests: std::collections::HashSet<String>,
     pub art_request: Option<Instant>,
+    pub search_worker: SearchWorker,
     pub palette: PaletteRuntime,
     pub dominant: Palette,
 
     pub list_cards: bool,
     pub viz_background: bool,
+    pub vcenter: bool,
+    pub zen: bool,
+    pub settings_selected: usize,
     pub show_bpm: bool,
     pub viz: Viz,
     pub fps: FpsMeter,
@@ -305,8 +342,13 @@ pub struct App {
     pub follow_spotify: bool,
     pub spotify: Option<SpotifyState>,
     pub last_spotify_poll: Instant,
+    pub spotify_warned: bool,
     pub should_quit: bool,
     pub spectrum_at: Instant,
+}
+
+fn onoff(value: bool) -> String {
+    if value { "sí".into() } else { "no".into() }
 }
 
 impl App {
@@ -349,6 +391,7 @@ impl App {
             queue_selected: 0,
             queue_drag: None,
             view: Vec::new(),
+            lib_filter: LibFilter::All,
             selected: 0,
             list_scroll: Spring::snappy(0.0),
             search: SearchState::default(),
@@ -375,10 +418,14 @@ impl App {
             thumbs: std::collections::HashMap::new(),
             thumb_requests: std::collections::HashSet::new(),
             art_request: None,
+            search_worker: SearchWorker::start(),
             palette: PaletteRuntime::new(Palette::dark(), cfg.ui.theme_fade_ms),
             dominant: Palette::dark(),
             list_cards: cfg.ui.list_cards,
             viz_background: cfg.ui.viz_background,
+            vcenter: cfg.ui.vcenter,
+            zen: cfg.ui.zen,
+            settings_selected: 0,
             show_bpm: cfg.ui.show_bpm,
             viz,
             fps: FpsMeter::new(),
@@ -411,6 +458,7 @@ impl App {
             follow_spotify: cfg.ui.follow_spotify,
             spotify: None,
             last_spotify_poll: Instant::now(),
+            spotify_warned: false,
             should_quit: false,
             spectrum_at: Instant::now(),
             cfg: cfg.clone(),
@@ -452,9 +500,14 @@ impl App {
     // --------------------------------------------------------------- vista
     pub fn refresh_view(&mut self) {
         self.view = match self.tab {
-            Tab::Library | Tab::Now => self.lib.all_tracks(500).unwrap_or_default(),
-            Tab::Search => Vec::new(),
-            Tab::Room => Vec::new(),
+            Tab::Library | Tab::Now => match self.lib_filter {
+                LibFilter::All => self.lib.all_tracks(500).unwrap_or_default(),
+                LibFilter::Favorites => self.lib.favorites().unwrap_or_default(),
+                LibFilter::Downloaded => self.lib.playable(500).unwrap_or_default(),
+                LibFilter::Recent => self.lib.recent(500).unwrap_or_default(),
+                LibFilter::Playlist(id) => self.lib.playlist_tracks(id).unwrap_or_default(),
+            },
+            Tab::Search | Tab::Room | Tab::Settings => Vec::new(),
         };
         if self.selected >= self.view.len() {
             self.selected = self.view.len().saturating_sub(1);
@@ -536,14 +589,18 @@ impl App {
         if let Some(hint) = &track.source_hint {
             if self.tools.yt_dlp {
                 self.lib.upsert_track(&track).ok();
-                self.downloader.download(
-                    &track.key,
-                    DownloadSource::Url(format!(
-                        "https://www.youtube.com/watch?v={}",
-                        hint.id
-                    )),
-                    self.cfg.media_dir(),
-                );
+                if hint.provider == "spotify" || hint.provider == "deezer" {
+                    self.start_resolve(&track);
+                } else {
+                    self.downloader.download(
+                        &track.key,
+                        DownloadSource::Url(format!(
+                            "https://www.youtube.com/watch?v={}",
+                            hint.id
+                        )),
+                        self.cfg.media_dir(),
+                    );
+                }
                 self.queue.push(QueueEntry { track, path: None });
                 self.toast("descargando y en cola", ToastKind::Info);
                 return;
@@ -561,6 +618,20 @@ impl App {
         self.toast("no hay fuente descargable para esta pista", ToastKind::Error);
     }
 
+    fn start_resolve(&mut self, track: &TrackRef) {
+        self.lib.upsert_track(track).ok();
+        if let Some(url) = &track.art_url {
+            self.lib.set_art(&track.key, None, Some(url)).ok();
+        }
+        self.downloader.resolve_and_download(
+            &track.key,
+            &track.artist,
+            &track.title,
+            track.duration_ms,
+            self.cfg.media_dir(),
+        );
+    }
+
     fn start_download(&mut self, track: &TrackRef, url: String) {
         self.lib.upsert_track(track).ok();
         self.downloader
@@ -569,7 +640,14 @@ impl App {
 
     pub fn toggle_play(&mut self) {
         if self.follow_spotify {
-            self.set_status("modo Spotify: el transporte lo manda el cliente oficial");
+            let playing = !self.now.playing;
+            self.now.playing = playing;
+            std::thread::spawn(move || {
+                let _ = spote_core::mpris::call(
+                    if playing { "Play" } else { "Pause" },
+                    &(),
+                );
+            });
             return;
         }
         if self.now.track.is_none() {
@@ -604,6 +682,13 @@ impl App {
     }
 
     pub fn next_track(&mut self) {
+        if self.follow_spotify {
+            self.now.position_ms = 0;
+            std::thread::spawn(|| {
+                let _ = spote_core::mpris::call("Next", &());
+            });
+            return;
+        }
         if self.room.is_some() {
             self.send_control(ControlAction::Next, None);
             return;
@@ -629,6 +714,13 @@ impl App {
     }
 
     pub fn prev_track(&mut self) {
+        if self.follow_spotify {
+            self.now.position_ms = 0;
+            std::thread::spawn(|| {
+                let _ = spote_core::mpris::call("Previous", &());
+            });
+            return;
+        }
         if self.room.is_some() {
             self.send_control(ControlAction::Prev, None);
             return;
@@ -647,8 +739,32 @@ impl App {
     }
 
     pub fn seek_to(&mut self, ms: u64) {
-        self.send_control(ControlAction::Seek, Some(ms));
         let target = ms.min(self.now.duration_ms.max(ms));
+        if self.follow_spotify {
+            // El transporte manda al cliente oficial: SetPosition por MPRIS.
+            let before = self.now.position_ms;
+            self.now.position_ms = target;
+            if let Some(spotify_id) = self
+                .now
+                .track
+                .as_ref()
+                .and_then(|track| track.source_hint.as_ref())
+                .map(|hint| hint.id.clone())
+            {
+                std::thread::spawn(move || {
+                    let _ = spote_core::mpris::set_position(&spotify_id, target);
+                });
+            } else {
+                // Sin trackid no se puede SetPosition; MPRIS acepta un seek
+                // relativo en microsegundos.
+                let delta = (target as i64 - before as i64) * 1000;
+                std::thread::spawn(move || {
+                    let _ = spote_core::mpris::call("Seek", &delta);
+                });
+            }
+            return;
+        }
+        self.send_control(ControlAction::Seek, Some(ms));
         self.now.position_ms = target;
         if let Some(player) = &self.player {
             player.seek(target as f64 / 1000.0);
@@ -674,29 +790,142 @@ impl App {
         }
     }
 
+    // ------------------------------------------------------------- ajustes
+    pub fn settings_rows(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("rotación de arte", onoff(self.art_rotate)),
+            ("rotar cada", format!("{} s", self.cfg.ui.art_rotate_secs.max(5))),
+            ("modo de arte", self.art_mode.label().to_string()),
+            ("visualizador de fondo", onoff(self.viz_background)),
+            ("tarjetas", onoff(self.list_cards)),
+            ("centrar vertical", onoff(self.vcenter)),
+            ("zen (sin portada ni letra)", onoff(self.zen)),
+            ("seguir spotify", onoff(self.follow_spotify)),
+            ("guardar ajustes", "enter".into()),
+        ]
+    }
+
+    pub fn adjust_setting(&mut self, row: usize, delta: i32) {
+        match row {
+            1 => {
+                let secs = self.cfg.ui.art_rotate_secs as i32 + delta * 5;
+                self.cfg.ui.art_rotate_secs = secs.clamp(5, 300) as u64;
+                self.art_next_at = Instant::now()
+                    + Duration::from_secs(self.cfg.ui.art_rotate_secs.max(5));
+                self.cfg.save().ok();
+            }
+            2 => {
+                let next = if delta > 0 { self.art_mode.next() } else { self.art_mode.prev() };
+                self.set_art_mode(next);
+                self.cfg.save().ok();
+            }
+            _ => self.toggle_setting(row),
+        }
+    }
+
+    pub fn toggle_setting(&mut self, row: usize) {
+        match row {
+            0 => {
+                self.art_rotate = !self.art_rotate;
+                self.cfg.ui.art_rotate = self.art_rotate;
+            }
+            3 => {
+                self.viz_background = !self.viz_background;
+                self.cfg.ui.viz_background = self.viz_background;
+            }
+            4 => {
+                self.list_cards = !self.list_cards;
+                self.cfg.ui.list_cards = self.list_cards;
+            }
+            5 => {
+                self.vcenter = !self.vcenter;
+                self.cfg.ui.vcenter = self.vcenter;
+            }
+            6 => self.set_zen(!self.zen),
+            7 => self.toggle_spotify(),
+            8 => match self.cfg.save() {
+                Ok(()) => self.toast("ajustes guardados", ToastKind::Ok),
+                Err(err) => self.toast(format!("no se pudo guardar: {err}"), ToastKind::Error),
+            },
+            _ => {}
+        }
+        if row != 8 {
+            self.cfg.save().ok();
+        }
+    }
+
+    pub fn set_zen(&mut self, zen: bool) {
+        self.zen = zen;
+        self.cfg.ui.zen = zen;
+    }
+
     // ------------------------------------------------------------- Spotify
     pub fn enable_spotify(&mut self) {
         if self.spotify_worker.is_none() {
             self.spotify_worker = Some(SpotifyWorker::start());
         }
         self.follow_spotify = true;
+        self.spotify_warned = false;
+        self.last_spotify_poll = Instant::now();
+        // El modo acompañante manda: nada de audio local sonando por debajo.
+        if let Some(player) = &self.player {
+            player.pause(true);
+        }
+        self.now.playing = false;
         self.spectrum.decode_system();
-        self.toast("siguiendo Spotify por MPRIS", ToastKind::Info);
+        self.toast("siguiendo Spotify (transporte y audio del cliente oficial)", ToastKind::Info);
     }
 
     pub fn disable_spotify(&mut self) {
         self.follow_spotify = false;
         self.spotify_worker = None;
         self.spectrum.stop();
-        self.toast("modo Spotify desactivado", ToastKind::Info);
+        // Vuelve el modo local limpio: fuera la pista remota.
+        self.spotify = None;
+        self.now.track = None;
+        self.now.path = None;
+        self.now.position_ms = 0;
+        self.now.playing = false;
+        self.lyrics = None;
+        self.lyrics_key.clear();
+        self.lyrics_status.clear();
+        self.art = None;
+        self.art_key.clear();
+        self.art_variants.clear();
+        if let Some(row) = self.selected_row().cloned() {
+            if let Some(path) = row.path {
+                self.play_local(row.track, Some(path));
+            }
+        }
+        self.toast("modo Spotify desactivado · vuelve el modo local", ToastKind::Info);
     }
 
     fn apply_spotify(&mut self, state: SpotifyState) {
-        if let Some(track) = state.track.clone() {
+        if let Some(mut track) = state.track.clone() {
+            // Si la pista está descargada, usa SU clave (y su portada local):
+            // MPRIS da otro id y si no, la letra/arte no encuentran nada.
+            if let Ok(Some(row)) = self
+                .lib
+                .find_by_meta(&track.artist, &track.title, track.duration_ms)
+            {
+                track.key = row.track.key.clone();
+                if track.album.is_none() {
+                    track.album = row.track.album.clone();
+                }
+                if track.art_url.is_none() {
+                    track.art_url = row.track.art_url.clone();
+                }
+            }
             let changed = self.now.track.as_ref().map(|t| &t.key) != Some(&track.key);
             self.now.track = Some(track.clone());
             self.now.duration_ms = track.duration_ms;
-            self.now.position_ms = state.position_ms;
+            // MPRIS informa con ~400 ms de retraso. Si se aplica tal cual en
+            // cada sondeo, la posición retrocede y la letra se queda clavada.
+            // Solo se resincroniza cuando la deriva es de verdad.
+            let drift = state.position_ms as i64 - self.now.position_ms as i64;
+            if changed || drift.abs() > 1500 || drift < -700 {
+                self.now.position_ms = state.position_ms;
+            }
             self.now.playing = state.playing;
             self.now.path = None;
             if changed {
@@ -707,8 +936,21 @@ impl App {
                 self.art_key.clear();
                 self.lyrics_offset_ms = self.lib.lyrics_offset(&track.key).unwrap_or(0);
                 self.lib.upsert_track(&track).ok();
-                if let Some(url) = track.art_url.clone() {
-                    self.lib.set_art(&track.key, None, Some(&url)).ok();
+                let has_local = self
+                    .lib
+                    .art_path(&track.key)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|path| path.exists())
+                    || self
+                        .lib
+                        .local_path(&track.key)
+                        .map(|path| path.with_extension("jpg").exists())
+                        .unwrap_or(false);
+                if !has_local {
+                    if let Some(url) = track.art_url.clone() {
+                        self.lib.set_art(&track.key, None, Some(&url)).ok();
+                    }
                 }
                 self.load_lyrics(&track);
             }
@@ -784,6 +1026,7 @@ impl App {
         self.audio = frame;
 
         self.poll_player();
+        self.poll_search();
         self.poll_downloads();
         self.poll_spotify_jobs();
         self.poll_art();
@@ -846,6 +1089,47 @@ impl App {
                     self.set_status("mpv desconectado");
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn poll_search(&mut self) {
+        while let Some((id, result)) = self.search_worker.try_recv() {
+            if id != self.search.last_query_id {
+                continue;
+            }
+            match result {
+                Ok(items) if !items.is_empty() => {
+                    let provider = items
+                        .first()
+                        .map(|item| item.provider.clone())
+                        .unwrap_or_default();
+                    self.search.results = items;
+                    self.search.selected = 0;
+                    self.search.loading = false;
+                    self.search.message = format!(
+                        "{} resultados · {} · enter para descargar",
+                        self.search.results.len(),
+                        provider
+                    );
+                }
+                Ok(_) => {
+                    // Sin resultados en Spotify/Deezer: yt-dlp de respaldo.
+                    if self.tools.yt_dlp {
+                        self.search.message = "sin resultados en el catálogo · probando yt-dlp".into();
+                        self.downloader.search(self.search.last_query_id, self.search.last_query.clone());
+                    } else {
+                        self.search.loading = false;
+                        self.search.message = "sin resultados".into();
+                    }
+                }
+                Err(err) => {
+                    self.search.loading = false;
+                    self.search.message = format!("catálogo no disponible: {err}");
+                    if self.tools.yt_dlp {
+                        self.downloader.search(self.search.last_query_id, self.search.last_query.clone());
+                    }
+                }
             }
         }
     }
@@ -1019,8 +1303,21 @@ impl App {
                 self.last_spotify_poll = Instant::now();
             }
         }
+        if self.spotify.is_none()
+            && !self.spotify_warned
+            && self.last_spotify_poll.elapsed() > Duration::from_secs(4)
+        {
+            self.spotify_warned = true;
+            self.toast(
+                "Spotify no responde por MPRIS: abre el cliente oficial",
+                ToastKind::Warn,
+            );
+        }
         // Interpola la posición entre sondeos de MPRIS.
-        if self.now.playing && self.last_spotify_poll.elapsed() < Duration::from_secs(3) {
+        // MPRIS solo informa de la posición cada ~400 ms; entre sondeos el
+        // reloj lo lleva spote. Antes se cortaba a los 3 s y la letra se
+        // quedaba congelada.
+        if self.now.playing {
             self.now.position_ms = self
                 .now
                 .position_ms
@@ -1208,6 +1505,14 @@ impl App {
         let (w, h) = self.art_size_hint;
         if w < 4 || h < 2 {
             return;
+        }
+        if self.art_key != track.key {
+            // Pista nueva: fuera el arte viejo. Se pinta el placeholder hasta
+            // que llegue el bueno, nunca la portada anterior.
+            self.art = None;
+            self.art_prev = None;
+            self.art_fade_active = false;
+            self.art_variants.clear();
         }
         let same = self.art_key == track.key
             && self.art_size == (w, h)
@@ -1424,14 +1729,26 @@ impl App {
                 };
             }
             KeyCode::Right => {
+                if self.tab == Tab::Settings {
+                    self.adjust_setting(self.settings_selected, 1);
+                    return;
+                }
                 let step = if upper { 30_000 } else { 5_000 };
                 self.seek_relative(step);
             }
             KeyCode::Left => {
+                if self.tab == Tab::Settings {
+                    self.adjust_setting(self.settings_selected, -1);
+                    return;
+                }
                 let step = if upper { 30_000 } else { 5_000 };
                 self.seek_relative(-step);
             }
             KeyCode::Up => {
+                if self.tab == Tab::Settings {
+                    self.settings_selected = self.settings_selected.saturating_sub(1);
+                    return;
+                }
                 if upper {
                     self.move_queue(-1);
                 } else {
@@ -1439,6 +1756,10 @@ impl App {
                 }
             }
             KeyCode::Down => {
+                if self.tab == Tab::Settings {
+                    self.settings_selected = (self.settings_selected + 1).min(8);
+                    return;
+                }
                 if upper {
                     self.move_queue(1);
                 } else {
@@ -1448,7 +1769,9 @@ impl App {
             KeyCode::PageUp => self.move_selection(-8),
             KeyCode::PageDown => self.move_selection(8),
             KeyCode::Enter => {
-                if self.tab == Tab::Room {
+                if self.tab == Tab::Settings {
+                    self.toggle_setting(self.settings_selected);
+                } else if self.tab == Tab::Room {
                     self.join_room(self.room_selected);
                 } else if let Some(row) = self.selected_row().cloned() {
                     self.play_local(row.track, row.path);
@@ -1484,6 +1807,7 @@ impl App {
                     Fullscreen::Viz
                 };
             }
+            KeyCode::Char('i') => self.set_zen(!self.zen),
             KeyCode::Char('x') => self.remove_queue_selected(),
             KeyCode::Char('z') => self.list_cards = !self.list_cards,
             KeyCode::Char('b') => self.viz_background = !self.viz_background,
@@ -1528,19 +1852,31 @@ impl App {
         }
     }
 
+    fn toggle_favorite_now(&mut self) {
+        if let Some(track) = self.now.track.clone() {
+            self.toggle_favorite_key(&track.key);
+        }
+    }
+
     fn toggle_favorite(&mut self) {
         if let Some(row) = self.selected_row().cloned() {
-            if let Ok(value) = self.lib.toggle_favorite(&row.track.key) {
-                self.toast(
-                    if value {
-                        "añadida a favoritas"
-                    } else {
-                        "quitada de favoritas"
-                    },
-                    ToastKind::Info,
-                );
-                self.refresh_view();
-            }
+            self.toggle_favorite_key(&row.track.key);
+        } else {
+            self.toggle_favorite_now();
+        }
+    }
+
+    fn toggle_favorite_key(&mut self, key: &str) {
+        if let Ok(value) = self.lib.toggle_favorite(key) {
+            self.toast(
+                if value {
+                    "añadida a favoritas"
+                } else {
+                    "quitada de favoritas"
+                },
+                ToastKind::Info,
+            );
+            self.refresh_view();
         }
     }
 
@@ -1671,16 +2007,17 @@ impl App {
             self.spotify_jobs.import(query);
             return;
         }
-        if !self.tools.yt_dlp {
-            self.search.message = "falta yt-dlp en el PATH".into();
-            return;
-        }
         self.search.last_query_id += 1;
         self.search.last_query = query.clone();
         self.search.loading = true;
-        self.search.message = "buscando…".into();
+        self.search.message = "buscando en el catálogo…".into();
         self.search.results.clear();
-        self.downloader.search(self.search.last_query_id, query);
+        // Metadatos primero (Spotify/Deezer); la descarga se resuelve después
+        // con esos datos, no con el texto libre en yt-dlp.
+        self.search_worker.search(self.search.last_query_id, query.clone());
+        if !self.tools.yt_dlp {
+            self.search.message = "buscando… (sin yt-dlp no se podrá descargar)".into();
+        }
     }
 
     fn play_search_selection(&mut self) {
@@ -1693,7 +2030,7 @@ impl App {
                 self.lib
                     .set_source(
                         id,
-                        "ytmusic",
+                        &hint.provider,
                         Some(&hint.id),
                         None,
                         spote_core::library::SourceStatus::Pending,
@@ -1701,12 +2038,19 @@ impl App {
                     )
                     .ok();
             }
+            if let Some(url) = &item.art_url {
+                self.lib.set_art(&track.key, None, Some(url)).ok();
+            }
         }
         if let Some(path) = self.lib.local_path(&track.key) {
             self.play_local(track, Some(path));
             return;
         }
-        self.start_download(&track, item.url.clone());
+        if item.provider == "spotify" || item.provider == "deezer" {
+            self.start_resolve(&track);
+        } else {
+            self.start_download(&track, item.url.clone());
+        }
         self.pending_play = Some(track.key.clone());
         self.now.track = Some(track.clone());
         self.now.loading = true;
@@ -1864,8 +2208,31 @@ impl App {
 
     pub fn perform(&mut self, action: Action) {
         match action {
+            Action::PlaylistOpen(id) => {
+                self.lib_filter = LibFilter::Playlist(id);
+                self.tab = Tab::Library;
+                self.selected = 0;
+                self.refresh_view();
+            }
+            Action::LibraryFilter(filter) => {
+                self.lib_filter = filter;
+                self.tab = Tab::Library;
+                self.selected = 0;
+                self.refresh_view();
+            }
+            Action::SettingsRow(index) => {
+                self.settings_selected = index.min(8);
+                self.tab = Tab::Settings;
+            }
+            Action::SettingsAdjust(row, delta) => self.adjust_setting(row, delta),
+            Action::SettingsToggle(row) => self.toggle_setting(row),
+            Action::ToggleZen => self.set_zen(!self.zen),
             Action::Tab(tab) => {
                 self.tab = tab;
+                if tab != Tab::Library {
+                    self.lib_filter = LibFilter::All;
+                    self.refresh_view();
+                }
                 if tab == Tab::Search {
                     self.search.query.clear();
                     self.search.results.clear();
@@ -2034,8 +2401,10 @@ mod tests {
     #[test]
     fn tab_cycles_in_both_directions() {
         assert_eq!(Tab::Now.next(), Tab::Search);
-        assert_eq!(Tab::Room.next(), Tab::Now);
-        assert_eq!(Tab::Now.prev(), Tab::Room);
+        assert_eq!(Tab::Room.next(), Tab::Settings);
+        assert_eq!(Tab::Settings.next(), Tab::Now);
+        assert_eq!(Tab::Now.prev(), Tab::Settings);
+        assert_eq!(Tab::Settings.prev(), Tab::Room);
     }
 
     #[test]
