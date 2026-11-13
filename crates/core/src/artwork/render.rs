@@ -78,6 +78,7 @@ pub fn render_cover(
         ArtMode::Off => blank_panel(w, h, pal),
         ArtMode::Gradient => gradient_panel(w, h, pal, dim),
         ArtMode::Half => render_half(img, w, h, pal, dim),
+        ArtMode::Plain => render_plain(img, w, h),
         ArtMode::Dither => render_dither(img, w, h, pal, dim),
         ArtMode::Braille => render_braille(img, w, h, pal, dim),
     }
@@ -268,6 +269,25 @@ fn render_half(img: &DynamicImage, w: u16, h: u16, pal: &Palette, dim: f32) -> C
 /// Dither ordenado: luminancia perceptual → curva de tono → Bayer 8x8 → rampa
 /// de la paleta. El color lo pone la rampa (respeta la portada) y el glifo la
 /// densidad, así que el contraste tinta/fondo se mantiene alto con `bg = None`.
+/// La portada literal: media celda con los píxeles originales, sin paleta,
+/// viñeta ni tinte. Es la opción "foto" para quien no quiere el look TUI.
+fn render_plain(img: &DynamicImage, w: u16, h: u16) -> CoverArt {
+    let pixels = sample_cover(img, w as u32, h as u32 * 2, FilterType::Lanczos3);
+    let mut art = CoverArt::new(w, h);
+    for y in 0..h as u32 {
+        for x in 0..w as u32 {
+            let top = pixels.get_pixel(x, y * 2);
+            let bottom = pixels.get_pixel(x, y * 2 + 1);
+            art.cells[y as usize * w as usize + x as usize] = ArtCell {
+                ch: '▀',
+                fg: (top[0], top[1], top[2]),
+                bg: Some((bottom[0], bottom[1], bottom[2])),
+            };
+        }
+    }
+    art
+}
+
 fn render_dither(img: &DynamicImage, w: u16, h: u16, pal: &Palette, dim: f32) -> CoverArt {
     let (cw, ch) = (w as u32, h as u32);
     let pixels = sample_cover(img, cw, ch, FilterType::Triangle);

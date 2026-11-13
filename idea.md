@@ -874,6 +874,28 @@ defaults de este documento.
 - Visualizador `clean` con degradado de color; pulsos de instrumentos en toda
   la UI (paneles, tabs, transporte, letra, cola).
 
+### Ronda 4 (13-nov, tarde)
+
+- `f` actúa sobre la selección de la pestaña activa; en ajustes/sala ya no
+  marca la pista que suena. `a` también respeta búsqueda/biblioteca.
+- `vcenter` centra el bloque de paneles (el cuadrado), no el texto; sin pista
+  el panel se centra en la pantalla.
+- Modo de arte `plain`: media celda con los píxeles originales, sin paleta,
+  viñeta ni pulso. Entra en la rotación y en `A`.
+- Ajuste de efecto de miniaturas: `palette`, `plain` o `off`.
+- Transporte configurable: barra en el visualizador (centrada en la franja),
+  ancho 55-100 % y tamaño de controles 1-4.
+- Listas completas: crear con nombre/descripción/portada (URL o automática),
+  borrar, añadir pistas, filtros con `[`/`]` y portada en la cabecera.
+- Importación de playlists públicas de Spotify/Deezer con metadatos y descarga
+  bajo demanda.
+- Progreso real de descarga por pasos (`StageProgress` de yt-dlp) visible en
+  sesión, transporte y filas.
+- Refactor: `tui/ui` en 8 módulos y `tui/app` en 6; primitivas y `Layout` en
+  `ui/mod.rs`; `docs/arquitectura.md` con las recetas de extensión.
+- `buf.reset()` + recorte por caracteres; la búsqueda ya no revienta con
+  acentos ni con el separador `·`.
+
 ### Nota sobre trabajo en paralelo
 
 El repo lo están tocando dos agentes a la vez. En la sesión del 13-nov, además

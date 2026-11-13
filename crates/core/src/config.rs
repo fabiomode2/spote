@@ -121,7 +121,7 @@ impl Default for PlayerCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiCfg {
-    /// `dither` | `half` | `braille` | `off`
+    /// `dither` | `half` | `plain` | `braille` | `off`
     pub art_mode: String,
     /// Preset de visualización por defecto (`aurora`, `inferno`, `void`, ...).
     pub viz: String,
@@ -138,8 +138,16 @@ pub struct UiCfg {
     pub list_cards: bool,
     /// Visualizador como fondo de toda la UI, no solo en la franja.
     pub viz_background: bool,
-    /// Centra verticalmente el contenido de los paneles.
+    /// Centra verticalmente el bloque de paneles (el cuadrado), no el texto.
     pub vcenter: bool,
+    /// Efecto de las miniaturas de las listas: `palette`, `plain` u `off`.
+    pub thumb_mode: String,
+    /// Dibuja la barra de progreso dentro de la franja del visualizador.
+    pub progress_in_viz: bool,
+    /// Ancho de la barra de progreso, en % del ancho disponible (55-100).
+    pub bar_width_pct: u8,
+    /// Aire alrededor de los iconos del transporte (1-4 celdas).
+    pub button_pad: u8,
     /// Arranca en modo zen (solo visualización, sin portada ni letra).
     pub zen: bool,
     /// Número de bandas del ecualizador del header.
@@ -161,6 +169,10 @@ impl Default for UiCfg {
             list_cards: false,
             viz_background: false,
             vcenter: true,
+            thumb_mode: "palette".to_string(),
+            progress_in_viz: false,
+            bar_width_pct: 70,
+            button_pad: 2,
             zen: false,
             show_bpm: true,
         }

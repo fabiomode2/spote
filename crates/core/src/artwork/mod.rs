@@ -20,6 +20,9 @@ pub enum ArtMode {
     /// que mejor aguanta una portada grande como imagen principal.
     #[default]
     Half,
+    /// Media celda con los colores originales de la imagen: la portada tal
+    /// cual, sin cuantizar a la paleta ni pulsos. Es el modo "foto".
+    Plain,
     /// Braille (2x4 puntos por celda), tinta plana del acento.
     Braille,
     /// Sin arte: solo el degradado de fondo.
@@ -32,16 +35,18 @@ pub enum ArtMode {
 impl ArtMode {
     pub fn next(self) -> Self {
         match self {
+            Self::Plain => Self::Half,
             Self::Half => Self::Dither,
             Self::Dither => Self::Braille,
             Self::Braille => Self::Off,
-            Self::Gradient | Self::Off => Self::Half,
+            Self::Gradient | Self::Off => Self::Plain,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Half => Self::Off,
+            Self::Plain => Self::Off,
+            Self::Half => Self::Plain,
             Self::Dither => Self::Half,
             Self::Braille => Self::Dither,
             Self::Gradient | Self::Off => Self::Braille,
@@ -50,12 +55,14 @@ impl ArtMode {
 
     /// Modos que participan en la rotación automática. `Gradient` no está:
     /// es solo el recurso de cuando no hay portada.
-    pub const ROTATION: [ArtMode; 3] = [ArtMode::Half, ArtMode::Dither, ArtMode::Braille];
+    pub const ROTATION: [ArtMode; 4] =
+        [ArtMode::Plain, ArtMode::Half, ArtMode::Dither, ArtMode::Braille];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Dither => "dither",
             Self::Half => "half",
+            Self::Plain => "plain",
             Self::Braille => "braille",
             Self::Off => "off",
             Self::Gradient => "gradient",
@@ -66,6 +73,7 @@ impl ArtMode {
         match text {
             "dither" => Some(Self::Dither),
             "half" | "halfblocks" => Some(Self::Half),
+            "plain" | "foto" | "photo" => Some(Self::Plain),
             "braille" => Some(Self::Braille),
             "off" => Some(Self::Off),
             "gradient" => Some(Self::Gradient),

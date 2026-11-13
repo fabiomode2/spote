@@ -63,6 +63,11 @@ pub struct Playlist {
     pub id: i64,
     pub name: String,
     pub count: i64,
+    pub description: String,
+    /// Clave de la pista cuya portada hace de portada automática.
+    pub cover_key: Option<String>,
+    /// Portada remota (playlist importada).
+    pub cover_url: Option<String>,
 }
 
 pub struct Library {
@@ -193,6 +198,30 @@ impl Library {
             END;
             "#,
         )?;
+        self.migrate_playlists()?;
+        Ok(())
+    }
+
+    /// Columnas nuevas de playlist en bases ya existentes. SQLite no tiene
+    /// `ADD COLUMN IF NOT EXISTS`, así que se mira `table_info` primero.
+    fn migrate_playlists(&mut self) -> Result<()> {
+        let mut existing = std::collections::HashSet::new();
+        {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(playlist)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+        for (column, ddl) in [
+            ("description", "ALTER TABLE playlist ADD COLUMN description TEXT NOT NULL DEFAULT ''"),
+            ("cover_key", "ALTER TABLE playlist ADD COLUMN cover_key TEXT"),
+            ("cover_url", "ALTER TABLE playlist ADD COLUMN cover_url TEXT"),
+        ] {
+            if !existing.contains(column) {
+                self.conn.execute(ddl, [])?;
+            }
+        }
         Ok(())
     }
 
@@ -262,6 +291,23 @@ impl Library {
             ],
         )?;
         Ok(())
+    }
+
+    /// Proveedor y id de la mejor fuente remota de una pista (para descargar
+    /// pistas importadas que aún no tienen fichero).
+    pub fn source_hint(&self, key: &str) -> Option<(String, String)> {
+        self.conn
+            .query_row(
+                r#"SELECT s.provider, s.provider_id FROM source s
+                   JOIN track t ON t.id = s.track_id
+                   WHERE t.key = ?1 AND s.provider_id IS NOT NULL
+                   ORDER BY (s.status = 'ready') DESC LIMIT 1"#,
+                params![key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten()
     }
 
     pub fn set_status(&mut self, track_id: i64, provider: &str, status: SourceStatus) -> Result<()> {
@@ -530,7 +576,8 @@ impl Library {
     // ---------------------------------------------------------- playlists
     pub fn playlists(&self) -> Result<Vec<Playlist>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.name, (SELECT count(*) FROM playlist_item i WHERE i.playlist_id = p.id)
+            "SELECT p.id, p.name, (SELECT count(*) FROM playlist_item i WHERE i.playlist_id = p.id),
+                    p.description, p.cover_key, p.cover_url
              FROM playlist p ORDER BY p.name COLLATE NOCASE",
         )?;
         let rows = stmt
@@ -539,6 +586,9 @@ impl Library {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     count: row.get(2)?,
+                    description: row.get(3)?,
+                    cover_key: row.get(4)?,
+                    cover_url: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -546,11 +596,99 @@ impl Library {
     }
 
     pub fn create_playlist(&mut self, name: &str) -> Result<i64> {
+        self.create_playlist_full(name, "", None, None)
+    }
+
+    /// Crea una lista con descripción y portada (automática si `cover_key` es
+    /// la primera pista y `cover_url` es None).
+    pub fn create_playlist_full(
+        &mut self,
+        name: &str,
+        description: &str,
+        cover_key: Option<&str>,
+        cover_url: Option<&str>,
+    ) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO playlist(name, created_at) VALUES (?1, ?2)",
-            params![name, now_ms()],
+            "INSERT INTO playlist(name, description, cover_key, cover_url, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![name, description, cover_key, cover_url, now_ms()],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn delete_playlist(&mut self, playlist_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM playlist WHERE id = ?1", params![playlist_id])?;
+        Ok(())
+    }
+
+    /// Portada de una lista: la guardada, o la primera pista con arte.
+    pub fn playlist_cover(&self, playlist_id: i64) -> Option<String> {
+        if let Ok(Some(url)) = self.conn.query_row(
+            "SELECT cover_url FROM playlist WHERE id = ?1 AND cover_url IS NOT NULL",
+            params![playlist_id],
+            |row| row.get::<_, String>(0),
+        ).optional() {
+            return Some(url);
+        }
+        if let Ok(Some(key)) = self.conn.query_row(
+            "SELECT p.cover_key FROM playlist p WHERE p.id = ?1 AND p.cover_key IS NOT NULL",
+            params![playlist_id],
+            |row| row.get::<_, String>(0),
+        ).optional() {
+            return Some(key);
+        }
+        let key: Option<String> = self
+            .conn
+            .query_row(
+                r#"SELECT t.key FROM playlist_item i JOIN track t ON t.id = i.track_id
+                   WHERE i.playlist_id = ?1
+                     AND (t.art_path IS NOT NULL OR t.art_url IS NOT NULL)
+                   ORDER BY i.position LIMIT 1"#,
+                params![playlist_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if key.is_some() {
+            return key;
+        }
+        // Último recurso: el jpg que yt-dlp deja junto al audio.
+        self.playlist_tracks(playlist_id)
+            .ok()?
+            .into_iter()
+            .find(|row| {
+                row.path
+                    .as_ref()
+                    .map(|path| path.with_extension("jpg").exists())
+                    .unwrap_or(false)
+            })
+            .map(|row| row.track.key)
+    }
+
+    /// Metadatos de una lista, para la cabecera de la biblioteca.
+    pub fn playlist(&self, playlist_id: i64) -> Result<Option<Playlist>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT p.id, p.name,
+                        (SELECT count(*) FROM playlist_item i WHERE i.playlist_id = p.id),
+                        p.description, p.cover_key, p.cover_url
+                 FROM playlist p WHERE p.id = ?1",
+                params![playlist_id],
+                |row| {
+                    Ok(Playlist {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        count: row.get(2)?,
+                        description: row.get(3)?,
+                        cover_key: row.get(4)?,
+                        cover_url: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn playlist_tracks(&self, playlist_id: i64) -> Result<Vec<TrackRow>> {
@@ -668,6 +806,24 @@ mod tests {
             art_url: None,
             source_hint: None,
         }
+    }
+
+    #[test]
+    fn playlists_create_delete_and_auto_cover() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let mut with_art = track("isrc:abc", "Song", "Artist");
+        with_art.art_url = Some("https://example.com/cover.jpg".into());
+        lib.upsert_track(&with_art).unwrap();
+        let id = lib
+            .create_playlist_full("Road trip", "para el coche", None, None)
+            .unwrap();
+        lib.add_to_playlist(id, "isrc:abc").unwrap();
+        let list = lib.playlist(id).unwrap().unwrap();
+        assert_eq!(list.description, "para el coche");
+        assert_eq!(lib.playlist_cover(id).as_deref(), Some("isrc:abc"));
+        lib.delete_playlist(id).unwrap();
+        assert!(lib.playlist(id).unwrap().is_none());
+        assert!(lib.playlist_tracks(id).unwrap().is_empty());
     }
 
     #[test]

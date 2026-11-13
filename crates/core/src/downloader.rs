@@ -59,10 +59,110 @@ impl SearchItem {
 pub enum DownloadEvent {
     Found { query_id: u64, items: Vec<SearchItem> },
     SearchFailed { query_id: u64, message: String },
+    /// Progreso "clásico": el paso ya viene formateado para pintarlo tal cual.
     Progress { key: String, percent: f32, stage: String },
+    /// El mismo progreso pero con el paso tipado: la UI puede elegir icono o color.
+    StageProgress {
+        key: String,
+        stage: DownloadStage,
+        percent: f32,
+    },
     Done { key: String, path: PathBuf },
     Failed { key: String, message: String },
     Message(String),
+}
+
+/// Pasos del pipeline de `yt-dlp`. `label()` es el texto que ve el usuario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadStage {
+    Resolving,
+    Downloading,
+    Converting,
+    Cover,
+    Lyrics,
+    Done,
+}
+
+impl DownloadStage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Resolving => "buscando",
+            Self::Downloading => "descargando",
+            Self::Converting => "convirtiendo",
+            Self::Cover => "portada",
+            Self::Lyrics => "letras",
+            Self::Done => "lista",
+        }
+    }
+}
+
+impl std::fmt::Display for DownloadStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Manda el par de eventos (formateado + tipado) que la TUI ya sabe consumir.
+fn emit_progress(events: &Sender<DownloadEvent>, key: &str, stage: DownloadStage, percent: f32) {
+    let percent = percent.clamp(0.0, 100.0);
+    let _ = events.send(DownloadEvent::Progress {
+        key: key.to_string(),
+        percent,
+        stage: stage.label().to_string(),
+    });
+    let _ = events.send(DownloadEvent::StageProgress {
+        key: key.to_string(),
+        stage,
+        percent,
+    });
+}
+
+/// Filtra el ruido del pipe: sólo deja pasar cambios de paso o de 0.5% reales.
+struct ProgressReporter {
+    events: Sender<DownloadEvent>,
+    key: String,
+    stage: Option<DownloadStage>,
+    percent: f32,
+}
+
+impl ProgressReporter {
+    fn new(events: &Sender<DownloadEvent>, key: &str) -> Self {
+        Self {
+            events: events.clone(),
+            key: key.to_string(),
+            stage: None,
+            percent: 0.0,
+        }
+    }
+
+    /// Porcentaje del último evento: sirve para pasos que no tienen progreso propio.
+    fn percent(&self) -> f32 {
+        self.percent
+    }
+
+    fn report(&mut self, stage: DownloadStage, percent: f32) {
+        let percent = percent.clamp(0.0, 100.0);
+        let stepped = (percent - self.percent).abs() >= 0.5;
+        if self.stage == Some(stage) && !stepped {
+            return;
+        }
+        self.stage = Some(stage);
+        self.percent = percent;
+        emit_progress(&self.events, &self.key, stage, percent);
+    }
+
+    /// Progreso de descarga normal. Si llega al 100%, el siguiente paso del
+    /// pipeline es ffmpeg (`-x --audio-format opus`).
+    fn report_download(&mut self, percent: f32) {
+        // yt-dlp repite la última línea de descarga al cerrar: no volver atrás.
+        if self.stage == Some(DownloadStage::Converting) {
+            return;
+        }
+        self.report(DownloadStage::Downloading, percent);
+        if percent >= 99.5 {
+            self.report(DownloadStage::Converting, percent);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -214,13 +314,10 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 }
             }
             Job::Download { key, source, out } => {
-                let _ = events.send(DownloadEvent::Progress {
-                    key: key.clone(),
-                    percent: 0.0,
-                    stage: "resolviendo".into(),
-                });
+                emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
                 match download(&key, &source, &out, &events, &children) {
                     Ok(path) => {
+                        emit_progress(&events, &key, DownloadStage::Done, 100.0);
                         let _ = events.send(DownloadEvent::Done { key, path });
                     }
                     Err(err) => {
@@ -238,11 +335,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 duration_ms,
                 out,
             } => {
-                let _ = events.send(DownloadEvent::Progress {
-                    key: key.clone(),
-                    percent: 0.0,
-                    stage: "buscando".into(),
-                });
+                emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
                 let query = format!("{artist} {title}");
                 let result = search(&query).and_then(|items| {
                     let best = crate::catalog::pick_best(&items, &artist, &title, duration_ms)
@@ -252,6 +345,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 });
                 match result {
                     Ok(path) => {
+                        emit_progress(&events, &key, DownloadStage::Done, 100.0);
                         let _ = events.send(DownloadEvent::Done { key, path });
                     }
                     Err(err) => {
@@ -366,6 +460,31 @@ fn search(query: &str) -> Result<Vec<SearchItem>> {
     Ok(items)
 }
 
+/// Porcentaje de una línea de progreso de yt-dlp:
+/// `[download]  42.3% of 3.2MiB at ...` → `Some(42.3)`.
+/// Las líneas de `[download]` sin porcentaje (Destination, etc.) dan `None`.
+fn parse_percent(line: &str) -> Option<f32> {
+    let rest = line.trim_start().strip_prefix("[download]")?.trim_start();
+    let (value, _) = rest.split_once('%')?;
+    let percent: f32 = value.trim().parse().ok()?;
+    Some(percent.clamp(0.0, 100.0))
+}
+
+/// Línea del `--progress-template`: `descargado total_estimado total`.
+/// yt-dlp escribe `NA` cuando no conoce el tamaño; el total del servidor vale
+/// como respaldo.
+fn parse_byte_progress(rest: &str) -> Option<f32> {
+    let mut parts = rest.split_whitespace();
+    let downloaded: f64 = parts.next().and_then(|value| value.parse().ok())?;
+    let estimate: f64 = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0.0);
+    let total: f64 = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0.0);
+    let total = if estimate > 0.0 { estimate } else { total };
+    if total <= 0.0 {
+        return None;
+    }
+    Some(((downloaded / total * 100.0) as f32).clamp(0.0, 100.0))
+}
+
 /// "Artist - Title" con canal "- Topic" → (artist, title). Si no, el canal es
 /// el artista y el título queda limpio de sufijos.
 fn split_artist_title(title: &str, channel: &str) -> (String, String) {
@@ -446,7 +565,10 @@ fn download(
         .arg("--extractor-args")
         .arg("youtube:player_client=default,web_safari")
         .arg("--progress-template")
-        .arg("download:SPOTE_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes_estimate)s")
+        .arg(
+            "download:SPOTE_PROGRESS %(progress.downloaded_bytes)s \
+             %(progress.total_bytes_estimate)s %(progress.total_bytes)s",
+        )
         .arg("-o")
         .arg(format!("{}.%(ext)s", target.display()))
         .arg("-o")
@@ -466,12 +588,10 @@ fn download(
     // stderr en otro hilo para no bloquear el pipe.
     let error_text = Arc::new(Mutex::new(String::new()));
     let err_shared = Arc::clone(&error_text);
-    let key_owned = key.to_string();
-    let events_owned = events.clone();
     let err_handle = stderr.map(|stderr| {
         let err_shared = Arc::clone(&err_shared);
-        let key_owned = key_owned.clone();
-        let events_owned = events_owned.clone();
+        let key_owned = key.to_string();
+        let events_owned = events.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
@@ -479,34 +599,44 @@ fn download(
                     text.push_str(&line);
                     text.push('\n');
                 }
-                // yt-dlp anuncia el destino final en stderr en algunos modos.
-                if line.contains("Destination:") {
-                    let _ = events_owned.send(DownloadEvent::Progress {
-                        key: key_owned.clone(),
-                        percent: 99.0,
-                        stage: "etiquetando".into(),
-                    });
+                // ffmpeg solo entra cuando la descarga ya terminó: es el único
+                // paso que se puede anunciar desde stderr sin mentir en el %.
+                if line.contains("[ExtractAudio]")
+                    || line.contains("[Merger]")
+                    || line.contains("[Fixup")
+                {
+                    emit_progress(&events_owned, &key_owned, DownloadStage::Converting, 100.0);
                 }
             }
         })
     });
 
-    let mut last_percent = 0.0f32;
+    let mut reporter = ProgressReporter::new(events, key);
     if let Some(stdout) = stdout {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
             if let Some(rest) = line.strip_prefix("SPOTE_PROGRESS ") {
-                let mut parts = rest.split_whitespace();
-                let downloaded: f64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                let total: f64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                if total > 0.0 {
-                    last_percent = (downloaded / total * 100.0) as f32;
+                // Formato del --progress-template: bytes bajados / total.
+                match parse_byte_progress(rest) {
+                    Some(percent) => reporter.report_download(percent),
+                    // Sin total no hay porcentaje: al menos se anuncia el paso.
+                    None => {
+                        let percent = reporter.percent();
+                        reporter.report(DownloadStage::Downloading, percent);
+                    }
                 }
-                let _ = events.send(DownloadEvent::Progress {
-                    key: key.to_string(),
-                    percent: last_percent.clamp(0.0, 99.0),
-                    stage: "descargando".into(),
-                });
+                continue;
+            }
+            if let Some(percent) = parse_percent(&line) {
+                reporter.report_download(percent);
+                continue;
+            }
+            if line.contains("[ExtractAudio]")
+                || line.contains("[Merger]")
+                || line.contains("[Fixup")
+            {
+                let percent = reporter.percent();
+                reporter.report(DownloadStage::Converting, percent);
             }
         }
     }
@@ -527,6 +657,10 @@ fn download(
     for ext in ["opus", "ogg", "webm", "m4a", "mp3"] {
         let candidate = target.with_extension(ext);
         if candidate.exists() {
+            // `--write-thumbnail` deja la portada como <pista>.jpg.
+            if target.with_extension("jpg").exists() {
+                reporter.report(DownloadStage::Cover, 100.0);
+            }
             return Ok(candidate);
         }
     }
@@ -806,6 +940,102 @@ mod tests {
     #[test]
     fn clean_title_collapses_whitespace() {
         assert_eq!(clean_title("  A    B (Lyrics) "), "A B");
+    }
+
+    #[test]
+    fn parses_ytdlp_percent_lines() {
+        assert_eq!(
+            parse_percent("[download]  42.3% of 3.2MiB at 1.20MiB/s ETA 00:02"),
+            Some(42.3)
+        );
+        assert_eq!(parse_percent("[download] 100% of 3.2MiB in 00:02"), Some(100.0));
+        assert_eq!(parse_percent("  [download]    7.5% of ~12.0MiB"), Some(7.5));
+        // Sin porcentaje no hay nada que inventar.
+        assert_eq!(parse_percent("[download] Destination: /tmp/foo.opus"), None);
+        assert_eq!(parse_percent("[ExtractAudio] Destination: /tmp/foo.opus"), None);
+        assert_eq!(parse_percent("SPOTE_PROGRESS 1024 4096"), None);
+        assert_eq!(parse_percent(""), None);
+    }
+
+    #[test]
+    fn parses_byte_progress_with_na_totals() {
+        // Formato real de yt-dlp: "NA" cuando no conoce el tamaño.
+        assert_eq!(parse_byte_progress("1024 NA 4096"), Some(25.0));
+        assert_eq!(parse_byte_progress("1048576 2097152 NA"), Some(50.0));
+        assert_eq!(parse_byte_progress("1024 NA"), None);
+        assert_eq!(parse_byte_progress("NA NA NA"), None);
+        assert_eq!(parse_byte_progress(""), None);
+    }
+
+    #[test]
+    fn stage_labels_are_spanish() {
+        assert_eq!(DownloadStage::Resolving.label(), "buscando");
+        assert_eq!(DownloadStage::Downloading.label(), "descargando");
+        assert_eq!(DownloadStage::Converting.label(), "convirtiendo");
+        assert_eq!(DownloadStage::Cover.label(), "portada");
+        assert_eq!(DownloadStage::Lyrics.label(), "letras");
+        assert_eq!(DownloadStage::Done.label(), "lista");
+        assert_eq!(DownloadStage::Done.to_string(), "lista");
+    }
+
+    #[test]
+    fn reporter_emits_stage_changes_and_dedupes_percent() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut reporter = ProgressReporter::new(&tx, "k1");
+        reporter.report(DownloadStage::Downloading, 10.0);
+        // Mismo paso y menos de medio punto: no se emite.
+        reporter.report(DownloadStage::Downloading, 10.2);
+        reporter.report(DownloadStage::Downloading, 11.0);
+        // Cambio de paso aunque el porcentaje no se mueva.
+        reporter.report(DownloadStage::Converting, 11.0);
+        drop(reporter);
+
+        let events: Vec<DownloadEvent> = rx.try_iter().collect();
+        let stages: Vec<(DownloadStage, f32)> = events
+            .iter()
+            .filter_map(|event| match event {
+                DownloadEvent::StageProgress { stage, percent, .. } => Some((*stage, *percent)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stages,
+            vec![
+                (DownloadStage::Downloading, 10.0),
+                (DownloadStage::Downloading, 11.0),
+                (DownloadStage::Converting, 11.0),
+            ]
+        );
+        // Y por cada uno, el evento clásico con la etiqueta ya formateada.
+        let labels: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                DownloadEvent::Progress { stage, .. } => Some(stage.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["descargando", "descargando", "convirtiendo"]);
+    }
+
+    #[test]
+    fn download_percent_switches_to_converting_at_the_end() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut reporter = ProgressReporter::new(&tx, "k2");
+        reporter.report_download(99.9);
+        // yt-dlp repite la línea final: no debe rebobinar a "descargando".
+        reporter.report_download(100.0);
+        drop(reporter);
+        let stages: Vec<DownloadStage> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                DownloadEvent::StageProgress { stage, .. } => Some(stage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stages,
+            vec![DownloadStage::Downloading, DownloadStage::Converting]
+        );
     }
 
     #[test]

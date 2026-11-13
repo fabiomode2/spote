@@ -10,6 +10,9 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use spote_core::catalog::{self, Catalog};
 use spote_core::config::Config;
+use spote_core::downloader::SearchItem;
+use spote_core::library::SourceStatus;
+use spote_core::spotify_api::{self, PlaylistInfo};
 use spote_core::discord::{Activity, DiscordWorker};
 use spote_core::harvest::{self, HarvestOptions, Progress};
 
@@ -19,6 +22,8 @@ use crate::app::{App, ToastKind};
 pub enum JobEvent {
     Catalog(Catalog),
     CatalogFailed(String),
+    Playlist(PlaylistInfo),
+    PlaylistFailed(String),
     HarvestProgress(Progress),
     HarvestDone {
         path: PathBuf,
@@ -54,6 +59,23 @@ impl SpotifyJobs {
                 }
                 Err(err) => {
                     let _ = tx.send(JobEvent::CatalogFailed(err.to_string()));
+                }
+            })
+            .ok();
+    }
+
+    /// Importa una playlist de Spotify o Deezer (metadatos, sin descargar el
+    /// audio: se baja al reproducir, así importar 100 pistas es instantáneo).
+    pub fn import_playlist(&self, input: String) {
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("spote-playlist".into())
+            .spawn(move || match spotify_api::playlist(&input) {
+                Ok(list) => {
+                    let _ = tx.send(JobEvent::Playlist(list));
+                }
+                Err(err) => {
+                    let _ = tx.send(JobEvent::PlaylistFailed(err));
                 }
             })
             .ok();
@@ -106,6 +128,10 @@ impl App {
                 JobEvent::CatalogFailed(message) => {
                     self.search.message = format!("no pude cargar: {message}");
                     self.toast("catálogo de Spotify: error", ToastKind::Error);
+                }
+                JobEvent::Playlist(list) => self.apply_playlist(list),
+                JobEvent::PlaylistFailed(message) => {
+                    self.toast(format!("no pude importar la lista: {message}"), ToastKind::Error);
                 }
                 JobEvent::HarvestProgress(progress) => {
                     self.set_status(&format!(
@@ -206,6 +232,64 @@ impl App {
 
     /// Arranca la extracción de lo que esté sonando en el cliente oficial.
     /// Sin `target`: se usa la pista que reporta MPRIS en ese momento.
+    /// Crea la lista local con los metadatos importados y deja las pistas
+    /// listas para descargar bajo demanda. Devuelve cuántas entraron.
+    pub fn apply_playlist(&mut self, list: PlaylistInfo) {
+        let cover_url = list.cover_url.clone();
+        let playlist_id = match self.lib.create_playlist_full(
+            &list.title,
+            &list.description,
+            None,
+            cover_url.as_deref(),
+        ) {
+            Ok(id) => id,
+            Err(err) => {
+                self.toast(format!("no pude crear la lista: {err}"), ToastKind::Error);
+                return;
+            }
+        };
+        let mut added = 0usize;
+        for item in &list.tracks {
+            let search = SearchItem {
+                provider_id: item.id.clone(),
+                provider: item.provider.clone(),
+                title: item.title.clone(),
+                artist: item.artists.clone(),
+                album: Some(item.album.clone()).filter(|album| !album.is_empty()),
+                duration_ms: item.duration_ms,
+                channel: String::new(),
+                url: String::new(),
+                art_url: item.art_url.clone().or_else(|| cover_url.clone()),
+                isrc: item.isrc.clone(),
+            };
+            let track = search.to_track();
+            let Ok(track_id) = self.lib.upsert_track(&track) else {
+                continue;
+            };
+            self.lib
+                .set_source(
+                    track_id,
+                    &item.provider,
+                    Some(&item.id),
+                    None,
+                    SourceStatus::Pending,
+                    None,
+                )
+                .ok();
+            if self.lib.add_to_playlist(playlist_id, &track.key).is_ok() {
+                added += 1;
+            }
+        }
+        self.lib_filter = crate::app::LibFilter::Playlist(playlist_id);
+        self.tab = crate::app::Tab::Library;
+        self.selected = 0;
+        self.refresh_view();
+        self.toast(
+            format!("lista '{}' importada · {} pistas (se descargan al reproducir)", list.title, added),
+            ToastKind::Ok,
+        );
+    }
+
     pub fn start_harvest(&mut self) {
         let out = self.cfg.media_dir();
         self.set_status("extrayendo del cliente…");
@@ -245,6 +329,7 @@ impl DiscordPresence {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         self.worker.is_some()
     }
