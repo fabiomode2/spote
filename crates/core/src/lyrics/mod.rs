@@ -16,6 +16,9 @@ pub struct Word {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// Va entre paréntesis/corchetes: adlib o coro de fondo. Se muestra, pero
+    /// no bloquea el progreso ni obliga a esperar para pasar a la siguiente.
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -59,6 +62,8 @@ pub struct LyricsDoc {
     pub instrumental: bool,
     pub source: LyricsSource,
     pub offset_ms: i64,
+    /// Tiempos refinados contra la voz real (ASR/audio), no solo LRC.
+    pub aligned: bool,
 }
 
 /// Una línea es "de fondo" cuando todo su contenido va entre paréntesis o
@@ -67,7 +72,7 @@ pub struct LyricsDoc {
 /// esperando adlibs mientras la voz principal ya avanzó.
 pub fn is_background_line(text: &str) -> bool {
     let text = text.trim();
-    if text.is_empty() {
+    if text.is_empty() || text == INSTRUMENTAL_MARK {
         return false;
     }
     let mut depth = 0i32;
@@ -76,7 +81,7 @@ pub fn is_background_line(text: &str) -> bool {
         match ch {
             '(' | '[' => depth += 1,
             ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth == 0 && !ch.is_whitespace() && !ch.is_ascii_punctuation() => {
+            _ if depth == 0 && ch.is_alphanumeric() => {
                 has_outside = true;
             }
             _ => {}
@@ -143,12 +148,23 @@ impl LyricsDoc {
             return (ms.saturating_sub(line.start_ms) as f32 / span as f32).clamp(0.0, 1.0);
         }
         let mut done = 0.0;
+        let mut count = 0;
         for word in &line.words {
+            // Los adlibs entre paréntesis no cuentan: la frase principal puede
+            // terminar (y empezar la siguiente) mientras todavía se oyen.
+            if word.optional {
+                continue;
+            }
             let span = word.end_ms.saturating_sub(word.start_ms).max(1);
             let progress = (ms.saturating_sub(word.start_ms) as f32 / span as f32).clamp(0.0, 1.0);
             done += progress;
+            count += 1;
         }
-        (done / line.words.len() as f32).clamp(0.0, 1.0)
+        if count == 0 {
+            let span = line.end_ms.saturating_sub(line.start_ms).max(1);
+            return (ms.saturating_sub(line.start_ms) as f32 / span as f32).clamp(0.0, 1.0);
+        }
+        (done / count as f32).clamp(0.0, 1.0)
     }
 
     /// Cercena a las `limit` líneas más cercanas a la activa, para no pintar
@@ -158,6 +174,74 @@ impl LyricsDoc {
         let start = anchor.saturating_sub(before);
         let end = (anchor + after + 1).min(self.lines.len());
         (start, end)
+    }
+
+    /// Estima un desplazamiento global comparando los inicios de las líneas
+    /// principales con la actividad vocal/ritmo del mapa de audio de la pista.
+    ///
+    /// Es conservador a propósito: solo devuelve algo si el pico destaca sobre
+    /// el resto de candidatos. Un LRC de otra versión no debe desplazarse a
+    /// ciegas; para eso ya está el ajuste manual por pista.
+    pub fn estimate_offset_from_map(&self, map: &crate::audio_map::SongMap) -> Option<i64> {
+        if !self.synced || map.buckets.is_empty() || self.offset_ms != 0 {
+            return None;
+        }
+        let starts: Vec<u64> = self
+            .lines
+            .iter()
+            .filter(|line| line.text != INSTRUMENTAL_MARK && !is_background_line(&line.text))
+            .map(|line| line.start_ms)
+            .collect();
+        if starts.len() < 4 {
+            return None;
+        }
+        let bucket_ms = crate::audio_map::BUCKET_MS as i64;
+        let max_offset = 25_000i64;
+        let step = 100i64;
+        let mut best: Option<(f32, i64)> = None;
+        let mut all_scores: Vec<f32> = Vec::new();
+        let mut offset = -max_offset;
+        while offset <= max_offset {
+            let mut total = 0.0f32;
+            let mut used = 0usize;
+            for start in &starts {
+                let at = *start as i64 + offset;
+                if at < 0 {
+                    continue;
+                }
+                let idx = (at / bucket_ms).max(0) as usize;
+                if idx >= map.buckets.len() {
+                    continue;
+                }
+                let current = &map.buckets[idx];
+                let before = idx.saturating_sub(2);
+                let rise = (current.vocal - map.buckets[before].vocal).max(0.0);
+                let beat = if current.beat { 0.28 } else { 0.0 };
+                total += current.vocal * 0.70 + rise * 1.5 + beat;
+                used += 1;
+            }
+            if used >= 3 {
+                // Penaliza desplazamientos enormes: la intro de un vídeo suele
+                // ser de segundos, no de medio minuto.
+                let prior = 1.0 - (offset.abs() as f32 / max_offset as f32) * 0.18;
+                let score = total / used as f32 * prior;
+                all_scores.push(score);
+                if best.is_none_or(|(best_score, _)| score > best_score) {
+                    best = Some((score, offset));
+                }
+            }
+            offset += step;
+        }
+        let (score, offset) = best?;
+        // Sin una separación clara frente a la mediana, se prefiere no tocar
+        // nada antes que empeorar una letra que ya estaba bien.
+        let mut sorted = all_scores.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+        if score < 0.12 || score < median * 1.12 || offset.abs() < 250 {
+            return None;
+        }
+        Some(offset)
     }
 }
 
@@ -224,8 +308,19 @@ impl LyricsService {
     /// Busca la letra de `track`. Devuelve `Ok(None)` si no hay nada mejor que
     /// un documento vacío.
     pub async fn fetch(&self, track: &TrackRef) -> Result<Option<LyricsDoc>, LyricsError> {
+        self.fetch_with_audio(track, None).await
+    }
+
+    /// Igual que [`fetch`](Self::fetch), pero deja que el puente alinee la
+    /// letra contra el audio local con ASR. Es lo que arregla los LRC
+    /// estimados de Genius y las canciones con intro larga.
+    pub async fn fetch_with_audio(
+        &self,
+        track: &TrackRef,
+        audio: Option<&std::path::Path>,
+    ) -> Result<Option<LyricsDoc>, LyricsError> {
         if let Some(bridge) = &self.bridge {
-            match bridge::fetch(bridge, track) {
+            match bridge::fetch(bridge, track, audio) {
                 Ok(Some(doc)) => return Ok(Some(doc)),
                 Ok(None) => {}
                 Err(_) => {}
@@ -400,6 +495,7 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
         for (i, word) in line.words.iter_mut().enumerate() {
             word.end_ms = starts.get(i + 1).copied().unwrap_or(end);
         }
+        mark_optional_words(line);
     }
 
     doc.instrumental = !out.is_empty() && out.iter().all(|line| line.text == INSTRUMENTAL_MARK);
@@ -432,6 +528,7 @@ fn build_line(stamp: u64, body: &str, words: &[(u64, String)]) -> LyricLine {
             start_ms: (base + ms).max(stamp),
             end_ms: 0,
             text: text.clone(),
+            optional: false,
         })
         .collect();
     timed.sort_by_key(|word| word.start_ms);
@@ -640,6 +737,48 @@ fn push_word(words: &mut Vec<(u64, String)>, stamp: Option<u64>, text: &str) {
     }
 }
 
+/// Marca las palabras que caen dentro de paréntesis o corchetes. El parser
+/// conserva esos textos (se ven en la línea), pero el progreso y la selección
+/// de línea los tratan como opcionales.
+fn mark_optional_words(line: &mut LyricLine) {
+    if line.words.is_empty() {
+        return;
+    }
+    let mut optional_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (index, ch) in line.text.char_indices() {
+        match ch {
+            '(' | '[' => {
+                if depth == 0 {
+                    start = index;
+                }
+                depth += 1;
+            }
+            ')' | ']' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        optional_ranges.push((start, index + ch.len_utf8()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut cursor = 0usize;
+    for word in &mut line.words {
+        let Some(relative) = line.text[cursor..].find(&word.text) else {
+            continue;
+        };
+        let at = cursor + relative;
+        word.optional = optional_ranges
+            .iter()
+            .any(|(from, to)| at >= *from && at < *to);
+        cursor = at + word.text.len();
+    }
+}
+
 fn word_times(start: u64, end: u64, text: &str) -> Option<Vec<Word>> {
     let chunks: Vec<&str> = text.split_whitespace().collect();
     if chunks.len() < 2 {
@@ -675,6 +814,7 @@ fn word_times(start: u64, end: u64, text: &str) -> Option<Vec<Word>> {
             start_ms: cursor,
             end_ms: cursor + duration,
             text: chunk.to_string(),
+            optional: false,
         });
         cursor += duration;
     }
@@ -891,5 +1031,46 @@ mod background_tests {
         assert!(!is_background_line("Main (oh oh)"));
         assert_eq!(doc.index_at(5_000), Some(0));
         assert_eq!(doc.index_at(8_000), Some(2));
+    }
+
+    #[test]
+    fn audio_map_can_estimate_the_global_offset() {
+        use crate::audio_map::{SongBucket, SongMap, BUCKET_MS};
+        let mut buckets = Vec::new();
+        for index in 0..240u64 {
+            let at = index * BUCKET_MS;
+            let vocal = if at > 12_000 && at < 12_500 || at > 20_000 && at < 20_500 {
+                1.0
+            } else {
+                0.0
+            };
+            buckets.push(SongBucket {
+                at_ms: at,
+                vocal,
+                ..SongBucket::default()
+            });
+        }
+        let map = SongMap::from_buckets(60_000, buckets);
+        let doc = LyricsDoc::from_lrc(
+            "[00:10.00]primera\n[00:18.00]segunda\n[00:26.00]tercera\n[00:34.00]cuarta",
+            true,
+        );
+        assert!(doc.estimate_offset_from_map(&map).unwrap_or(0).abs() >= 1_000);
+    }
+
+    #[test]
+    fn parenthetical_words_are_optional_for_progress() {
+        let doc = LyricsDoc::from_lrc(
+            "[00:01.00]Main line (oh oh)\n[00:02.00]Next main",
+            true,
+        );
+        let line = &doc.lines[0];
+        let optional: Vec<bool> = line.words.iter().map(|word| word.optional).collect();
+        assert!(optional.iter().any(|value| *value), "{optional:?}");
+        assert!(!optional.iter().all(|value| *value), "{optional:?}");
+        // A mitad de la parte principal, el progreso no se queda esperando el adlib.
+        assert!(LyricsDoc::word_progress(line, 1_500) > 0.45);
+        // La siguiente línea ya manda aunque el adlib siga sonando.
+        assert_eq!(doc.index_at(2_100), Some(1));
     }
 }

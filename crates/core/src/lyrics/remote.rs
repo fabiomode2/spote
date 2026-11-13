@@ -511,6 +511,7 @@ fn synced_doc(raw: &RemoteLyrics, duration_ms: u64) -> Option<LyricsDoc> {
         instrumental: parsed.instrumental,
         source: LyricsSource::Lrclib,
         offset_ms: parsed.offset_ms,
+        aligned: false,
     })
 }
 
@@ -593,6 +594,7 @@ fn plain_doc(raw: &RemoteLyrics, track: &TrackRef) -> Option<LyricsDoc> {
         instrumental: false,
         source: LyricsSource::Plain,
         offset_ms: 0,
+        aligned: false,
     };
     for (index, text) in texts.into_iter().enumerate() {
         let index = index as u64;

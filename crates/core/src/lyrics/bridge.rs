@@ -55,7 +55,8 @@ impl BridgeConfig {
             python,
             script,
             root,
-            timeout: Duration::from_secs(25),
+            // El ASR local puede tardar; solo bloquea el hilo de letras.
+            timeout: Duration::from_secs(90),
         })
     }
 }
@@ -95,6 +96,8 @@ struct BridgeResponse {
     #[serde(default)]
     provider: String,
     #[serde(default)]
+    aligned: bool,
+    #[serde(default)]
     lines: Vec<BridgeLine>,
 }
 
@@ -107,13 +110,18 @@ struct BridgeLine {
 }
 
 /// Pide la letra a lyricbar. Bloquea; se llama desde el hilo de letras.
-pub fn fetch(bridge: &BridgeConfig, track: &TrackRef) -> Result<Option<LyricsDoc>, LyricsError> {
+pub fn fetch(
+    bridge: &BridgeConfig,
+    track: &TrackRef,
+    audio: Option<&std::path::Path>,
+) -> Result<Option<LyricsDoc>, LyricsError> {
     let payload = serde_json::json!({
         "title": track.title,
         "artists": [track.artist],
         "album": track.album,
         "duration_ms": track.duration_ms,
         "root": bridge.root.to_string_lossy(),
+        "audio_path": audio.map(|path| path.to_string_lossy().into_owned()),
     });
 
     let mut child = Command::new(&bridge.python)
@@ -157,6 +165,12 @@ pub fn fetch(bridge: &BridgeConfig, track: &TrackRef) -> Result<Option<LyricsDoc
     if parsed.lines.is_empty() {
         return Ok(None);
     }
+    // Unas líneas estimadas de Genius no son karaoke: si no se pudieron
+    // alinear contra el audio, se prefiere que el proveedor interno pruebe
+    // LRCLIB antes que aceptar tiempos inventados.
+    if !parsed.aligned && (!parsed.synced || parsed.estimated) {
+        return Ok(None);
+    }
 
     let mut lines: Vec<LyricLine> = parsed
         .lines
@@ -193,10 +207,11 @@ pub fn fetch(bridge: &BridgeConfig, track: &TrackRef) -> Result<Option<LyricsDoc
     );
     Ok(Some(LyricsDoc {
         lines,
-        synced: parsed.synced && !parsed.estimated,
+        synced: (parsed.synced && !parsed.estimated) || parsed.aligned,
         instrumental: false,
         source,
         offset_ms: 0,
+        aligned: parsed.aligned,
     }))
 }
 

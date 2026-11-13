@@ -285,22 +285,44 @@ pub fn pick_best<'a>(
 
     let mut best: Option<(&SearchItem, i32)> = None;
     for item in items {
-        let got_title = normalize(&item.title);
+        let raw_title = normalize(&item.title);
         let got_artist = normalize(&format!("{} {}", item.artist, item.channel));
+        // yt-dlp a veces deja "Artista - Tema" en el título aunque el artista
+        // ya venga aparte; se compara contra la parte que es el tema. Hay que
+        // separar antes de normalizar porque `normalize` convierte el guion en
+        // espacio.
+        let got_title = if let Some((left, right)) = item.title.split_once(" - ") {
+            let left = normalize(left);
+            let right = normalize(right);
+            if !want_artist.is_empty() && left.contains(&want_artist) && !right.is_empty() {
+                right
+            } else {
+                raw_title.clone()
+            }
+        } else {
+            raw_title.clone()
+        };
 
-        let mut score = 0i32;
-
-        if !want_title.is_empty() && got_title == want_title {
-            score += 60;
-        } else if !want_title.is_empty()
-            && (got_title.contains(&want_title) || want_title.contains(&got_title))
-        {
-            score += 25;
+        let exact_title = !want_title.is_empty() && got_title == want_title;
+        let loose_title = !want_title.is_empty()
+            && (got_title.contains(&want_title) || want_title.contains(&got_title));
+        // Un título parecido no basta: antes se colaba otra canción del mismo
+        // artista porque la duración cuadraba. El título es obligatorio.
+        if !exact_title && !loose_title {
+            continue;
         }
 
+        let mut score = if exact_title { 60 } else { 25 };
+
         if !want_artist.is_empty() {
-            if got_artist.contains(&want_artist) || want_artist.contains(&got_artist) {
+            let artist_match =
+                got_artist.contains(&want_artist) || want_artist.contains(&got_artist);
+            if artist_match {
                 score += 30;
+            } else if exact_title && !got_artist.trim().is_empty() {
+                // Mismo título pero otro artista: casi seguro un cover, una
+                // versión de otro canal o una canción homónima. No se baja.
+                continue;
             } else {
                 score -= 10;
             }
@@ -336,15 +358,18 @@ pub fn pick_best<'a>(
 
         if duration_ms > 0 && item.duration_ms > 0 {
             let diff = duration_ms.abs_diff(item.duration_ms);
+            // Un vídeo oficial puede ir 10-20 s por delante del catálogo por
+            // intro/outro. Con título exacto se tolera, pero se penaliza; sin
+            // título exacto no se acepta una diferencia grande.
             score += match diff {
-                0..=2_000 => 40,
-                2_001..=4_000 => 20,
-                4_001..=8_000 => 5,
-                8_001..=15_000 => -20,
-                _ => -60,
+                0..=3_000 => 40,
+                3_001..=8_000 => 20,
+                8_001..=15_000 => if exact_title { 0 } else { -20 },
+                15_001..=30_000 => if exact_title { -25 } else { -60 },
+                _ => -100,
             };
-            // Fuera de tolerancia de sala: descartado aunque el título cuadre.
-            if diff > 10_000 {
+            let limit = if exact_title { 30_000 } else { 10_000 };
+            if diff > limit {
                 continue;
             }
         }
@@ -510,6 +535,18 @@ mod tests {
         ];
         let best = pick_best(&items, "Ashe", "Stop The Wedding!", 198_840).expect("hay match");
         assert_eq!(best.channel, "Ashe - Topic");
+    }
+
+    #[test]
+    fn no_cae_en_otra_cancion_del_mismo_artista() {
+        // Guxo tiene varias canciones de ~3 min. Antes se elegía "El Precio del
+        // Amor" porque su duración encajaba mejor que el vídeo oficial largo.
+        let items = vec![
+            item("Guxo - El Precio del Amor [Official Music Video]", "Guxo", "Guxo", 178_000),
+            item("Guxo - Kariñosa (Official Video)", "Guxo", "Guxo", 188_000),
+        ];
+        let best = pick_best(&items, "Guxo", "Kariñosa", 176_062).expect("hay match");
+        assert!(best.title.contains("Kariñosa"), "{}", best.title);
     }
 
     #[test]

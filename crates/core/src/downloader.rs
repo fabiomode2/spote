@@ -336,13 +336,37 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 out,
             } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
-                let query = format!("{artist} {title}");
-                let result = search(&query).and_then(|items| {
-                    let best = crate::catalog::pick_best(&items, &artist, &title, duration_ms)
-                        .ok_or_else(|| anyhow!("sin match fiable para «{query}»"))?;
-                    let source = DownloadSource::Url(best.url.clone());
-                    download(&key, &source, &out, &events, &children)
-                });
+                // yt-dlp falla a menudo con "artista título" cuando el artista
+                // usa un alias o el título lleva una falta; se prueban las
+                // variantes de más a menos específica antes de rendirse.
+                let mut queries = vec![format!("{artist} {title}")];
+                if !title.trim().is_empty() {
+                    queries.push(title.trim().to_string());
+                }
+                if !artist.trim().is_empty() && !title.trim().is_empty() {
+                    queries.push(format!("{title} {artist}"));
+                }
+                queries.dedup();
+                let mut best = None;
+                for query in queries {
+                    match search(&query) {
+                        Ok(items) => {
+                            if let Some(item) =
+                                crate::catalog::pick_best(&items, &artist, &title, duration_ms)
+                            {
+                                best = Some(item.clone());
+                                break;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                let result = best
+                    .ok_or_else(|| anyhow!("sin match fiable para «{artist} {title}»"))
+                    .and_then(|best| {
+                        let source = DownloadSource::Url(best.url.clone());
+                        download(&key, &source, &out, &events, &children)
+                    });
                 match result {
                     Ok(path) => {
                         emit_progress(&events, &key, DownloadStage::Done, 100.0);
