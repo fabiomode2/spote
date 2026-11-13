@@ -106,6 +106,12 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     if let Some(fps) = fps {
         items.push((fps, pal.dim));
     }
+    if app.cfg.ui.fx.bloom_play {
+        items.push((
+            "✺".into(),
+            mix_oklab(pal.secondary, pal.primary, app.audio.kick_pulse),
+        ));
+    }
     items.push((clock, pal.muted));
     if let Some(room) = &app.room {
         let label = app.room_label(&room.id);
@@ -188,8 +194,11 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     use crate::app::LibFilter;
     let rect = layout.nav;
     let focused = app.focus == crate::app::Pane::Nav;
-    panel(buf, rect, pal, focused, 0.55, Some("vistas"), app.audio.kick_pulse);
+    panel(Some(app), buf, rect, pal, focused, 0.55, Some("vistas"), app.audio.kick_pulse);
     app.hit.add(rect, Action::Focus(crate::app::Pane::Nav));
+    // Clic derecho en la cabecera "vistas": crear/importar lista, recargar...
+    app.hit
+        .add(Rect::new(rect.x, rect.y, rect.width, 1), Action::NavMenu);
 
     let playlists = app.lib.playlists().unwrap_or_default();
     let block = (Tab::ALL.len() + 3 + playlists.len().min(6) + 3) as u16;
@@ -312,7 +321,7 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
 
 pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.transport;
-    if rect.height < 2 {
+    if rect.height == 0 || rect.width < 12 {
         return;
     }
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
@@ -322,92 +331,176 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         (position as f32 / duration as f32).clamp(0.0, 1.0)
     };
     let pulse = (app.pulse.eased() * 0.45 + app.audio.kick_pulse * 0.55).min(1.0);
-
+    let progress_row = rect.height >= 2 && !app.progress_in_viz;
     if app.progress_in_viz && layout.viz.height >= 2 {
-        // La barra vive sobre el visualizador, centrada en su franja. La
-        // franja de fondo es opaca: sobre el efecto la barra se perdía.
         let y = layout.viz.y + layout.viz.height / 2;
         let width = bar_width(rect.width, app.bar_width_pct);
         let bar_rect = centered(Rect::new(rect.x, y, rect.width, 1), width, 1);
         draw_progress_bar(app, buf, bar_rect, pal, progress, pulse, true);
-    } else {
+    } else if progress_row {
         let width = bar_width(rect.width, app.bar_width_pct);
         let bar_rect = centered(Rect::new(rect.x, rect.y, rect.width, 1), width, 1);
         draw_progress_bar(app, buf, bar_rect, pal, progress, pulse, false);
     }
 
-    // Controles centrados en la fila inferior del transporte (o en la única
-    // fila que queda libre cuando la barra se fue al visualizador).
-    let y = if app.progress_in_viz {
-        rect.y
-    } else {
-        rect.y + 1
-    };
+    let controls_y = rect.y + u16::from(progress_row);
+    let controls_h = rect.height.saturating_sub(u16::from(progress_row)).max(1);
+    let compact = rect.width < 82;
+    let big = controls_h >= 2 && rect.width >= 64;
     let pad = u16::from(app.button_pad.clamp(1, 4));
-    let buttons: [(&str, Action, bool); 3] = [
-        ("◀◀", Action::Prev, false),
-        (if app.now.playing { PAUSE } else { PLAY }, Action::PlayPause, true),
-        ("▶▶", Action::Next, false),
-    ];
-    let widths: u16 = buttons
-        .iter()
-        .map(|(label, _, _)| label.chars().count() as u16 + pad * 2)
-        .sum();
-    let mut x = rect.x + (rect.width.saturating_sub(widths + 2)) / 2;
-    for (label, action, primary) in buttons {
-        let width = label.chars().count() as u16 + pad * 2;
-        let button = Rect::new(x, y, width, 1);
+    let (prev_label, play_label, next_label) =
+        ("◀◀", if app.now.playing { PAUSE } else { PLAY }, "▶▶");
+    let (prev_w, play_w, next_w) = if big {
+        (7, 9, 9)
+    } else {
+        (
+            prev_label.chars().count() as u16 + pad * 2,
+            play_label.chars().count() as u16 + pad * 2,
+            next_label.chars().count() as u16 + pad * 2,
+        )
+    };
+    let total_w = prev_w + play_w + next_w + 2;
+    let mut x = rect.x + rect.width.saturating_sub(total_w) / 2;
+    let play_rect = Rect::new(x + prev_w + 1, controls_y, play_w, controls_h);
+    if app.cfg.ui.fx.bloom_play {
+        bloom_glow(buf, play_rect, pal, 0.35 + app.audio.kick_pulse * 0.45);
+    }
+    for (label, width, action, primary) in [
+        (prev_label, prev_w, Action::Prev, false),
+        (play_label, play_w, Action::PlayPause, true),
+        (next_label, next_w, Action::Next, false),
+    ] {
+        let button = Rect::new(x, controls_y, width, controls_h);
         let hover = app.hover == Some(action.clone());
         let bg = if hover {
             pal.surface_alt
         } else if primary {
-            mix_oklab(pal.surface, pal.primary, 0.22 + pulse * 0.28)
+            mix_oklab(pal.surface, pal.primary, 0.25 + pulse * 0.32)
         } else {
             pal.surface
         };
-        fill(buf, button, bg);
-        text_at(
-            buf,
-            button,
-            label.to_string(),
-            Style::new()
-                .fg(color(if primary { pal.primary } else { pal.text }))
-                .add_modifier(Modifier::BOLD),
-            Alignment::Center,
-        );
+        fill_soft(buf, button, bg, 0.95, pal.bg_deep);
+        if primary && controls_h >= 2 {
+            let edge = mix_oklab(pal.primary, pal.secondary, pulse);
+            for i in 1..button.width.saturating_sub(1) {
+                put(buf, button.x + i, button.y, "▔", color(edge), None);
+                // Con etiqueta en la última fila, la línea inferior la tacharía.
+                if controls_h < 3 {
+                    put(buf, button.x + i, button.y + button.height - 1, "▁", color(edge), None);
+                }
+            }
+        }
+        if big {
+            let icon = if primary {
+                if app.now.playing { ICON_PAUSE } else { ICON_PLAY }
+            } else if matches!(action, Action::Prev) {
+                ICON_PREV
+            } else {
+                ICON_NEXT
+            };
+            let label = if primary {
+                if app.now.playing { "pausa" } else { "play" }
+            } else if matches!(action, Action::Prev) {
+                "atrás"
+            } else {
+                "siguiente"
+            };
+            if controls_h >= 3 {
+                let icon_rect = Rect::new(button.x, button.y, button.width, controls_h - 1);
+                draw_icon(
+                    buf,
+                    icon_rect,
+                    icon,
+                    color(if primary { pal.text } else { pal.muted }),
+                    primary,
+                );
+                text_at(
+                    buf,
+                    Rect::new(button.x, button.y + controls_h - 1, button.width, 1),
+                    label,
+                    Style::new().fg(color(if primary { pal.primary } else { pal.dim })),
+                    Alignment::Center,
+                );
+            } else {
+                draw_icon(
+                    buf,
+                    button,
+                    icon,
+                    color(if primary { pal.text } else { pal.muted }),
+                    primary,
+                );
+            }
+        } else {
+            text_at(
+                buf,
+                button,
+                label.to_string(),
+                Style::new()
+                    .fg(color(if primary { pal.primary } else { pal.text }))
+                    .add_modifier(Modifier::BOLD),
+                Alignment::Center,
+            );
+        }
         app.hit.add(button, action);
         x += width + 1;
     }
 
-    // Volumen a la izquierda.
-    let mut vx = rect.x + 2;
-    let vol_label = if app.now.volume <= 0.001 { "🔇" } else { "♪" };
-    put(buf, vx, y, vol_label, color(pal.muted), None);
-    vx += 2;
-    let cells = 8u16;
-    for i in 0..cells {
-        let threshold = i as f32 / cells as f32;
-        let on = app.now.volume > threshold;
-        put(
-            buf,
-            vx + i,
-            y,
-            if on { "▮" } else { "▯" },
-            color(if on { pal.secondary } else { pal.border_dim }),
-            None,
-        );
-        app.hit.add(
-            Rect::new(vx + i, y, 1, 1),
-            Action::Volume((i + 1) as f32 / cells as f32),
-        );
+    // Slider de volumen: barra con degradado, knob y porcentaje. Se puede
+    // arrastrar, clicar y mover con ↑↓ cuando el transporte tiene el foco.
+    let vol_w = if compact { 8 } else { 14u16.min(rect.width / 6).max(8) };
+    let vol_x = rect.x + 2;
+    let y = controls_y + controls_h / 2;
+    let icon = if app.now.volume <= 0.001 { "🔇" } else { "♪" };
+    put(buf, vol_x, y, icon, color(if app.now.volume <= 0.001 { pal.error } else { pal.secondary }), None);
+    let track_x = vol_x + 2;
+    if app.focus == crate::app::Pane::Transport {
+        put(buf, vol_x.saturating_sub(1), y, "▏", color(pal.primary), None);
     }
+    for i in 0..vol_w {
+        let t = (i as f32 + 0.5) / vol_w as f32;
+        let on = t <= app.now.volume;
+        let color_fill = mix_oklab(pal.secondary, pal.primary, t);
+        let (ch, fg) = if on {
+            if i == ((app.now.volume * vol_w as f32) as u16).min(vol_w - 1) {
+                ("◉", mix_oklab(color_fill, pal.text, 0.55))
+            } else {
+                ("█", color_fill)
+            }
+        } else {
+            ("░", pal.border_dim)
+        };
+        put(buf, track_x + i, y, ch, color(fg), None);
+    }
+    // Zona clicable un poco más alta para que no haya que acertar la fila.
+    app.hit.add(
+        Rect::new(track_x, y.saturating_sub(1), vol_w, 2.min(rect.height)),
+        Action::VolumeTrack,
+    );
+    let label = format!("{:>3.0}%", app.now.volume * 100.0);
+    put(
+        buf,
+        track_x + vol_w + 1,
+        y,
+        &label,
+        color(if app.dragging_volume || app.focus == crate::app::Pane::Transport {
+            pal.primary
+        } else {
+            pal.dim
+        }),
+        None,
+    );
 
-    // Descargas activas: un chip discreto, siempre visible.
+    if compact {
+        return;
+    }
+    // Descargas activas: chip discreto, siempre visible.
     if let Some(download) = app.downloads.iter().find(|info| info.active()) {
-        let text = format!("↓ {} {:>3.0}%", download.stage, download.percent);
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+        let spin = frames[(app.viz.time * 10.0) as usize % frames.len()];
+        let text = format!("{spin} {} {:>3.0}%", download.stage, download.percent);
         let width = text.chars().count() as u16 + 2;
-        if vx + cells + 3 + width < rect.x + rect.width / 2 {
-            let chip = Rect::new(vx + cells + 3, y, width, 1);
+        if track_x + vol_w + 8 + width < rect.x + rect.width / 2 {
+            let chip = Rect::new(track_x + vol_w + 7, y, width, 1);
             fill(buf, chip, mix(pal.surface, pal.primary, 0.12));
             text_at(buf, chip, text, Style::new().fg(color(pal.primary)), Alignment::Center);
         }
@@ -419,12 +512,15 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         (app.viz.preset_name().to_string(), Action::VizNext, pal.primary),
         (format!("arte {}", app.art_mode.label()), Action::ArtMode, pal.dim),
     ];
+    if let Some(section) = app.song_section {
+        items.push((section.label().to_string(), Action::VizNext, pal.secondary));
+    }
     if app.follow_spotify {
         items.push(("spotify".into(), Action::ToggleFollow, pal.secondary));
     }
     for (label, action, fg) in items {
         let width = label.chars().count() as u16 + 2;
-        if right < vx + cells + 4 + width {
+        if right < track_x + vol_w + 9 + width {
             break;
         }
         right -= width;
@@ -444,6 +540,114 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         );
         app.hit.add(chip_rect, action);
         right = right.saturating_sub(1);
+    }
+}
+
+const ICON_PLAY: &[&str] = &[
+    "█    ",
+    "██   ",
+    "███  ",
+    "██   ",
+    "█    ",
+];
+const ICON_PAUSE: &[&str] = &[
+    "█  █",
+    "█  █",
+    "█  █",
+    "█  █",
+    "█  █",
+];
+const ICON_PREV: &[&str] = &[
+    "█  █ ",
+    "██ █ ",
+    "███  ",
+    "██ █ ",
+    "█  █ ",
+];
+const ICON_NEXT: &[&str] = &[
+    " █  █",
+    " █ ██",
+    "  ███",
+    " █ ██",
+    " █  █",
+];
+
+/// Pinta un icono de bloque centrado, escalando si el botón es más alto.
+pub(super) fn draw_icon(buf: &mut Buffer, rect: Rect, icon: &[&str], fg: Color, glow: bool) {
+    let w = icon.iter().map(|line| line.chars().count()).max().unwrap_or(0) as u16;
+    if rect.width < w || rect.height == 0 {
+        return;
+    }
+    // Si el botón es más bajo que el icono, se muestrean las filas centrales:
+    // el play sigue leyéndose en 2 filas sin deformarse.
+    let h = icon.len();
+    let rows: Vec<&str> = if rect.height as usize >= h {
+        icon.to_vec()
+    } else {
+        let keep = rect.height as usize;
+        (0..keep)
+            .map(|i| {
+                let src = (i * h / keep).min(h - 1);
+                icon[src]
+            })
+            .collect()
+    };
+    let x0 = rect.x + (rect.width - w) / 2;
+    let y0 = rect.y + (rect.height.saturating_sub(rows.len() as u16)) / 2;
+    for (dy, line) in rows.iter().enumerate() {
+        for (dx, ch) in line.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            if glow {
+                put(buf, x0 + dx as u16, y0 + dy as u16 + 1, "▁", fg, None);
+            }
+            put(buf, x0 + dx as u16, y0 + dy as u16, "█", fg, None);
+        }
+    }
+}
+
+/// Halo radial alrededor del play. Usa el verde/acento de la paleta y late con
+/// el bombo; con el ajuste `bloom_play` apagado no se pinta.
+pub(super) fn bloom_glow(buf: &mut Buffer, rect: Rect, pal: &Palette, amount: f32) {
+    let amount = amount.clamp(0.0, 1.0);
+    let area = Rect::new(
+        rect.x.saturating_sub(2),
+        rect.y.saturating_sub(1),
+        rect.width + 4,
+        rect.height + 2,
+    );
+    let cx = area.x as f32 + area.width as f32 / 2.0;
+    let cy = area.y as f32 + area.height as f32 / 2.0;
+    let radius = (area.width.max(area.height) as f32 / 2.0).max(1.0);
+    let b = *buf.area();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            if x >= b.x + b.width || y >= b.y + b.height {
+                continue;
+            }
+            let dx = x as f32 - cx;
+            let dy = (y as f32 - cy) * 2.0;
+            let distance = (dx * dx + dy * dy).sqrt() / radius;
+            if distance > 1.0 {
+                continue;
+            }
+            let glow = (1.0 - distance).powf(2.2) * 0.22 * amount;
+            if glow <= 0.005 {
+                continue;
+            }
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let under = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => pal.bg_deep,
+            };
+            let mixed = mix(under, mix_oklab(pal.primary, pal.secondary, distance), glow);
+            cell.set_bg(color(mixed));
+            cell.set_fg(color(mixed));
+            if cell.symbol() == " " {
+                cell.set_symbol(" ");
+            }
+        }
     }
 }
 
@@ -522,33 +726,13 @@ pub(super) fn draw_progress_bar(
     }
 }
 
+
 pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.hint;
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
-    let hints: [(&str, &str); 9] = [
-        ("space", "play"),
-        ("←→", "seek"),
-        ("/", "buscar"),
-        ("a", "cola"),
-        ("x", "quitar"),
-        ("c", "portada"),
-        ("v", "visual"),
-        ("A", "arte"),
-        ("?", "ayuda"),
-    ];
-    let mut x = rect.x + 1;
-    for (key, label) in hints {
-        let key_width = key.chars().count() as u16 + 2;
-        if x + key_width + label.len() as u16 + 3 > rect.x + rect.width {
-            break;
-        }
-        let cap = Rect::new(x, rect.y, key_width, 1);
-        keycap(buf, cap, pal, key);
-        x += key_width + 1;
-        put(buf, x, rect.y, label, color(pal.dim), None);
-        x += label.chars().count() as u16 + 2;
-    }
-    let right_text = if app.pending_play.is_some() {
+    let right_text = if let Some(download) = app.downloads.iter().find(|info| info.active()) {
+        format!("↓ {:.0}% · {}", download.percent, download.stage)
+    } else if app.pending_play.is_some() {
         "descargando…".to_string()
     } else if app.now.loading {
         "cargando…".to_string()
@@ -570,13 +754,43 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
     };
     let width = right_text.chars().count() as u16;
     if rect.width > width + 4 {
+        let right_rect = Rect::new(rect.x + rect.width - width - 2, rect.y, width, 1);
         text_at(
             buf,
-            Rect::new(rect.x + rect.width - width - 2, rect.y, width, 1),
+            right_rect,
             right_text,
             Style::new().fg(color(pal.dim)),
             Alignment::Right,
         );
+        if let Some(track) = &app.now.track {
+            if !track.artist.is_empty() {
+                app.hit.add(right_rect, Action::OpenArtist(track.artist.clone()));
+            }
+        }
+    }
+    // Las leyendas salen de `keymap`: una sola fuente de verdad. Nada de
+    // teclas que no existen o que hacen otra cosa.
+    let hints = app.hints();
+    let mut x = rect.x + 1;
+    for hint in hints {
+        let key_width = hint.key.chars().count() as u16 + 2;
+        let usable_right = rect.x + rect.width.saturating_sub((width + 4).min(rect.width));
+        if x + key_width + hint.label.chars().count() as u16 + 3 > usable_right {
+            break;
+        }
+        let cap = Rect::new(x, rect.y, key_width, 1);
+        keycap(buf, cap, pal, hint.key);
+        x += key_width + 1;
+        put(buf, x, rect.y, hint.label, color(pal.dim), None);
+        x += hint.label.chars().count() as u16 + 2;
+    }
+    // La barra de teclas cambia de longitud al abrir overlays. Forzamos su
+    // difusión completa para que no queden restos de la leyenda anterior en
+    // terminales que no limpian bien las celdas reemplazadas por espacios.
+    for x in rect.x..rect.x + rect.width {
+        if let Some(cell) = buf.cell_mut((x, rect.y)) {
+            cell.diff_option = ratatui::buffer::CellDiffOption::AlwaysUpdate;
+        }
     }
 }
 

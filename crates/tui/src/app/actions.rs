@@ -8,15 +8,45 @@ impl App {
                 self.hover = self.hit.hit(mouse.column, mouse.row).cloned();
             }
             MouseEventKind::ScrollDown => {
-                self.move_selection(1);
+                if self.hover == Some(Action::VolumeTrack) {
+                    self.set_volume(self.now.volume - 0.03);
+                } else {
+                    self.move_selection(1);
+                }
             }
             MouseEventKind::ScrollUp => {
-                self.move_selection(-1);
+                if self.hover == Some(Action::VolumeTrack) {
+                    self.set_volume(self.now.volume + 0.03);
+                } else {
+                    self.move_selection(-1);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(action) = self.hit.hit(mouse.column, mouse.row).cloned() {
+                    self.open_context(&action);
+                }
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let action = self.hit.hit(mouse.column, mouse.row).cloned();
                 let Some(action) = action else { return };
                 match &action {
+                    Action::Resize(pane) => {
+                        self.resize_drag = Some(*pane);
+                        return;
+                    }
+                    Action::VolumeTrack => {
+                        self.dragging_volume = true;
+                        self.focus = Pane::Transport;
+                        if let Some(rect) = self.hit.rect_for(&Action::VolumeTrack) {
+                            if rect.width > 0 {
+                                let ratio = ((mouse.column.saturating_sub(rect.x)) as f32
+                                    / rect.width as f32)
+                                    .clamp(0.0, 1.0);
+                                self.set_volume(ratio);
+                            }
+                        }
+                        return;
+                    }
                     Action::SeekTo(_) => {
                         self.dragging_seek = true;
                         if let Some(rect) = self.hit.rect_for(&Action::SeekTo(0)) {
@@ -31,12 +61,14 @@ impl App {
                         }
                     }
                     Action::SearchPlay(index) => {
-                        self.search.selected = (*index).min(self.search.results.len().saturating_sub(1));
-                        self.play_search_selection();
+                        self.search.selected = (*index).min(self.search_len().saturating_sub(1));
+                        self.activate_search_selection();
+                        return;
                     }
                     Action::QueueRemove(index) => {
                         self.queue_selected = (*index).min(self.queue_len().saturating_sub(1));
                         self.remove_queue_selected();
+                        return;
                     }
                     Action::QueueRow(index) => {
                         self.queue_selected = (*index).min(self.queue_len().saturating_sub(1));
@@ -53,6 +85,13 @@ impl App {
                                 self.play_local(entry.track, entry.path);
                             }
                         }
+                        return;
+                    }
+                    Action::SeekLyrics(ms)
+                        if mouse.modifiers.contains(KeyModifiers::SHIFT) =>
+                    {
+                        self.sync_lyrics_to_position(*ms);
+                        return;
                     }
                     Action::SelectRow(index) => {
                         let now = Instant::now();
@@ -74,6 +113,50 @@ impl App {
                 self.perform(action);
             }
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(pane) = self.resize_drag {
+                    let main = self.last_main;
+                    let layout_cfg = &mut self.cfg.ui.layout;
+                    match pane {
+                        Pane::Nav => {
+                            let width = if layout_cfg.nav_left() {
+                                mouse.column.saturating_sub(main.x) + 1
+                            } else {
+                                (main.x + main.width).saturating_sub(mouse.column)
+                            };
+                            let width = width.clamp(12, 30);
+                            layout_cfg.nav_width = width;
+                            if layout_cfg.nav_left() == layout_cfg.side_left() {
+                                layout_cfg.side_width = width;
+                            }
+                        }
+                        Pane::Side => {
+                            let width = if layout_cfg.side_left() {
+                                mouse.column.saturating_sub(main.x) + 1
+                            } else {
+                                (main.x + main.width).saturating_sub(mouse.column)
+                            };
+                            let width = width.clamp(24, 60);
+                            layout_cfg.side_width = width;
+                            if layout_cfg.nav_left() == layout_cfg.side_left() {
+                                layout_cfg.nav_width = width.min(30);
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.cfg.save().ok();
+                    return;
+                }
+                if self.dragging_volume {
+                    if let Some(rect) = self.hit.rect_for(&Action::VolumeTrack) {
+                        if rect.width > 0 {
+                            let ratio = ((mouse.column.saturating_sub(rect.x)) as f32
+                                / rect.width as f32)
+                                .clamp(0.0, 1.0);
+                            self.set_volume(ratio);
+                        }
+                    }
+                    return;
+                }
                 if let Some(from) = self.queue_drag {
                     if let Some(Action::QueueRow(to)) =
                         self.hit.hit(mouse.column, mouse.row).cloned()
@@ -107,6 +190,8 @@ impl App {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.dragging_seek = false;
+                self.dragging_volume = false;
+                self.resize_drag = None;
                 self.drag_ratio = None;
                 self.queue_drag = None;
             }
@@ -140,8 +225,8 @@ impl App {
                 self.tab = tab;
                 if tab != Tab::Library {
                     self.lib_filter = LibFilter::All;
-                    self.refresh_view();
                 }
+                self.refresh_view();
                 if tab == Tab::Search {
                     self.search.query.clear();
                     self.search.results.clear();
@@ -151,7 +236,20 @@ impl App {
             Action::Next => self.next_track(),
             Action::Prev => self.prev_track(),
             Action::SeekTo(ms) => self.seek_to(ms),
+            Action::SeekLyrics(ms) => {
+                self.seek_to(ms);
+                if let Some(doc) = &self.lyrics {
+                    if let Some(index) = doc.index_at(ms) {
+                        self.lyrics_scroll.set_target(index as f32);
+                    }
+                }
+            }
             Action::Volume(volume) => self.set_volume(volume),
+            Action::VolumeTrack => {
+                self.dragging_volume = true;
+                self.focus = Pane::Transport;
+            }
+            Action::FocusTransport => self.focus = Pane::Transport,
             Action::Mute => {
                 if self.now.volume > 0.0 {
                     self.volume_before_mute = self.now.volume;
@@ -164,10 +262,14 @@ impl App {
             Action::VizNext => {
                 self.show_viz = true;
                 self.viz.next_preset();
+                self.cfg.ui.viz = self.viz.preset_name().to_string();
+                self.cfg.save().ok();
             }
             Action::VizPrev => {
                 self.show_viz = true;
                 self.viz.prev_preset();
+                self.cfg.ui.viz = self.viz.preset_name().to_string();
+                self.cfg.save().ok();
             }
             Action::VizLayer(index) => self.viz.toggle_layer(index),
             Action::VizFullscreen => {
@@ -182,8 +284,8 @@ impl App {
                 self.viz.paused = !self.show_viz;
             }
             Action::ArtMode => {
-                self.art_mode = self.art_mode.next();
-                self.art_key.clear();
+                let next = self.art_mode.next();
+                self.set_art_mode(next);
             }
             Action::ArtFullscreen => {
                 self.fullscreen = if self.fullscreen == Fullscreen::Art {
@@ -195,9 +297,23 @@ impl App {
             Action::SelectRow(index) => {
                 self.selected = index.min(self.view.len().saturating_sub(1));
             }
+            Action::AlbumOpen(index) => {
+                self.album_selected = index.min(self.albums.len().saturating_sub(1));
+                self.open_album_selected();
+            }
+            Action::AlbumDownload => self.download_album(),
+            Action::AlbumSavePlaylist => self.save_album_playlist(),
+            Action::AlbumBack => self.close_album(),
+            Action::ContextSelect(index) => {
+                if let Some(menu) = self.context.as_mut() {
+                    menu.selected = index.min(menu.actions().len().saturating_sub(1));
+                }
+                self.apply_context();
+            }
+            Action::Resize(_) => {}
             Action::SearchPlay(index) => {
-                self.search.selected = index.min(self.search.results.len().saturating_sub(1));
-                self.play_search_selection();
+                self.search.selected = index.min(self.search_len().saturating_sub(1));
+                self.activate_search_selection();
             }
             Action::PlayRow(index) => {
                 self.selected = index.min(self.view.len().saturating_sub(1));
@@ -262,6 +378,35 @@ impl App {
                 self.open_delete_playlist();
             }
             Action::AddToPlaylist => self.open_add_to_playlist(),
+            Action::OpenLayout => self.overlay = Overlay::Layout,
+            Action::Artist => self.open_artist(),
+            Action::OpenArtist(name) => self.open_artist_by_name(&name),
+            Action::OpenAlbum(album, artist) => self.open_album_by_name(&album, &artist),
+            Action::ArtistTrack(index) => {
+                self.artist_selected = index;
+                self.play_artist_selected();
+            }
+            Action::ArtistAlbum(index) => {
+                if let Some(album) = self
+                    .artist
+                    .as_ref()
+                    .and_then(|profile| profile.albums.get(index))
+                    .cloned()
+                {
+                    self.open_album_summary(&album);
+                }
+            }
+            Action::AlbumTrackPlay(index) => {
+                if let Some(page) = &mut self.album_page {
+                    page.selected = index.min(page.tracks.len().saturating_sub(1));
+                }
+                self.play_album_page_track();
+            }
+            Action::AlbumPageDownload => self.download_album_page(),
+            Action::AlbumPageSave => self.save_album_page_playlist(),
+            Action::AlbumPageClose => self.close_album_page(),
+            Action::RefreshLibrary => self.refresh_library(),
+            Action::NavMenu | Action::QueueMenu => {}
             Action::Quit => self.should_quit = true,
         }
     }

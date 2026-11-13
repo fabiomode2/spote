@@ -84,6 +84,18 @@ pub(super) fn badges(app: &App, pal: &Palette) -> Vec<(String, Rgb)> {
     if app.lyrics_offset_ms != 0 {
         out.push((format!("offset {:+}ms", app.lyrics_offset_ms), pal.warn));
     }
+    if app.trim_start_ms > 0 || app.trim_end_ms.is_some() {
+        let start = if app.trim_start_ms > 0 {
+            spote_core::util::format_ms(app.trim_start_ms)
+        } else {
+            "0:00".to_string()
+        };
+        let end = app
+            .trim_end_ms
+            .map(spote_core::util::format_ms)
+            .unwrap_or_else(|| "fin".to_string());
+        out.push((format!("recorte {start}–{end}"), pal.warn));
+    }
     if app.now.loading || app.pending_play.is_some() {
         out.push(("descargando".into(), pal.warn));
     }
@@ -99,7 +111,17 @@ pub(super) fn draw_art(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
     if rect.width < 3 || rect.height < 2 {
         return;
     }
+    // El tamaño real manda: en foco de portada o pantalla completa el rect es
+    // más grande que la miniatura del layout. Sin esto se estiraba una portada
+    // pequeña y el braille se veía como estática.
+    app.set_art_size_hint(rect.width, rect.height);
+    app.ensure_art();
     let mode = app.art_mode;
+    if matches!(mode, ArtMode::Plain | ArtMode::Half) && app.art.is_some() {
+        // El backend de imágenes (Kitty) coloca la foto real encima del
+        // half-block; en terminales sin soporte se queda el fallback.
+        app.art_visible_rect = Some(rect);
+    }
     if mode == ArtMode::Off || mode == ArtMode::Gradient || app.art.is_none() {
         draw_art_placeholder(app, buf, rect, pal);
         return;
@@ -136,7 +158,9 @@ pub(super) fn draw_art(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
     };
     // Dither y braille en grande se leen como ruido: se muestrean a 2x2 celdas
     // para que el patrón sea grueso y se vea como pixel art, no como estática.
-    let chunky = matches!(mode, ArtMode::Dither | ArtMode::Braille) && rect.width >= 60;
+    // El pixelado grueso solo tiene sentido en dither. Braille necesita cada
+    // subpíxel: muestrearlo a 2x2 lo convierte en ruido.
+    let chunky = matches!(mode, ArtMode::Dither) && rect.width >= 60;
     let factor: u32 = if chunky { 2 } else { 1 };
     for y in 0..rect.height {
         for x in 0..rect.width {
@@ -294,6 +318,40 @@ pub(super) fn draw_thumb(app: &mut App, buf: &mut Buffer, rect: Rect, track: &sp
         if !app.thumb_requests.contains(&track.key) {
             app.thumb_requests.insert(track.key.clone());
             app.request_thumb(track);
+        }
+    }
+}
+
+
+/// Pinta un `CoverArt` ya cacheado (perfil de artista, cabeceras...).
+pub(super) fn draw_cached_art(
+    buf: &mut Buffer,
+    rect: Rect,
+    art: &CoverArt,
+    pal: &Palette,
+    plain: bool,
+) {
+    if rect.width < 2 || rect.height < 2 || art.is_empty() {
+        return;
+    }
+    for y in 0..rect.height {
+        for x in 0..rect.width {
+            let sx = (x as u32 * art.w as u32 / rect.width.max(1) as u32) as u16;
+            let sy = (y as u32 * art.h as u32 / rect.height.max(1) as u32) as u16;
+            let Some(cell) = art.cell(sx.min(art.w.saturating_sub(1)), sy.min(art.h.saturating_sub(1))) else {
+                continue;
+            };
+            let (fg, bg) = if plain {
+                (cell.fg, cell.bg.unwrap_or(pal.bg_deep))
+            } else {
+                (
+                    pal.ramp_at(luma(cell.fg)),
+                    cell.bg.map(|bg| pal.ramp_at(luma(bg))).unwrap_or(pal.bg_deep),
+                )
+            };
+            let mut glyph = [0u8; 4];
+            let symbol: &str = cell.ch.encode_utf8(&mut glyph);
+            put(buf, rect.x + x, rect.y + y, symbol, color(fg), Some(color(bg)));
         }
     }
 }

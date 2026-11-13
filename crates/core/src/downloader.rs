@@ -657,8 +657,11 @@ fn download(
     for ext in ["opus", "ogg", "webm", "m4a", "mp3"] {
         let candidate = target.with_extension(ext);
         if candidate.exists() {
-            // `--write-thumbnail` deja la portada como <pista>.jpg.
-            if target.with_extension("jpg").exists() {
+            // `--write-thumbnail` puede dejar jpg/png/webp según el origen.
+            if ["jpg", "png", "webp"]
+                .iter()
+                .any(|ext| target.with_extension(ext).exists())
+            {
                 reporter.report(DownloadStage::Cover, 100.0);
             }
             return Ok(candidate);

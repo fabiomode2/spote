@@ -151,7 +151,11 @@ impl Effect for Bars {
                 // Ciclo rápido por barra: con solo unas pocas barras con señal
                 // un gradiente suave las dejaba todas del mismo tono. Así cada
                 // barra recorre la paleta de la portada.
-                let hue = (i as f32 * 0.37 + ctx.time * 0.05) % 1.0;
+                let hue = (i as f32 * 0.37
+                    + ctx.time * 0.11
+                    + ctx.audio.bass * 0.18
+                    + ctx.audio.kick_pulse * 0.08)
+                    % 1.0;
                 mix_oklab(ctx.palette.ramp_at(hue), ctx.palette.accent, 0.15)
             })
             .collect();

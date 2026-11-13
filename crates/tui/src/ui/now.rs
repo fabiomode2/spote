@@ -103,6 +103,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         source.height.saturating_sub(1),
     );
     panel(
+        Some(app),
         buf,
         rect,
         pal,
@@ -238,6 +239,28 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         ));
     }
     line_at(buf, Rect::new(inner.x, y, inner.width, 1), spans, Alignment::Left);
+    // Artista y álbum clicables en la cabecera (como en Spotify).
+    if room > 6 {
+        let meta_x = inner.x + title_width + 3;
+        let artist_w = (track.artist.chars().count() as u16).min(room);
+        if artist_w > 1 {
+            app.hit.add(
+                Rect::new(meta_x, y, artist_w, 1),
+                Action::OpenArtist(track.artist.clone()),
+            );
+        }
+        if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
+            let album_x = meta_x + artist_w + 3;
+            let album_w = (album.chars().count() as u16)
+                .min(inner.x.saturating_add(inner.width).saturating_sub(album_x));
+            if album_w > 1 {
+                app.hit.add(
+                    Rect::new(album_x, y, album_w, 1),
+                    Action::OpenAlbum(album.to_string(), track.artist.clone()),
+                );
+            }
+        }
+    }
     y += 1;
 
     let rule = inner.width;
@@ -311,11 +334,23 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         );
         return;
     }
+    // Tamaño: no se puede cambiar la fuente de la terminal, pero sí el ancho
+    // de columna y el aire entre líneas. "Grande" = menos palabras por línea,
+    // más altura y negrita, que es lo que se percibe como letra grande.
+    let size = app.cfg.ui.lyrics_size.min(2);
+    let line_h = 1 + size as u16;
+    let pct = match size {
+        2 => 74,
+        1 => 88,
+        _ => 100,
+    };
+    let text_w = (rect.width * pct / 100).max(24).min(rect.width);
+    let x0 = rect.x + (rect.width.saturating_sub(text_w)) / 2;
     let position = app.now.position_ms;
     let active = doc.index_at(position);
     let scroll = app.lyrics_scroll.value;
-    let center = rect.y + rect.height / 2;
-    let half = (rect.height as f32 / 2.0).max(1.0);
+    let center = rect.y as f32 + rect.height as f32 / 2.0;
+    let half = (rect.height as f32 / (line_h as f32 * 2.0)).max(1.0);
 
     for (index, line) in doc.lines.iter().enumerate() {
         let offset = index as f32 - scroll;
@@ -323,64 +358,49 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         if distance > half + 1.5 {
             continue;
         }
-        let y = center as i32 + offset.round() as i32;
+        let y = (center + offset * line_h as f32).round() as i32;
         if y < rect.y as i32 || y >= (rect.y + rect.height) as i32 {
             continue;
         }
         let fade = (1.0 - (distance / (half + 0.8)).powf(1.6)).clamp(0.0, 1.0);
         let is_active = Some(index) == active;
-        let base = if is_active {
-            mix_oklab(
-                mix_oklab(pal.text, pal.primary, 0.18),
-                pal.secondary,
-                (app.audio.vocal_pulse * 0.35).clamp(0.0, 0.35),
-            )
-        } else {
-            mix_oklab(pal.bg, pal.muted, fade)
-        };
-        let style = Style::new()
-            .fg(color(base))
-            .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() });
-        let prefix = if is_active { "▸ " } else { "  " };
-        let suffix = if is_active { " ◂" } else { "" };
-        let text = format!("{prefix}{}{suffix}", line.text);
-        let line_rect = Rect::new(rect.x, y as u16, rect.width, 1);
+        let line_rect = Rect::new(x0, y as u16, text_w, line_h);
         if is_active {
-            // Banda de foco: la línea que se canta respira sobre el fondo.
             fill(
                 buf,
                 line_rect,
-                mix(pal.bg, pal.surface_alt, 0.9 + app.audio.vocal_pulse * 0.1),
+                mix(pal.bg, pal.surface_alt, 0.92 + app.audio.vocal_pulse * 0.08),
             );
             put(buf, line_rect.x, y as u16, "▎", color(pal.primary), None);
-            // Karaoke: la parte cantada va en el acento, el resto en el texto.
-            let progress = doc
-                .index_at(position)
-                .map(|_| {
-                    let span = line.end_ms.saturating_sub(line.start_ms).max(1);
-                    (position.saturating_sub(line.start_ms) as f32 / span as f32).clamp(0.0, 1.0)
-                })
-                .unwrap_or(0.0);
-            karaoke_line(buf, line_rect, &text, progress, pal, prefix.chars().count());
+            draw_active_line(app, buf, line_rect, line, pal);
         } else {
+            let base = mix_oklab(pal.bg, pal.muted, fade);
+            let style = Style::new().fg(color(base));
+            let mut text = line.text.clone();
+            if text.chars().count() > text_w as usize {
+                truncate_chars(&mut text, text_w.saturating_sub(1) as usize);
+                text.push('…');
+            }
             text_at(buf, line_rect, text, style, Alignment::Center);
         }
+        // Clic en una frase: salta a ese momento. El muelle de scroll anima el
+        // salto; no hay corte seco.
+        app.hit.add(line_rect, Action::SeekLyrics(line.start_ms));
     }
 
-    // Progreso fino de la canción bajo la letra activa.
+    // Progreso de la línea activa, discreto, bajo la letra.
     if let Some((_, progress)) = doc.active(position) {
-        let bar_width = (rect.width as f32 * 0.22) as u16;
+        let bar_width = (rect.width as f32 * 0.18).max(6.0) as u16;
         if bar_width > 4 && rect.height > 2 {
             let x = rect.x + (rect.width - bar_width) / 2;
             let y = rect.y + rect.height - 1;
             let filled = (bar_width as f32 * progress) as u16;
             for i in 0..bar_width {
-                let ch = if i < filled { "━" } else { "─" };
                 put(
                     buf,
                     x + i,
                     y,
-                    ch,
+                    if i < filled { "━" } else { "─" },
                     color(if i < filled { pal.primary } else { pal.border_dim }),
                     None,
                 );
@@ -389,48 +409,80 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
     }
 }
 
-pub(super) fn karaoke_line(
+/// Pinta la línea activa palabra a palabra. Los tiempos salen de
+/// `line.words` (LRC mejorado o refinado con el mapa de audio), nunca de un
+/// reparto global de la línea: por eso cada palabra se enciende cuando toca.
+fn draw_active_line(
+    app: &App,
     buf: &mut Buffer,
     rect: Rect,
-    text: &str,
-    progress: f32,
+    line: &spote_core::lyrics::LyricLine,
     pal: &Palette,
-    prefix_len: usize,
 ) {
-    let chars: Vec<char> = text.chars().collect();
-    let total = chars.len().saturating_sub(prefix_len * 2).max(1);
-    let sung = progress * total as f32;
-    let width = chars.len() as u16;
-    if width > rect.width {
-        // Si no cabe, se corta el final con puntos suspensivos: perder el
-        // principio de la frase es peor que perder el final.
-        let keep = rect.width.saturating_sub(1) as usize;
-        let mut text: String = chars.into_iter().take(keep).collect();
-        text.push('…');
-        text_at(
-            buf,
-            rect,
-            text,
-            Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
-            Alignment::Center,
-        );
+    let position = app.now.position_ms;
+    let prefix = "▸ ";
+    let suffix = " ◂";
+    let mut cells: Vec<(char, f32, bool)> = Vec::new();
+    for ch in prefix.chars() {
+        cells.push((ch, 0.0, false));
+    }
+    if line.words.len() >= 2 {
+        for (i, word) in line.words.iter().enumerate() {
+            if i > 0 {
+                cells.push((' ', 1.0, false));
+            }
+            let span = word.end_ms.saturating_sub(word.start_ms).max(1);
+            let word_progress =
+                (position.saturating_sub(word.start_ms) as f32 / span as f32).clamp(0.0, 1.0);
+            let started = position >= word.start_ms;
+            let chars: Vec<char> = word.text.chars().collect();
+            let total = chars.len().max(1) as f32;
+            for (j, ch) in chars.into_iter().enumerate() {
+                let lit = if started {
+                    ((word_progress * total) - j as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                cells.push((ch, lit, started && word_progress < 1.0));
+            }
+        }
+    } else {
+        let span = line.end_ms.saturating_sub(line.start_ms).max(1);
+        let progress =
+            (position.saturating_sub(line.start_ms) as f32 / span as f32).clamp(0.0, 1.0);
+        let chars: Vec<char> = line.text.chars().collect();
+        let total = chars.len().max(1) as f32;
+        for (j, ch) in chars.into_iter().enumerate() {
+            cells.push((ch, ((progress * total) - j as f32).clamp(0.0, 1.0), false));
+        }
+    }
+    for ch in suffix.chars() {
+        cells.push((ch, 0.0, false));
+    }
+    let width = cells.len() as u16;
+    if width == 0 || rect.width < 4 {
         return;
     }
-    let x = rect.x + (rect.width.saturating_sub(width)) / 2;
-    for (i, ch) in chars.iter().enumerate() {
-        let index = i.saturating_sub(prefix_len);
-        let local = if i < prefix_len || i >= chars.len().saturating_sub(prefix_len) {
-            0.0
+    let visible = cells.len().min(rect.width.saturating_sub(1) as usize);
+    let start_x = rect.x + (rect.width.saturating_sub(visible as u16)) / 2;
+    for (i, (ch, lit, current)) in cells.into_iter().take(visible).enumerate() {
+        let base = if lit <= 0.001 {
+            mix_oklab(pal.dim, pal.muted, 0.4)
         } else {
-            (sung - index as f32).clamp(0.0, 1.0)
+            mix_oklab(pal.text, pal.primary, 0.28 + lit * 0.45)
         };
-        let fg = mix_oklab(pal.muted, mix_oklab(pal.text, pal.primary, 0.35), local);
+        let fg = if current {
+            mix_oklab(base, pal.text, 0.45)
+        } else {
+            base
+        };
         let mut glyph = [0u8; 4];
         let symbol: &str = ch.encode_utf8(&mut glyph);
-        put(buf, x + i as u16, rect.y, symbol, color(fg), None);
+        put(buf, start_x + i as u16, rect.y, symbol, color(fg), None);
+        if current && i > 0 {
+            if let Some(cell) = buf.cell_mut((start_x + i as u16, rect.y)) {
+                cell.modifier.insert(Modifier::BOLD);
+            }
+        }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Listas (librería / búsqueda)
-// ---------------------------------------------------------------------------

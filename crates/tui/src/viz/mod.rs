@@ -343,8 +343,13 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         name: "clean",
-        description: "solo barras",
-        layers: &[("bars", Blend::Normal, 1.0, Mask::Full)],
+        description: "marea + onda",
+        layers: &[
+            // Sin barras de bloques: dos ondas suaves superpuestas, con la
+            // segunda más tenue para dar profundidad y color.
+            ("wave", Blend::Normal, 0.95, Mask::Full),
+            ("wave", Blend::Screen, 0.48, Mask::Bottom),
+        ],
     },
     Preset {
         name: "neural",
@@ -402,12 +407,33 @@ impl Viz {
         PRESETS[self.preset_index].description
     }
 
+    /// Presets que se ciclan con `v` y en ajustes. Los ruidosos (`void`,
+    /// `neural`, `glitch`) viven como fondo ambiental, no en la franja.
+    pub const STRIP: [&'static str; 4] = ["clean", "aurora", "bloom", "inferno"];
+
+    fn strip_index(&self) -> usize {
+        Self::STRIP
+            .iter()
+            .position(|name| *name == self.preset_name())
+            .unwrap_or(0)
+    }
+
     pub fn next_preset(&mut self) {
-        self.set_preset(self.preset_index + 1);
+        let next = (self.strip_index() + 1) % Self::STRIP.len();
+        let index = PRESETS
+            .iter()
+            .position(|preset| preset.name == Self::STRIP[next])
+            .unwrap_or(0);
+        self.set_preset(index);
     }
 
     pub fn prev_preset(&mut self) {
-        self.set_preset(self.preset_index + PRESETS.len() - 1);
+        let prev = (self.strip_index() + Self::STRIP.len() - 1) % Self::STRIP.len();
+        let index = PRESETS
+            .iter()
+            .position(|preset| preset.name == Self::STRIP[prev])
+            .unwrap_or(0);
+        self.set_preset(index);
     }
 
     pub fn set_preset(&mut self, index: usize) {
@@ -655,8 +681,7 @@ mod tests {
         viz.toggle_layer(0);
         assert!(!viz.layers[0].enabled);
         viz.next_preset();
-        assert_ne!(viz.preset_name(), "aurora");
-        assert_eq!(viz.preset_index, 1);
+        assert_eq!(viz.preset_name(), "bloom");
         viz.prev_preset();
         assert_eq!(viz.preset_name(), "aurora");
     }

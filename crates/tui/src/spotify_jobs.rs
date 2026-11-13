@@ -64,18 +64,26 @@ impl SpotifyJobs {
             .ok();
     }
 
-    /// Importa una playlist de Spotify o Deezer (metadatos, sin descargar el
-    /// audio: se baja al reproducir, así importar 100 pistas es instantáneo).
+    /// Importa una lista o álbum de Spotify. Usa primero el catálogo público
+    /// (funciona sin cuenta, también con álbumes) y si no, la API de Spotify.
+    /// Deezer queda fuera: solo se aceptan enlaces de Spotify.
     pub fn import_playlist(&self, input: String) {
         let tx = self.tx.clone();
         std::thread::Builder::new()
             .name("spote-playlist".into())
-            .spawn(move || match spotify_api::playlist(&input) {
-                Ok(list) => {
-                    let _ = tx.send(JobEvent::Playlist(list));
-                }
-                Err(err) => {
-                    let _ = tx.send(JobEvent::PlaylistFailed(err));
+            .spawn(move || {
+                let result = match catalog::fetch(&input) {
+                    Ok(catalog) => Ok(playlist_from_catalog(catalog)),
+                    Err(catalog_err) => spotify_api::playlist(&input)
+                        .map_err(|api_err| format!("{catalog_err}; {api_err}")),
+                };
+                match result {
+                    Ok(list) => {
+                        let _ = tx.send(JobEvent::Playlist(list));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(JobEvent::PlaylistFailed(err));
+                    }
                 }
             })
             .ok();
@@ -401,4 +409,71 @@ fn epoch_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0)
+}
+
+
+/// Catálogo público → estructura que ya sabe aplicar la TUI. Se usa para
+/// importar listas y álbumes de Spotify sin depender del token anónimo.
+fn playlist_from_catalog(catalog: spote_core::catalog::Catalog) -> spote_core::spotify_api::PlaylistInfo {
+    let cover = catalog.cover.clone();
+    let album_name = catalog.album.clone();
+    let tracks: Vec<spote_core::spotify_api::SpotifyTrack> = catalog
+        .tracks
+        .into_iter()
+        .map(|track| spote_core::spotify_api::SpotifyTrack {
+            provider: "spotify".into(),
+            id: track.id,
+            title: track.title,
+            artists: track.artist,
+            album: album_name.clone().unwrap_or_else(|| catalog.name.clone()),
+            duration_ms: track.duration_ms,
+            art_url: cover.clone(),
+            isrc: None,
+        })
+        .collect();
+    spote_core::spotify_api::PlaylistInfo {
+        provider: "spotify".into(),
+        id: catalog.id,
+        title: catalog.name,
+        description: if catalog.kind == "album" {
+            format!("álbum · {} pistas", tracks.len())
+        } else {
+            String::new()
+        },
+        cover_url: cover,
+        tracks,
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spote_core::catalog::{Catalog, CatalogTrack};
+
+    #[test]
+    fn catalog_album_becomes_a_spotify_playlist() {
+        let catalog = Catalog {
+            kind: "album".into(),
+            id: "abc".into(),
+            name: "The Slow Rush".into(),
+            owner: Some("Tame Impala".into()),
+            cover: Some("cover.jpg".into()),
+            album: Some("The Slow Rush".into()),
+            tracks: vec![CatalogTrack {
+                id: "track1".into(),
+                title: "Borderline".into(),
+                artist: "Tame Impala".into(),
+                duration_ms: 237_000,
+                playable: true,
+            }],
+        };
+        let playlist = playlist_from_catalog(catalog);
+        assert_eq!(playlist.provider, "spotify");
+        assert_eq!(playlist.title, "The Slow Rush");
+        assert_eq!(playlist.tracks.len(), 1);
+        assert_eq!(playlist.tracks[0].provider, "spotify");
+        assert_eq!(playlist.tracks[0].album, "The Slow Rush");
+        assert_eq!(playlist.tracks[0].art_url.as_deref(), Some("cover.jpg"));
+    }
 }

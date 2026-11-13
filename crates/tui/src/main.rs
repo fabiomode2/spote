@@ -2,6 +2,7 @@
 
 mod app;
 mod fetch;
+mod hires;
 mod social;
 mod spotify_jobs;
 mod theme;
@@ -145,10 +146,10 @@ USO:
 
 OPCIONES:
   --follow-spotify                 acompaña al cliente oficial vía MPRIS
-  --art <dither|half|braille|off>
-  --viz <preset>                   aurora, inferno, void, bloom, glitch, clean, neural
+  --art <default|pixel|braille|off>
+  --viz <preset>                   clean, aurora, bloom, inferno (franja)
   --no-viz                         arranca sin visualizador
-  --fps <n>                        límite de frames (default 60)
+  --fps <n>                        límite de frames (default 120)
 
 DATOS:
   db      {}
@@ -618,7 +619,14 @@ fn run_tui(args: Args) -> Result<()> {
         cfg.ui.fps = fps.clamp(20, 144);
     }
     if ArtMode::from_str(&cfg.ui.art_mode).is_none() {
-        cfg.ui.art_mode = "half".into();
+        cfg.ui.art_mode = "plain".into();
+    }
+    // Migración suave del default viejo: la rotación venía activada de fábrica
+    // y molestaba. Solo se apaga si la config parece la de antes.
+    if cfg.ui.art_rotate && cfg.ui.art_mode == "half" && cfg.ui.art_rotate_secs == 24 {
+        cfg.ui.art_rotate = false;
+        cfg.ui.art_mode = "plain".into();
+        let _ = cfg.save();
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -675,6 +683,8 @@ fn event_loop(
     budget: Duration,
     last: &mut Instant,
 ) -> Result<()> {
+    let mut hires = hires::HiResState::default();
+    let mut stdout = std::io::stdout();
     loop {
         let now = Instant::now();
         let dt = now.duration_since(*last).as_secs_f32().min(0.1);
@@ -686,6 +696,7 @@ fn event_loop(
             let buffer = frame.buffer_mut();
             ui::draw(app, buffer, area);
         })?;
+        hires::render(&mut stdout, app, &mut hires);
         if app.should_quit {
             return Ok(());
         }

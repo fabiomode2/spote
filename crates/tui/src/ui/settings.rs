@@ -3,11 +3,12 @@ use super::*;
 
 pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = content_rect(app, layout);
-    if app.now.track.is_some() {
+    if app.now.track.is_some() && layout.art.width > 0 {
         draw_art(app, buf, layout.art, pal, 0.85);
         frame_art(buf, layout.art, pal);
     }
     panel(
+        Some(app),
         buf,
         rect,
         pal,
@@ -33,7 +34,7 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
         0
     };
     let mut y = inner.y + offset;
-    for (index, (label, value)) in rows.iter().enumerate().skip(first) {
+    for (index, (label, value)) in rows.iter().enumerate().skip(first).take(visible) {
         let row = Rect::new(inner.x, y, inner.width, 1);
         let selected = index == app.settings_selected;
         if selected {

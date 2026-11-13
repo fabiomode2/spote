@@ -15,6 +15,20 @@ impl App {
             SettingRow::Rotate => onoff(self.art_rotate),
             SettingRow::RotateSecs => format!("{} s", self.cfg.ui.art_rotate_secs.max(5)),
             SettingRow::ArtMode => self.art_mode.label().to_string(),
+            SettingRow::VizPreset => format!("{} · {}", self.viz.preset_name(), self.viz.preset_description()),
+            SettingRow::Ambient => self.cfg.ui.fx.ambient.clone(),
+            SettingRow::AmbientOpacity => format!("{}%", self.cfg.ui.fx.ambient_opacity),
+            SettingRow::InstrumentBorders => onoff(self.cfg.ui.fx.instrument_borders),
+            SettingRow::EdgeFlame => onoff(self.cfg.ui.fx.edge_flame),
+            SettingRow::BloomPlay => onoff(self.cfg.ui.fx.bloom_play),
+            SettingRow::CleanSpill => onoff(self.cfg.ui.fx.clean_spill),
+            SettingRow::GlitchPanels => onoff(self.cfg.ui.fx.glitch_panels),
+            SettingRow::LyricsSize => match self.cfg.ui.lyrics_size {
+                0 => "compacta".to_string(),
+                2 => "grande".to_string(),
+                _ => "normal".to_string(),
+            },
+            SettingRow::LayoutEditor => "E".to_string(),
             SettingRow::VizBackground => onoff(self.viz_background),
             SettingRow::Cards => onoff(self.list_cards),
             SettingRow::Vcenter => onoff(self.vcenter),
@@ -53,6 +67,33 @@ impl App {
                     self.art_mode.prev()
                 };
                 self.set_art_mode(next);
+            }
+            SettingRow::VizPreset => {
+                if delta > 0 {
+                    self.viz.next_preset();
+                } else {
+                    self.viz.prev_preset();
+                }
+                self.cfg.ui.viz = self.viz.preset_name().to_string();
+            }
+            SettingRow::Ambient => {
+                const AMBIENTS: [&str; 7] =
+                    ["off", "void", "aurora", "neural", "glitch", "cover", "lyrics"];
+                let current = AMBIENTS
+                    .iter()
+                    .position(|name| *name == self.cfg.ui.fx.ambient)
+                    .unwrap_or(1) as i32;
+                let next = (current + delta).rem_euclid(AMBIENTS.len() as i32) as usize;
+                self.cfg.ui.fx.ambient = AMBIENTS[next].to_string();
+                self.ambient = Viz::from_preset(&self.cfg.ui.fx.ambient);
+            }
+            SettingRow::AmbientOpacity => {
+                self.cfg.ui.fx.ambient_opacity =
+                    (self.cfg.ui.fx.ambient_opacity as i32 + delta * 2).clamp(0, 40) as u8;
+            }
+            SettingRow::LyricsSize => {
+                self.cfg.ui.lyrics_size =
+                    (self.cfg.ui.lyrics_size as i32 + delta).clamp(0, 2) as u8;
             }
             SettingRow::Thumb => {
                 let next = if delta > 0 {
@@ -102,7 +143,20 @@ impl App {
             }
             SettingRow::Vcenter => {
                 self.vcenter = !self.vcenter;
-                self.cfg.ui.vcenter = self.vcenter;
+                self.cfg.ui.layout.vcenter = self.vcenter;
+            }
+            SettingRow::InstrumentBorders => {
+                self.cfg.ui.fx.instrument_borders = !self.cfg.ui.fx.instrument_borders
+            }
+            SettingRow::EdgeFlame => self.cfg.ui.fx.edge_flame = !self.cfg.ui.fx.edge_flame,
+            SettingRow::BloomPlay => self.cfg.ui.fx.bloom_play = !self.cfg.ui.fx.bloom_play,
+            SettingRow::CleanSpill => self.cfg.ui.fx.clean_spill = !self.cfg.ui.fx.clean_spill,
+            SettingRow::GlitchPanels => {
+                self.cfg.ui.fx.glitch_panels = !self.cfg.ui.fx.glitch_panels
+            }
+            SettingRow::LayoutEditor => {
+                self.overlay = Overlay::Layout;
+                self.layout_selected = 0;
             }
             SettingRow::Zen => self.set_zen(!self.zen),
             SettingRow::ProgressInViz => {

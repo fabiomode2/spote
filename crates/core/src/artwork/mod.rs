@@ -33,10 +33,11 @@ pub enum ArtMode {
 }
 
 impl ArtMode {
+    /// Los tres modos de portada grandes: foto fiel, pixel art y braille.
+    /// `Half` se mantiene como alias interno de `Plain`.
     pub fn next(self) -> Self {
         match self {
-            Self::Plain => Self::Half,
-            Self::Half => Self::Dither,
+            Self::Plain | Self::Half => Self::Dither,
             Self::Dither => Self::Braille,
             Self::Braille => Self::Off,
             Self::Gradient | Self::Off => Self::Plain,
@@ -45,24 +46,21 @@ impl ArtMode {
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Plain => Self::Off,
-            Self::Half => Self::Plain,
-            Self::Dither => Self::Half,
+            Self::Plain | Self::Half | Self::Gradient => Self::Off,
+            Self::Dither => Self::Plain,
             Self::Braille => Self::Dither,
-            Self::Gradient | Self::Off => Self::Braille,
+            Self::Off => Self::Braille,
         }
     }
 
     /// Modos que participan en la rotación automática. `Gradient` no está:
     /// es solo el recurso de cuando no hay portada.
-    pub const ROTATION: [ArtMode; 4] =
-        [ArtMode::Plain, ArtMode::Half, ArtMode::Dither, ArtMode::Braille];
+    pub const ROTATION: [ArtMode; 3] = [ArtMode::Plain, ArtMode::Dither, ArtMode::Braille];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dither => "dither",
-            Self::Half => "half",
-            Self::Plain => "plain",
+            Self::Dither => "pixel",
+            Self::Half | Self::Plain => "default",
             Self::Braille => "braille",
             Self::Off => "off",
             Self::Gradient => "gradient",
@@ -71,9 +69,9 @@ impl ArtMode {
 
     pub fn from_str(text: &str) -> Option<Self> {
         match text {
-            "dither" => Some(Self::Dither),
+            "dither" | "pixel" | "pixelado" => Some(Self::Dither),
             "half" | "halfblocks" => Some(Self::Half),
-            "plain" | "foto" | "photo" => Some(Self::Plain),
+            "plain" | "default" | "foto" | "photo" => Some(Self::Plain),
             "braille" => Some(Self::Braille),
             "off" => Some(Self::Off),
             "gradient" => Some(Self::Gradient),

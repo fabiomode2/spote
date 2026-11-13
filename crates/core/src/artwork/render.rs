@@ -320,44 +320,98 @@ fn render_dither(img: &DynamicImage, w: u16, h: u16, pal: &Palette, dim: f32) ->
     art
 }
 
-/// Braille: 2x4 muestras por celda, umbralizadas con dither ordenado alrededor
-/// de la mediana global. Tinta del acento, sin fondo: parece un grabado.
+/// Braille: 2x4 muestras por celda. Detecta si la portada es tinta sobre
+/// papel claro (line art, logos) y la invierte para que el fondo blanco no se
+/// llene de puntos: en ese caso dibuja la tinta, no el papel. En fotos oscuras
+/// mantiene la polaridad normal. El umbral se normaliza por percentiles y se
+/// guía por el contraste local para no convertir el ruido de fondo en estática.
 fn render_braille(img: &DynamicImage, w: u16, h: u16, pal: &Palette, dim: f32) -> CoverArt {
     let (cols, rows) = (w as u32 * 2, h as u32 * 4);
     let pixels = sample_cover(img, cols, rows, FilterType::Triangle);
-    // La mediana fija el punto de máxima sensibilidad del grabado: por debajo
-    // de ella casi no hay tinta, así una portada oscura no se llena de puntos.
-    let median = median_luma(&pixels);
-    let pivot = (median * 0.55).clamp(0.04, 0.45);
-    let range = (0.85 * (1.0 - pivot)).clamp(0.35, 0.85);
-
+    let mut luma = vec![0.0f32; (cols * rows) as usize];
+    let mut hist = [0u32; 64];
+    let mut border_sum = 0.0f32;
+    let mut border_n = 0u32;
+    for y in 0..rows {
+        for x in 0..cols {
+            let value = px_luma(pixels.get_pixel(x, y)).clamp(0.0, 1.0);
+            luma[(y * cols + x) as usize] = value;
+            hist[((value * 63.0).round() as usize).min(63)] += 1;
+            if x == 0 || y == 0 || x + 1 == cols || y + 1 == rows {
+                border_sum += value;
+                border_n += 1;
+            }
+        }
+    }
+    let total = (cols * rows).max(1);
+    let border = border_sum / border_n.max(1) as f32;
+    let median = percentile(&hist, total, 0.5);
+    // Papel claro (cómic, logo, portada escaneada): se dibuja la tinta oscura.
+    let invert = border > 0.55 || median > 0.58;
+    if invert {
+        for value in &mut luma {
+            *value = 1.0 - *value;
+        }
+        let mut inverted_hist = [0u32; 64];
+        for value in &luma {
+            inverted_hist[((value * 63.0).round() as usize).min(63)] += 1;
+        }
+        hist = inverted_hist;
+    }
+    let low = percentile(&hist, total, 0.18).min(0.35);
+    let high = percentile(&hist, total, 0.94).max(low + 0.18).min(1.0);
+    let range = (high - low).max(0.12);
+    let at = |x: u32, y: u32| -> f32 {
+        if x >= cols || y >= rows {
+            0.0
+        } else {
+            luma[(y * cols + x) as usize]
+        }
+    };
     let mut art = CoverArt::new(w, h);
     for y in 0..h as u32 {
         let v = (y as f32 + 0.5) / h as f32;
         for x in 0..w as u32 {
-            let u = (x as f32 + 0.5) / w as f32;
             let mut bits = 0u32;
             let mut tone = 0.0f32;
             for &(bit, dx, dy) in &BRAILLE_DOTS {
                 let (sx, sy) = (x * 2 + dx, y * 4 + dy);
-                let su = (sx as f32 + 0.5) / cols as f32;
-                let sv = (sy as f32 + 0.5) / rows as f32;
-                let lit = px_luma(pixels.get_pixel(sx, sy)) * shade_factor(su, sv, dim);
-                let value = ((lit - pivot) / range).clamp(0.0, 1.0);
+                let base = at(sx, sy);
+                // Contraste local 3x3: el papel liso no genera puntos, las
+                // líneas y los bordes sí. Así una portada clara no es estática.
+                let mut local = 0.0f32;
+                let mut n = 0.0f32;
+                for oy in -1i32..=1 {
+                    for ox in -1i32..=1 {
+                        local += at((sx as i32 + ox).max(0) as u32, (sy as i32 + oy).max(0) as u32);
+                        n += 1.0;
+                    }
+                }
+                local /= n.max(1.0);
+                let contrast = (base - local).abs();
+                let gx = (at(sx.saturating_add(1), sy) - at(sx.saturating_sub(1), sy)).abs();
+                let gy = (at(sx, sy.saturating_add(1)) - at(sx, sy.saturating_sub(1))).abs();
+                let edge = gx + gy;
+                let fill = ((base - low) / range).clamp(0.0, 1.0);
+                let mut value = (edge * 2.2 + contrast * 0.5 + fill * fill * 0.18).min(1.0);
+                value = value.powf(if invert { 1.18 } else { 1.0 });
+                value *= 1.0 - dim;
+                if invert {
+                    // Tinta sobre papel: se deja respirar la trama para que las
+                    // zonas negras no se conviertan en bloques macizos.
+                    value = (value * 0.78).min(0.82);
+                }
                 tone += value;
-                if value > bayer8(sx, sy) {
+                if value > bayer8(sx, sy) * 0.98 {
                     bits |= bit;
                 }
             }
             tone /= BRAILLE_DOTS.len() as f32;
-            // Un punto braille ocupa 1/8 de celda: se aclara hacia el color de
-            // texto para que la tinta se lea sobre el fondo del tema.
-            let ink = mix(mix(pal.secondary, pal.primary, tone), pal.text, 0.40);
-            // El oscurecido también baja la tinta: la viñeta se nota.
-            let fg = scale(ink, 0.45 + 0.55 * shade_factor(u, v, dim));
+            let ink = mix(mix(pal.secondary, pal.primary, tone), pal.text, 0.36);
+            let glow = (0.45 + 0.55 * (1.0 - v * 0.4)) * (1.0 - dim * 0.7);
             art.cells[y as usize * w as usize + x as usize] = ArtCell {
                 ch: char::from_u32(BRAILLE_BASE + bits).unwrap_or(' '),
-                fg,
+                fg: scale(ink, glow.clamp(0.2, 1.0)),
                 bg: None,
             };
         }
@@ -518,6 +572,33 @@ mod tests {
                 assert!(art.cells.iter().all(|c| c.bg.is_some()), "{mode:?}");
             }
         }
+    }
+
+    #[test]
+    fn braille_inverts_light_paper_and_leaves_background_empty() {
+        // Papel blanco con una línea negra: el fondo no debe llenarse de puntos.
+        let mut img = RgbaImage::new(64, 64);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            let ink = (20..44).contains(&x) && (20..44).contains(&y);
+            *px = if ink {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            };
+        }
+        let pal = Palette::dark();
+        let art = render_cover(
+            &DynamicImage::ImageRgba8(img),
+            32,
+            12,
+            ArtMode::Braille,
+            &pal,
+            0.0,
+        );
+        let top = (0..32).filter(|x| art.cell(*x, 0).unwrap().ch != '\u{2800}').count();
+        assert!(top < 8, "el papel blanco se llenó de puntos: {top}");
+        let center = (0..32).filter(|x| art.cell(*x, 6).unwrap().ch != '\u{2800}').count();
+        assert!(center > 2, "la tinta negra no se dibujó");
     }
 
     #[test]

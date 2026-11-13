@@ -5,6 +5,10 @@ impl App {
     pub(super) fn handle_overlay_key(&mut self, key: KeyEvent) {
         match self.overlay.clone() {
             Overlay::None => {}
+            Overlay::Context => self.handle_context_key(key),
+            Overlay::Layout => self.handle_layout_key(key),
+            Overlay::Artist => self.handle_artist_key(key),
+            Overlay::Album => self.handle_album_key(key),
             Overlay::Help | Overlay::Effects => match key.code {
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
                     self.overlay = Overlay::None;
@@ -126,19 +130,24 @@ impl App {
         self.import_input.clear();
         self.overlay = Overlay::None;
         self.set_status("importando lista…");
-        self.toast("importando lista de Spotify/Deezer…", ToastKind::Info);
+        self.toast("importando de Spotify…", ToastKind::Info);
     }
 
     /// Pista sobre la que actuar (búsqueda o biblioteca) para añadir a lista.
 
     fn context_key(&self) -> Option<String> {
         match self.tab {
-            Tab::Search => self
-                .search
-                .results
-                .get(self.search.selected)
-                .map(|item| item.to_track().key),
-            Tab::Library | Tab::Now => self.selected_row().map(|row| row.track.key.clone()),
+            Tab::Search => match self.search_entry(self.search.selected) {
+                Some(SearchEntry::Track(index)) => self
+                    .search
+                    .results
+                    .get(index)
+                    .map(|item| item.to_track().key),
+                _ => None,
+            },
+            Tab::Library | Tab::Now | Tab::Albums => {
+                self.selected_row().map(|row| row.track.key.clone())
+            }
             _ => None,
         }
     }

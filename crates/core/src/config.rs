@@ -73,7 +73,7 @@ impl Default for DiscordCfg {
     fn default() -> Self {
         Self {
             enabled: true,
-            client_id: String::new(),
+            client_id: "1570904121924657204".to_string(),
             buttons: true,
             small_image: "spote".to_string(),
         }
@@ -152,29 +152,153 @@ pub struct UiCfg {
     pub zen: bool,
     /// Número de bandas del ecualizador del header.
     pub show_bpm: bool,
+    /// Tamaño/zoom de la letra: 0 compacta, 1 normal, 2 grande.
+    pub lyrics_size: u8,
+    /// Diseño de paneles (se puede editar en caliente con `E`).
+    pub layout: LayoutCfg,
+    /// Efectos ambientales repartidos por la UI.
+    pub fx: FxCfg,
+}
+
+/// Geometría y visibilidad de los paneles. Todo se puede tocar en runtime
+/// desde el editor de diseño (`E`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutCfg {
+    pub top: bool,
+    pub nav: bool,
+    pub queue: bool,
+    pub info: bool,
+    pub viz: bool,
+    pub transport: bool,
+    pub hint: bool,
+    /// Centra el bloque de paneles en vertical en vez de estirarlo.
+    pub vcenter: bool,
+    /// Altura del bloque centrado (30-100 % del alto disponible).
+    pub vcenter_pct: u8,
+    /// Ancho del panel de navegación (columnas).
+    pub nav_width: u16,
+    /// Ancho del panel lateral de cola/info (columnas).
+    pub side_width: u16,
+    /// Alto de la franja del visualizador (filas).
+    pub viz_height: u16,
+    /// Alto del transporte (filas, 2-4).
+    pub transport_height: u16,
+    /// `left` o `right`.
+    pub nav_dock: String,
+    pub side_dock: String,
+    /// Porcentaje del lateral que ocupa la cola; el resto es info.
+    pub queue_share: u8,
+    /// Tamaño de la portada respecto al centro (40-100 %).
+    pub art_size: u8,
+    /// `auto`, `left` o `right`: dónde va la portada respecto a la letra.
+    pub art_side: String,
+}
+
+impl Default for LayoutCfg {
+    fn default() -> Self {
+        Self {
+            top: true,
+            nav: true,
+            queue: true,
+            info: true,
+            viz: true,
+            transport: true,
+            hint: true,
+            vcenter: true,
+            vcenter_pct: 82,
+            nav_width: 19,
+            side_width: 42,
+            viz_height: 8,
+            transport_height: 4,
+            nav_dock: "left".into(),
+            side_dock: "right".into(),
+            queue_share: 62,
+            art_size: 100,
+            art_side: "auto".into(),
+        }
+    }
+}
+
+impl LayoutCfg {
+    pub fn nav_left(&self) -> bool {
+        self.nav_dock != "right"
+    }
+
+    pub fn side_left(&self) -> bool {
+        self.side_dock == "left"
+    }
+
+    pub fn dock_label(&self) -> String {
+        format!(
+            "nav {}, lateral {}",
+            if self.nav_left() { "izq" } else { "der" },
+            if self.side_left() { "izq" } else { "der" }
+        )
+    }
+}
+
+/// Efectos ambientales. Los presets ruidosos (`void`, `neural`, `glitch`) se
+/// usan de fondo con poca opacidad; `clean`/`aurora`/`bloom`/`inferno` se
+/// quedan en la franja inferior y en detalles puntuales.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FxCfg {
+    /// `off`, `void`, `aurora`, `neural`, `glitch`, `cover` (portada en
+    /// bandas braille) o `lyrics` (letra en bandas).
+    pub ambient: String,
+    /// Opacidad del fondo ambiental (0-40 %).
+    pub ambient_opacity: u8,
+    /// Los bordes laten con bombo/caja/charles/voz.
+    pub instrument_borders: bool,
+    /// Llama/brasa en el borde inferior.
+    pub edge_flame: bool,
+    /// Glow de bloom detrás del play y en la esquina.
+    pub bloom_play: bool,
+    /// La onda de `clean` puede subir por encima de los paneles.
+    pub clean_spill: bool,
+    /// Trama de glitch muy tenue dentro de los paneles.
+    pub glitch_panels: bool,
+}
+
+impl Default for FxCfg {
+    fn default() -> Self {
+        Self {
+            ambient: "void".into(),
+            ambient_opacity: 16,
+            instrument_borders: true,
+            edge_flame: true,
+            bloom_play: true,
+            clean_spill: true,
+            glitch_panels: false,
+        }
+    }
 }
 
 impl Default for UiCfg {
     fn default() -> Self {
         Self {
-            art_mode: "half".to_string(),
-            viz: "aurora".to_string(),
+            art_mode: "plain".to_string(),
+            viz: "clean".to_string(),
             viz_enabled: true,
             theme_fade_ms: 800,
-            fps: 60,
+            fps: 120,
             show_fps: false,
             follow_spotify: false,
-            art_rotate: true,
+            art_rotate: false,
             art_rotate_secs: 24,
             list_cards: false,
             viz_background: false,
             vcenter: true,
-            thumb_mode: "palette".to_string(),
+            thumb_mode: "plain".to_string(),
             progress_in_viz: false,
             bar_width_pct: 70,
             button_pad: 2,
             zen: false,
             show_bpm: true,
+            lyrics_size: 1,
+            layout: LayoutCfg::default(),
+            fx: FxCfg::default(),
         }
     }
 }
@@ -201,10 +325,27 @@ impl Config {
     pub fn load() -> Self {
         let path = config_path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|err| {
-                eprintln!("spote: config inválida en {}: {err}", path.display());
-                Self::default()
-            }),
+            Ok(text) => {
+                let mut cfg: Config = toml::from_str(&text).unwrap_or_else(|err| {
+                    eprintln!("spote: config inválida en {}: {err}", path.display());
+                    Self::default()
+                });
+                // Configs anteriores al rediseño: la rotación venía encendida y
+                // no existía `[ui.layout]`. Se migra una vez, sin tocar el resto.
+                if !text.contains("[ui.layout]") {
+                    cfg.ui.layout = LayoutCfg::default();
+                    cfg.ui.layout.vcenter = true;
+                    cfg.ui.art_rotate = false;
+                    if cfg.ui.art_mode == "half" {
+                        cfg.ui.art_mode = "plain".into();
+                    }
+                    if cfg.ui.thumb_mode == "off" {
+                        cfg.ui.thumb_mode = "plain".into();
+                    }
+                    let _ = cfg.save();
+                }
+                cfg
+            }
             Err(_) => Self::default(),
         }
     }
@@ -279,7 +420,7 @@ mod tests {
     #[test]
     fn defaults_are_usable() {
         let cfg = Config::default();
-        assert_eq!(cfg.ui.art_mode, "half");
+        assert_eq!(cfg.ui.art_mode, "plain");
         assert!(!cfg.server.url.is_empty() || cfg.server.url.is_empty());
         assert!(cfg.player.volume > 0.0);
     }
@@ -297,7 +438,7 @@ mod tests {
     fn partial_config_uses_defaults() {
         let cfg: Config = toml::from_str("[ui]\nfps = 30\n").unwrap();
         assert_eq!(cfg.ui.fps, 30);
-        assert_eq!(cfg.ui.art_mode, "half");
+        assert_eq!(cfg.ui.art_mode, "plain");
         assert_eq!(cfg.player.volume, 0.8);
     }
 }

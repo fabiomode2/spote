@@ -7,20 +7,24 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use spote_core::artwork::{ArtMode, Palette, Rgb};
+use spote_core::artwork::{ArtMode, CoverArt, Palette, Rgb};
 use spote_core::util::{format_ms, luma, mix, mix_oklab, scale};
 
-use crate::app::{Action, App, Overlay, Tab, ThumbMode, ToastKind};
+use crate::app::{Action, App, Overlay, Pane, Tab, ThumbMode, ToastKind};
 use crate::theme::ease_out_cubic;
 use crate::viz::Blend;
 
+mod albums;
 mod art;
+mod layout;
 mod now;
 mod lists;
 mod settings;
 mod side;
 mod chrome;
 mod overlays;
+pub use layout::Layout;
+use albums::*;
 use art::*;
 use now::*;
 use lists::*;
@@ -32,204 +36,84 @@ use overlays::*;
 const PLAY: &str = "⏵";
 const PAUSE: &str = "⏸";
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Layout {
-    pub full: Rect,
-    pub top: Rect,
-    pub main: Rect,
-    pub nav: Rect,
-    pub center: Rect,
-    pub side: Rect,
-    pub queue: Rect,
-    pub info: Rect,
-    pub viz: Rect,
-    pub transport: Rect,
-    pub hint: Rect,
-    pub art: Rect,
-    pub content: Rect,
-}
-
-impl Layout {
-    pub fn compute(
-        area: Rect,
-        show_viz: bool,
-        fullscreen: crate::app::Fullscreen,
-        art_ratio: u16,
-        vcenter: bool,
-    ) -> Self {
-        let mut out = Self {
-            full: area,
-            ..Default::default()
-        };
-        if area.width < 20 || area.height < 8 {
-            out.top = Rect::new(area.x, area.y, area.width, 1);
-            out.main = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
-            out.center = out.main;
-            out.hint = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
-            return out;
-        }
-        out.top = Rect::new(area.x, area.y, area.width, 1);
-        out.hint = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
-        out.transport = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(3),
-            area.width,
-            2,
-        );
-        let mut viz_height = if show_viz {
-            match area.height {
-                0..=23 => 4,
-                24..=31 => 6,
-                32..=44 => 8,
-                _ => 10,
-            }
-        } else {
-            0
-        };
-        if fullscreen != crate::app::Fullscreen::None {
-            viz_height = 0;
-        }
-        let main_height = area
-            .height
-            .saturating_sub(3)
-            .saturating_sub(viz_height)
-            .saturating_sub(1);
-        out.main = Rect::new(area.x, area.y + 1, area.width, main_height);
-        out.viz = Rect::new(
-            area.x,
-            area.y + 1 + main_height,
-            area.width,
-            viz_height,
-        );
-
-        let nav_width = if area.width >= 92 { 19 } else { 0 };
-        // La cola lateral solo entra cuando sobra sitio de verdad: con 160
-        // columnas se come el ancho de la letra.
-        let side_width = if area.width >= 186 {
-            (area.width / 4).clamp(34, 46)
-        } else {
-            0
-        };
-        if vcenter {
-            // El bloque (el "cuadrado" de paneles) se ajusta a la portada y se
-            // centra en el alto disponible. Antes esto solo centraba el texto
-            // dentro de paneles estirados de borde a borde.
-            let center_w = out.main.width.saturating_sub(nav_width + side_width);
-            let block_h = ((center_w as u32 * 3 / 10) as u16 + 2).min(out.main.height);
-            let spare = out.main.height.saturating_sub(block_h);
-            out.main = Rect::new(
-                out.main.x,
-                out.main.y + spare / 2,
-                out.main.width,
-                block_h,
-            );
-        }
-        out.nav = Rect::new(out.main.x, out.main.y, nav_width, out.main.height);
-        out.center = Rect::new(
-            out.main.x + nav_width,
-            out.main.y,
-            out.main.width.saturating_sub(nav_width + side_width),
-            out.main.height,
-        );
-        out.side = Rect::new(
-            out.main.x + out.main.width.saturating_sub(side_width),
-            out.main.y,
-            side_width,
-            out.main.height,
-        );
-        if side_width > 0 {
-            let queue_height = (out.side.height as f32 * 0.62) as u16;
-            out.queue = Rect::new(out.side.x, out.side.y, out.side.width, queue_height);
-            out.info = Rect::new(
-                out.side.x,
-                out.side.y + queue_height,
-                out.side.width,
-                out.side.height.saturating_sub(queue_height),
-            );
-        }
-        // Portada: cuadrada de verdad (la celda es ~1:2, así que w = 2*h).
-        let inner_h = out.center.height.saturating_sub(2);
-        let (art, content) = if out.center.width >= 86 && inner_h >= 12 {
-            let art_h = inner_h;
-            let mut art_w = (art_h * 2).min(out.center.width * art_ratio / 10);
-            // Nunca dejar el texto por debajo de ~44 columnas.
-            let max_art = out.center.width.saturating_sub(47);
-            if max_art > 24 {
-                art_w = art_w.min(max_art);
-            }
-            let art = Rect::new(
-                out.center.x + out.center.width.saturating_sub(art_w + 1),
-                out.center.y + 1,
-                art_w,
-                art_h,
-            );
-            let content_w = out.center.width.saturating_sub(art_w + 3);
-            let content = Rect::new(out.center.x + 1, out.center.y, content_w, out.center.height);
-            (art, content)
-        } else if out.center.width >= 46 && out.center.height >= 14 {
-            // Estrecho: miniatura arriba a la derecha y el texto ocupa todo el
-            // alto. Así la letra no desaparece en terminales pequeñas.
-            let art_w = (out.center.width / 3).clamp(18, 30);
-            let art_h = art_w / 2;
-            let art = Rect::new(
-                out.center.x + out.center.width.saturating_sub(art_w + 2),
-                out.center.y + 2,
-                art_w,
-                art_h,
-            );
-            (art, out.center)
-        } else {
-            (Rect::new(out.center.x, out.center.y, 0, 0), out.center)
-        };
-        out.art = art;
-        out.content = content;
-        out
-    }
-}
-
 pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
-    // Frame limpio: con paneles translúcidos y textos que cambian de longitud,
-    // sin esto quedan restos del frame anterior (placeholders, valores viejos).
-    buf.reset();
+    app.art_visible_rect = None;
+    // El fondo limpia y rellena todo el buffer de una pasada: `reset` + fondo
+    // era recorrer la pantalla dos veces cada frame.
     // El mismo reparto en todas las vistas: si cambia, la interfaz "salta" al
     // cambiar de pestaña.
-    let art_ratio = 6;
-    let vcenter = app.vcenter && app.fullscreen == crate::app::Fullscreen::None;
-    let layout = Layout::compute(area, app.show_viz, app.fullscreen, art_ratio, vcenter);
+    // La portada grande es para "ahora"; en listas y ajustes ocupa menos para
+    // que quepan título, artista y duración sin comerse el panel.
+    let art_ratio = if app.now.track.is_none() {
+        0
+    } else {
+        match app.tab {
+            Tab::Now => 6,
+            Tab::Library | Tab::Search | Tab::Room => 3,
+            Tab::Albums | Tab::Settings => 0,
+        }
+    };
+    let layout = Layout::compute(area, &app.cfg.ui.layout, app.show_viz, app.fullscreen, art_ratio);
+    app.last_main = layout.main;
     app.hit.clear();
     let pal = *app.palette.current();
 
     background(buf, area, &pal, app.intro);
+    // Fondo ambiental: un efecto ruidoso (void/neural/glitch/aurora) a baja
+    // opacidad detrás de los paneles. Los paneles son translúcidos, así que se
+    // lee a través de ellos sin quitar legibilidad.
+    let fx_opacity = app.cfg.ui.fx.ambient_opacity.min(40) as f32 / 100.0;
+    if fx_opacity > 0.001 {
+        match app.cfg.ui.fx.ambient.as_str() {
+            "off" | "cover" | "lyrics" => {}
+            _ => {
+                let w = (area.width / 2).max(12);
+                let h = (area.height / 2).max(6);
+                let dt = 1.0 / app.fps.value().max(1.0);
+                let audio = app.audio.clone();
+                app.ambient.render(w, h, &audio, &pal, dt);
+                blit_layer(
+                    &app.ambient.output,
+                    buf,
+                    area,
+                    0,
+                    fx_opacity * 0.55,
+                    fx_opacity * 0.28,
+                    2,
+                );
+            }
+        }
+    }
     let zen = app.zen && app.show_viz;
     let viz_fullscreen = (app.viz_background || zen) && app.show_viz && layout.main.height > 2;
     if viz_fullscreen {
         let audio = &app.audio;
-        // El fondo se renderiza a media resolución y se escala al pintar: es
-        // decorativo, translúcido, y a 200x56 a resolución completa se comía
-        // el presupuesto de frame del preset `clean`.
+        // A resolución completa: en zen el efecto es el protagonista y el
+        // centro no puede verse más basto que la franja inferior.
         app.viz.render(
-            (layout.full.width / VIZ_SCALE).max(20),
-            (layout.full.height / VIZ_SCALE).max(6),
+            layout.full.width.max(20),
+            layout.full.height.max(6),
             audio,
             &pal,
             1.0 / app.fps.value().max(1.0),
         );
         // En zen el visualizador es el protagonista: más opaco y sin paneles.
         if zen {
-            blit_viz(app, buf, layout.full, 0, 0.9, 0.85, VIZ_SCALE);
+            // Solo glifos sobre el fondo oscuro: antes el `bg_amount` alto
+            // lavaba la pantalla con un velo blanquecino en presets claros.
+            blit_viz(app, buf, layout.full, 0, 0.95, 0.0, VIZ_SCALE);
         } else {
             blit_viz(app, buf, layout.full, 0, 0.32, 0.10, VIZ_SCALE);
         }
     }
-    app.set_art_size_hint(layout.art.width, layout.art.height);
-    app.ensure_art();
-
     if layout.main.width < 20 {
         draw_too_small(buf, area, &pal);
         return;
     }
 
-    draw_top(app, buf, &layout, &pal);
+    if layout.top.height > 0 {
+        draw_top(app, buf, &layout, &pal);
+    }
     if !zen && layout.nav.width > 0 {
         draw_nav(app, buf, &layout, &pal);
     }
@@ -237,6 +121,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         Tab::Now => draw_now(app, buf, &layout, &pal),
         Tab::Search => draw_search(app, buf, &layout, &pal),
         Tab::Library => draw_library(app, buf, &layout, &pal),
+        Tab::Albums => draw_albums(app, buf, &layout, &pal),
         Tab::Room => draw_room(app, buf, &layout, &pal),
         Tab::Settings => draw_settings(app, buf, &layout, &pal),
     }
@@ -246,8 +131,30 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if layout.viz.height > 0 {
         draw_viz(app, buf, &layout, &pal);
     }
-    draw_transport(app, buf, &layout, &pal);
-    draw_hint(app, buf, &layout, &pal);
+    if layout.transport.height > 0 {
+        draw_transport(app, buf, &layout, &pal);
+    }
+    if layout.hint.height > 0 {
+        draw_hint(app, buf, &layout, &pal);
+    }
+    // Portada/letra ambiental: se mezcla solo el fondo de las celdas ya
+    // pintadas, preservando el texto. Así se ve a través de los paneles sin
+    // taparlos ni ensuciar la lectura.
+    if fx_opacity > 0.001 {
+        match app.cfg.ui.fx.ambient.as_str() {
+            "cover" => draw_ambient_cover_tint(app, buf, area, fx_opacity),
+            "lyrics" => draw_ambient_lyrics_tint(app, buf, area, fx_opacity),
+            _ => {}
+        }
+    }
+    // Las asas van al final: el borde del panel registra su foco antes y, si
+    // no, el clic de redimensionar nunca llegaría.
+    if let Some(split) = layout.nav_split {
+        app.hit.add(split, Action::Resize(Pane::Nav));
+    }
+    if let Some(split) = layout.side_split {
+        app.hit.add(split, Action::Resize(Pane::Side));
+    }
     draw_toasts(app, buf, &layout, &pal);
     draw_overlay(app, buf, &layout, &pal);
 }
@@ -255,6 +162,123 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
 // ---------------------------------------------------------------------------
 // Helpers de pintura
 // ---------------------------------------------------------------------------
+
+/// Portada ambiental a pantalla completa, sin bloques ni costuras: mezcla el
+/// color de la portada en el fondo de cada celda y deja intactos los glifos.
+fn draw_ambient_cover_tint(app: &App, buf: &mut Buffer, area: Rect, opacity: f32) {
+    let Some(art) = app.ambient_art.as_ref().or(app.art.as_ref()) else {
+        return;
+    };
+    if art.is_empty() || area.width < 20 || area.height < 8 {
+        return;
+    }
+    let alpha = (opacity * 0.95).clamp(0.02, 0.20);
+    let area_buf = *buf.area();
+    let width = area_buf.width as usize;
+    let src_aspect = art.w as f32 / (art.h as f32 * 2.0).max(1.0);
+    let dst_aspect = area.width as f32 / (area.height as f32 * 2.0).max(1.0);
+    for y in area.y..area.y + area.height {
+        if y >= area_buf.y + area_buf.height {
+            break;
+        }
+        let start = (y - area_buf.y) as usize * width + (area.x - area_buf.x) as usize;
+        for (offset, cell) in buf.content[start..start + area.width as usize]
+            .iter_mut()
+            .enumerate()
+        {
+            let u = offset as f32 / area.width.max(1) as f32;
+            let v = (y - area.y) as f32 / area.height.max(1) as f32;
+            let (u, v) = if src_aspect > dst_aspect {
+                let span = dst_aspect / src_aspect;
+                ((1.0 - span) / 2.0 + u * span, v)
+            } else {
+                let span = src_aspect / dst_aspect;
+                (u, (1.0 - span) / 2.0 + v * span)
+            };
+            let sx = (u * art.w as f32) as u16;
+            let sy = (v * art.h as f32) as u16;
+            let Some(src) = art.cell(
+                sx.min(art.w.saturating_sub(1)),
+                sy.min(art.h.saturating_sub(1)),
+            ) else {
+                continue;
+            };
+            let under = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => continue,
+            };
+            let mixed = mix(under, src.fg, alpha);
+            cell.set_bg(color(mixed));
+            if cell.symbol() == " " {
+                cell.set_fg(color(mixed));
+            }
+        }
+    }
+}
+
+/// Letra actual repetida en bandas, pero mezclando solo el fondo de la celda:
+/// se lee como textura detrás de la UI y no se come el texto de los paneles.
+fn draw_ambient_lyrics_tint(app: &App, buf: &mut Buffer, area: Rect, opacity: f32) {
+    let text = app
+        .lyrics
+        .as_ref()
+        .and_then(|doc| doc.index_at(app.now.position_ms))
+        .and_then(|index| app.lyrics.as_ref().and_then(|doc| doc.lines.get(index)))
+        .map(|line| line.text.clone())
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| {
+            app.now
+                .track
+                .as_ref()
+                .map(|track| format!("{} · {}", track.title, track.artist))
+        });
+    let Some(text) = text else { return };
+    let alpha = (opacity * 1.4).clamp(0.04, 0.22);
+    let tint = mix_oklab(palette_bg(app), app.palette.current().secondary, 0.55);
+    let drift = (app.now.position_ms / 90) as i32;
+    let area_buf = *buf.area();
+    let width = area_buf.width as usize;
+    for band in 0..3u16 {
+        let y = area.y + (area.height as u32 * (band as u32 * 32 + 12) / 100) as u16;
+        if y >= area.y + area.height || y >= area_buf.y + area_buf.height {
+            continue;
+        }
+        let mut line: Vec<char> = text.chars().collect();
+        line.extend([' ', '·', ' ']);
+        let line_w = line.len() as i32;
+        if line_w == 0 {
+            continue;
+        }
+        let offset = (drift + band as i32 * 23).rem_euclid(line_w);
+        let mut x = area.x as i32 - offset;
+        while x < (area.x + area.width) as i32 {
+            for (i, _) in line.iter().enumerate() {
+                let px = x + i as i32;
+                if px < area.x as i32 || px >= (area.x + area.width) as i32 {
+                    continue;
+                }
+                let start = (y - area_buf.y) as usize * width
+                    + (px as u16 - area_buf.x) as usize;
+                if let Some(cell) = buf.content.get_mut(start) {
+                    let under = match cell.bg {
+                        Color::Rgb(r, g, b) => (r, g, b),
+                        _ => continue,
+                    };
+                    let mixed = mix(under, tint, alpha);
+                    cell.set_bg(color(mixed));
+                    if cell.symbol() == " " {
+                        cell.set_fg(color(mixed));
+                    }
+                }
+            }
+            x += line_w + 6;
+        }
+    }
+}
+
+fn palette_bg(app: &App) -> Rgb {
+    app.palette.current().bg_deep
+}
 
 /// Recorta por caracteres, nunca por bytes: los títulos con acentos o
 /// japoneses partían a mitad de un carácter y paniqueaban.
@@ -268,6 +292,19 @@ fn truncate_chars(text: &mut String, max: usize) {
         .map(|(index, _)| index)
         .unwrap_or(text.len());
     text.truncate(end);
+}
+
+/// Icono/etiqueta corta del proveedor de la fuente descargada.
+fn source_tag(provider: Option<&str>) -> &'static str {
+    match provider.unwrap_or("") {
+        "youtube" | "yt" | "yt-dlp" => "▶",
+        "soundcloud" | "sc" => "☁",
+        "spotify" => "●",
+        "deezer" | "dz" => "◆",
+        "local" | "mpris" => "⌂",
+        "" => "·",
+        _ => "↓",
+    }
 }
 
 fn color(c: Rgb) -> Color {
@@ -292,7 +329,7 @@ fn content_rect(app: &App, layout: &Layout) -> Rect {
     }
     let width = layout.content.width.min(64).max(layout.center.width.min(40));
     Rect::new(
-        layout.full.x + layout.full.width.saturating_sub(width) / 2,
+        layout.center.x + layout.center.width.saturating_sub(width) / 2,
         layout.content.y,
         width,
         layout.content.height,
@@ -336,9 +373,19 @@ fn put_bg(buf: &mut Buffer, x: u16, y: u16, bg: Rgb) {
 }
 
 fn fill(buf: &mut Buffer, rect: Rect, bg: Rgb) {
-    for y in rect.y..rect.y + rect.height {
-        for x in rect.x..rect.x + rect.width {
-            put_bg(buf, x, y, bg);
+    let area = *buf.area();
+    let clip = rect.intersection(area);
+    if clip.width == 0 || clip.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let fg = color(bg);
+    for y in clip.y..clip.y + clip.height {
+        let start = (y - area.y) as usize * width + (clip.x - area.x) as usize;
+        for cell in &mut buf.content[start..start + clip.width as usize] {
+            cell.set_symbol(" ");
+            cell.set_fg(fg);
+            cell.set_bg(fg);
         }
     }
 }
@@ -353,8 +400,6 @@ fn fill_soft(buf: &mut Buffer, rect: Rect, target: Rgb, amount: f32, fallback: R
             if x >= area.x + area.width || y >= area.y + area.height {
                 continue;
             }
-            // Una sola búsqueda de celda por píxel: es el bucle más caliente
-            // con los paneles translúcidos y el fondo del visualizador.
             let Some(cell) = buf.cell_mut((x, y)) else {
                 continue;
             };
@@ -385,12 +430,21 @@ fn text_at(buf: &mut Buffer, rect: Rect, text: impl Into<String>, s: Style, alig
 
 fn background(buf: &mut Buffer, area: Rect, pal: &Palette, intro: f32) {
     let intro = ease_out_cubic(intro);
-    for y in area.y..area.y + area.height {
-        let t = (y - area.y) as f32 / area.height.max(1) as f32;
+    let buf_area = *buf.area();
+    let width = buf_area.width as usize;
+    let height = area.height.min(buf_area.height) as usize;
+    for row in 0..height {
+        let y = area.y + row as u16;
+        let t = row as f32 / height.max(1) as f32;
         let base = mix_oklab(pal.bg_deep, pal.bg, t * 0.8);
         let base = mix_oklab(pal.bg_deep, base, intro);
-        for x in area.x..area.x + area.width {
-            put_bg(buf, x, y, base);
+        let fg = color(base);
+        let start = (y - buf_area.y) as usize * width;
+        let range = start..start + width;
+        for cell in &mut buf.content[range] {
+            cell.set_symbol(" ");
+            cell.set_fg(fg);
+            cell.set_bg(fg);
         }
     }
 }
@@ -410,7 +464,53 @@ fn soft_background(_pal: &Palette) -> bool {
     true
 }
 
-fn panel(buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, alpha: f32, title: Option<&str>, pulse: f32) {
+/// Tinta el panel con el canvas ambiental. Mantiene el glifo (texto/borde) y
+/// solo mezcla el fondo, así el efecto se ve dentro del panel sin ensuciar la
+/// lectura.
+fn ambient_tint(app: &App, buf: &mut Buffer, rect: Rect, strength: f32) {
+    let layer = &app.ambient.output;
+    if layer.w == 0 || layer.h == 0 || strength <= 0.0 {
+        return;
+    }
+    let opacity = app.cfg.ui.fx.ambient_opacity.min(40) as f32 / 40.0;
+    if opacity <= 0.0 {
+        return;
+    }
+    let area = *buf.area();
+    let clip = rect.intersection(area);
+    if clip.width == 0 || clip.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    for y in clip.y..clip.y + clip.height {
+        let start = (y - area.y) as usize * width + (clip.x - area.x) as usize;
+        let sy = ((y - area.y) as u32 * layer.h as u32 / area.height.max(1) as u32)
+            .min(layer.h.saturating_sub(1) as u32) as i32;
+        for (offset, cell) in buf.content[start..start + clip.width as usize]
+            .iter_mut()
+            .enumerate()
+        {
+            let x = clip.x + offset as u16;
+            let sx = ((x - area.x) as u32 * layer.w as u32 / area.width.max(1) as u32)
+                .min(layer.w.saturating_sub(1) as u32) as i32;
+            let Some(src) = layer.get(sx, sy) else { continue };
+            if src.alpha <= 0.01 {
+                continue;
+            }
+            let under = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => continue,
+            };
+            let mixed = mix(under, src.fg, strength * opacity * src.alpha);
+            cell.set_bg(color(mixed));
+            if cell.symbol() == " " {
+                cell.set_fg(color(mixed));
+            }
+        }
+    }
+}
+
+fn panel(app: Option<&App>, buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, alpha: f32, title: Option<&str>, pulse: f32) {
     if rect.width < 3 || rect.height < 2 {
         return;
     }
@@ -419,19 +519,57 @@ fn panel(buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, alpha: f32, 
     let opaque = alpha > 0.001;
     let bg = if opaque { Some(color(fill_color)) } else { None };
     if opaque {
-        fill_soft(buf, rect, fill_color, if soft_background(pal) { 0.88 } else { 1.0 }, pal.bg);
+        fill_soft(buf, rect, fill_color, if soft_background(pal) { 0.92 } else { 1.0 }, pal.bg);
+        if let Some(app) = app {
+            let mode = app.cfg.ui.fx.ambient.as_str();
+            if !matches!(mode, "off" | "cover" | "lyrics") {
+                let strength = if app.cfg.ui.fx.glitch_panels { 0.08 } else { 0.02 };
+                ambient_tint(app, buf, rect, strength);
+            }
+        }
     }
-    let border = if active {
-        // El borde del panel activo late con el bombo.
-        mix_oklab(
-            mix_oklab(pal.border, pal.primary, 0.55),
-            pal.text,
-            (pulse * 0.35).clamp(0.0, 0.35),
-        )
-    } else if alpha >= 0.6 {
-        mix_oklab(pal.border, pal.primary, pulse * 0.12)
+    // Cada instrumento tiñe el borde: bombo en el acento primario, caja en
+    // secundario, charles en el brillo y voz en el color de texto. Así la UI
+    // entera vibra con la canción, no solo la franja inferior.
+    let (kick, snare, hat, vocal) = app
+        .map(|app| {
+            (
+                app.audio.kick_pulse,
+                app.audio.snare_pulse,
+                app.audio.hat_pulse,
+                app.audio.vocal_pulse,
+            )
+        })
+        .unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let accent = if vocal >= kick && vocal >= snare && vocal >= hat {
+        pal.text
+    } else if hat >= kick && hat >= snare {
+        pal.ok
+    } else if snare >= kick {
+        pal.secondary
     } else {
-        mix_oklab(pal.border_dim, pal.primary, pulse * 0.10)
+        pal.primary
+    };
+    let song = app.map(|app| app.song_intensity).unwrap_or(0.0);
+    let hit = kick
+        .max(snare * 0.85)
+        .max(hat * 0.55)
+        .max(vocal * 0.7)
+        * (0.55 + song * 0.75);
+    let base_border = if active {
+        mix_oklab(pal.border, pal.primary, 0.55)
+    } else if alpha >= 0.6 {
+        pal.border
+    } else {
+        pal.border_dim
+    };
+    let border = if app.is_some_and(|app| app.cfg.ui.fx.instrument_borders) {
+        // Un mínimo de tinte hace que los bordes se vean incluso entre golpes;
+        // antes solo cambiaban durante un pico y parecían estáticos.
+        let glow = (0.10 + hit * 0.85 + pulse * 0.18 + song * 0.12).min(0.95);
+        mix_oklab(base_border, accent, glow)
+    } else {
+        base_border
     };
     let (x0, y0) = (rect.x, rect.y);
     let (x1, y1) = (rect.x + rect.width - 1, rect.y + rect.height - 1);
@@ -548,7 +686,6 @@ fn draw_toasts(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Fullscreen;
 
     #[test]
     fn truncate_respects_char_boundaries() {
@@ -561,28 +698,6 @@ mod tests {
     }
 
     #[test]
-    fn layout_is_sane_at_many_sizes() {
-        for (w, h) in [(200, 60), (130, 40), (100, 30), (80, 24), (30, 10)] {
-            let area = Rect::new(0, 0, w, h);
-            let layout = Layout::compute(area, true, Fullscreen::None, 6, true);
-            assert!(layout.center.width > 0);
-            assert!(layout.center.height > 0);
-            assert!(layout.center.x + layout.center.width <= area.x + area.width);
-            assert!(layout.main.y + layout.main.height <= area.y + area.height);
-        }
-    }
-
-    #[test]
-    fn vcenter_shrinks_and_centers_the_block() {
-        let area = Rect::new(0, 0, 200, 70);
-        let normal = Layout::compute(area, true, Fullscreen::None, 6, false);
-        let centered = Layout::compute(area, true, Fullscreen::None, 6, true);
-        assert!(centered.main.height < normal.main.height);
-        let spare = normal.main.height - centered.main.height;
-        assert!((centered.main.y as i32 - normal.main.y as i32 - spare as i32 / 2).abs() <= 1);
-    }
-
-    #[test]
     fn bar_width_respects_setting_and_keeps_margins() {
         assert_eq!(bar_width(100, 70), 70);
         assert_eq!(bar_width(100, 100), 80);
@@ -590,28 +705,4 @@ mod tests {
         assert_eq!(bar_width(10, 100), 10);
     }
 
-    #[test]
-    fn layout_collapses_nav_and_side_on_narrow() {
-        let area = Rect::new(0, 0, 80, 24);
-        let layout = Layout::compute(area, true, Fullscreen::None, 6, true);
-        assert_eq!(layout.nav.width, 0);
-        assert_eq!(layout.side.width, 0);
-        assert_eq!(layout.center.width, 80);
-    }
-
-    #[test]
-    fn fullscreen_removes_viz_strip() {
-        let area = Rect::new(0, 0, 160, 50);
-        let layout = Layout::compute(area, true, Fullscreen::Viz, 6, false);
-        assert_eq!(layout.viz.height, 0);
-        assert!(layout.main.height >= area.height - 4);
-    }
-
-    #[test]
-    fn tiny_terminal_does_not_panic() {
-        for (w, h) in [(1, 1), (10, 4), (19, 7)] {
-            let layout = Layout::compute(Rect::new(0, 0, w, h), true, Fullscreen::None, 6, true);
-            assert!(layout.center.width <= w);
-        }
-    }
 }

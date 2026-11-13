@@ -7,6 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use spote_core::artwork::{ArtMode, CoverArt, Palette};
+use spote_core::audio_map::SongMap;
 use spote_core::audio::Spectrum;
 use spote_core::config::{self, Config};
 use spote_core::downloader::{DownloadEvent, DownloadSource, Downloader, SearchItem};
@@ -14,18 +15,28 @@ use spote_core::library::{Library, TrackRow};
 use spote_core::lyrics::LyricsDoc;
 use spote_core::player::{Player, PlayerEvent};
 use spote_core::spotify::SpotifyState;
+use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
 use spote_core::util;
 use spote_core::ToolStatus;
 use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackRef};
 
-use crate::fetch::{ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, SearchWorker, SpotifyWorker};
+use crate::fetch::{
+    ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker, SearchWorker,
+    SongMapEvent, SongMapWorker, SpotifyWorker,
+};
 use crate::social::{Social, SocialCmd, SocialEvent};
 use crate::theme::{FpsMeter, PaletteRuntime, Pulse, Spring};
 use crate::viz::Viz;
 
 mod actions;
+pub(crate) mod albums;
+mod artist;
+mod context;
 mod downloads;
 mod input;
+mod keymap;
+mod layout_editor;
+pub use keymap::help_sections;
 mod playlists;
 mod settings;
 mod spotify;
@@ -35,6 +46,7 @@ pub enum Tab {
     Now,
     Search,
     Library,
+    Albums,
     Room,
     Settings,
 }
@@ -62,6 +74,9 @@ impl LibFilter {
 }
 
 impl Tab {
+    // Álbumes ya no es una pestaña: los álbumes se abren desde la búsqueda,
+    // la biblioteca o un artista. Se mantiene el variante interno para el
+    // tracklist antiguo, pero no aparece en la navegación.
     pub const ALL: [Tab; 5] = [Tab::Now, Tab::Search, Tab::Library, Tab::Room, Tab::Settings];
 
     pub fn label(self) -> &'static str {
@@ -69,6 +84,7 @@ impl Tab {
             Self::Now => "ahora",
             Self::Search => "buscar",
             Self::Library => "librería",
+            Self::Albums => "álbumes",
             Self::Room => "sala",
             Self::Settings => "ajustes",
         }
@@ -79,6 +95,7 @@ impl Tab {
             Self::Now => "◉",
             Self::Search => "/",
             Self::Library => "≡",
+            Self::Albums => "▤",
             Self::Room => "◎",
             Self::Settings => "✧",
         }
@@ -89,6 +106,8 @@ impl Tab {
             Self::Now => 0,
             Self::Search => 1,
             Self::Library => 2,
+            // `Albums` es interno y ya no está en `ALL`; se ancla a Library.
+            Self::Albums => 2,
             Self::Room => 3,
             Self::Settings => 4,
         }
@@ -100,6 +119,7 @@ pub enum Pane {
     Nav,
     Center,
     Side,
+    Transport,
 }
 
 /// Qué ocupa el centro cuando se pincha en la portada o en la letra.
@@ -124,11 +144,19 @@ pub enum Overlay {
     Effects,
     /// Formulario de lista nueva: nombre, descripción y portada opcional.
     PlaylistForm,
-    /// Importar una playlist pública de Spotify/Deezer pegando su URL.
+    /// Importar una playlist o álbum público de Spotify pegando su URL.
     ImportPlaylist,
     ConfirmDeletePlaylist { id: i64, name: String },
     /// Elegir lista destino para la pista seleccionada.
     AddToPlaylist { key: String, selected: usize },
+    /// Editor de diseño de paneles.
+    Layout,
+    /// Menú contextual de una pista (clic derecho).
+    Context,
+    /// Perfil de artista de Spotify/Deezer.
+    Artist,
+    /// Álbum abierto (biblioteca o catálogo remoto).
+    Album,
 }
 
 /// Campos del formulario de lista nueva. `field` marca dónde está el cursor.
@@ -173,8 +201,11 @@ pub enum Action {
     Next,
     Prev,
     SeekTo(u64),
+    SeekLyrics(u64),
     Volume(f32),
+    VolumeTrack,
     Mute,
+    FocusTransport,
     VizNext,
     VizPrev,
     VizLayer(usize),
@@ -183,6 +214,16 @@ pub enum Action {
     ArtMode,
     ArtFullscreen,
     SelectRow(usize),
+    AlbumOpen(usize),
+    Resize(Pane),
+    AlbumDownload,
+    AlbumSavePlaylist,
+    AlbumBack,
+    AlbumTrackPlay(usize),
+    AlbumPageDownload,
+    AlbumPageSave,
+    AlbumPageClose,
+    ContextSelect(usize),
     SearchPlay(usize),
     PlayRow(usize),
     QueueRow(usize),
@@ -200,6 +241,15 @@ pub enum Action {
     StartSearch,
     NewPlaylist,
     ImportPlaylist,
+    OpenLayout,
+    NavMenu,
+    QueueMenu,
+    Artist,
+    OpenArtist(String),
+    OpenAlbum(String, String),
+    ArtistAlbum(usize),
+    ArtistTrack(usize),
+    RefreshLibrary,
     DeletePlaylist(i64),
     AddToPlaylist,
     JoinRoom(usize),
@@ -269,10 +319,20 @@ pub struct NowPlaying {
     pub message: String,
 }
 
+/// Entrada aplanada de la búsqueda mixta (artistas, álbumes y pistas).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchEntry {
+    Artist(usize),
+    Album(usize),
+    Track(usize),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
     pub query: String,
     pub results: Vec<SearchItem>,
+    pub albums: Vec<AlbumSummary>,
+    pub artists: Vec<ArtistSummary>,
     pub selected: usize,
     pub loading: bool,
     pub last_query_id: u64,
@@ -330,6 +390,15 @@ pub enum SettingRow {
     Rotate,
     RotateSecs,
     ArtMode,
+    VizPreset,
+    Ambient,
+    AmbientOpacity,
+    InstrumentBorders,
+    EdgeFlame,
+    BloomPlay,
+    CleanSpill,
+    GlitchPanels,
+    LyricsSize,
     VizBackground,
     Cards,
     Vcenter,
@@ -339,14 +408,24 @@ pub enum SettingRow {
     BarWidth,
     ButtonPad,
     Spotify,
+    LayoutEditor,
     Save,
 }
 
 impl SettingRow {
-    pub const ALL: [SettingRow; 13] = [
+    pub const ALL: [SettingRow; 23] = [
         Self::Rotate,
         Self::RotateSecs,
         Self::ArtMode,
+        Self::VizPreset,
+        Self::Ambient,
+        Self::AmbientOpacity,
+        Self::InstrumentBorders,
+        Self::EdgeFlame,
+        Self::BloomPlay,
+        Self::CleanSpill,
+        Self::GlitchPanels,
+        Self::LyricsSize,
         Self::VizBackground,
         Self::Cards,
         Self::Vcenter,
@@ -356,6 +435,7 @@ impl SettingRow {
         Self::BarWidth,
         Self::ButtonPad,
         Self::Spotify,
+        Self::LayoutEditor,
         Self::Save,
     ];
 
@@ -364,6 +444,15 @@ impl SettingRow {
             Self::Rotate => "rotación de arte",
             Self::RotateSecs => "rotar cada",
             Self::ArtMode => "modo de arte",
+            Self::VizPreset => "efecto inferior",
+            Self::Ambient => "fondo ambiental",
+            Self::AmbientOpacity => "opacidad ambiental",
+            Self::InstrumentBorders => "bordes con instrumentos",
+            Self::EdgeFlame => "llama en el borde",
+            Self::BloomPlay => "bloom en el play",
+            Self::CleanSpill => "clean sobre paneles",
+            Self::GlitchPanels => "glitch en paneles",
+            Self::LyricsSize => "tamaño de letra",
             Self::VizBackground => "visualizador de fondo",
             Self::Cards => "tarjetas",
             Self::Vcenter => "centrar paneles",
@@ -373,6 +462,7 @@ impl SettingRow {
             Self::BarWidth => "ancho de la barra",
             Self::ButtonPad => "tamaño de controles",
             Self::Spotify => "seguir spotify",
+            Self::LayoutEditor => "editor de diseño (E)",
             Self::Save => "guardar ajustes",
         }
     }
@@ -380,7 +470,15 @@ impl SettingRow {
     pub fn adjustable(self) -> bool {
         matches!(
             self,
-            Self::RotateSecs | Self::ArtMode | Self::Thumb | Self::BarWidth | Self::ButtonPad
+            Self::RotateSecs
+                | Self::ArtMode
+                | Self::VizPreset
+                | Self::Ambient
+                | Self::AmbientOpacity
+                | Self::LyricsSize
+                | Self::Thumb
+                | Self::BarWidth
+                | Self::ButtonPad
         )
     }
 
@@ -407,10 +505,128 @@ impl DownloadInfo {
     }
 }
 
+/// Álbum abierto desde la biblioteca o desde una búsqueda remota.
+#[derive(Debug, Clone, Default)]
+pub struct AlbumPage {
+    pub provider: String,
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub cover_url: Option<String>,
+    pub cover_path: Option<PathBuf>,
+    pub release_date: Option<String>,
+    pub tracks: Vec<TrackRef>,
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct QueueEntry {
     pub track: TrackRef,
     pub path: Option<PathBuf>,
+}
+
+/// Origen del menú contextual: biblioteca, búsqueda o cola.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextOrigin {
+    Library,
+    Search,
+    Queue,
+    Nav,
+    QueueHeader,
+    SearchAlbum,
+    SearchArtist,
+    ArtistName,
+    AlbumName,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextAction {
+    Play,
+    Queue,
+    Download,
+    Favorite,
+    Artist,
+    Cover,
+    RemoveLibrary,
+    DeleteFile,
+    RemoveQueue,
+    Status,
+    NewPlaylist,
+    ImportPlaylist,
+    RefreshLibrary,
+    Layout,
+    ClearQueue,
+    Open,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextMenu {
+    pub origin: ContextOrigin,
+    pub index: usize,
+    pub key: String,
+    pub title: String,
+    pub artist: String,
+    pub url: Option<String>,
+    pub path: Option<PathBuf>,
+    pub selected: usize,
+}
+
+impl ContextMenu {
+    pub fn actions(&self) -> Vec<ContextAction> {
+        match self.origin {
+            ContextOrigin::Library => vec![
+                ContextAction::Play,
+                ContextAction::Queue,
+                ContextAction::Download,
+                ContextAction::Favorite,
+                ContextAction::Artist,
+                ContextAction::Cover,
+                ContextAction::RemoveLibrary,
+                ContextAction::DeleteFile,
+            ],
+            ContextOrigin::Search => vec![
+                ContextAction::Play,
+                ContextAction::Queue,
+                ContextAction::Download,
+                ContextAction::Favorite,
+                ContextAction::Artist,
+                ContextAction::Status,
+            ],
+            ContextOrigin::Queue => vec![
+                ContextAction::Play,
+                ContextAction::RemoveQueue,
+                ContextAction::Artist,
+                ContextAction::Status,
+            ],
+            ContextOrigin::Nav => vec![
+                ContextAction::NewPlaylist,
+                ContextAction::ImportPlaylist,
+                ContextAction::RefreshLibrary,
+                ContextAction::Layout,
+            ],
+            ContextOrigin::QueueHeader => vec![
+                ContextAction::ClearQueue,
+                ContextAction::RefreshLibrary,
+                ContextAction::Layout,
+            ],
+            ContextOrigin::SearchAlbum => vec![
+                ContextAction::Open,
+                ContextAction::Artist,
+                ContextAction::Status,
+            ],
+            ContextOrigin::SearchArtist => vec![
+                ContextAction::Open,
+                ContextAction::Status,
+            ],
+            ContextOrigin::ArtistName => vec![ContextAction::Open, ContextAction::Status],
+            ContextOrigin::AlbumName => vec![ContextAction::Open, ContextAction::Status],
+        }
+    }
+
+    pub fn action(&self) -> ContextAction {
+        let actions = self.actions();
+        actions[self.selected.min(actions.len().saturating_sub(1))]
+    }
 }
 
 pub struct App {
@@ -423,6 +639,20 @@ pub struct App {
     pub spotify_jobs: crate::spotify_jobs::SpotifyJobs,
     pub discord: crate::spotify_jobs::DiscordPresence,
     pub art_worker: ArtWorker,
+    pub meta_worker: MetaWorker,
+    pub map_worker: SongMapWorker,
+    pub song_map: Option<SongMap>,
+    pub song_map_key: String,
+    pub song_intensity: f32,
+    pub song_section: Option<spote_core::audio_map::SongSectionKind>,
+    pub artist: Option<spote_core::spotify_api::ArtistProfile>,
+    pub artist_art: Option<CoverArt>,
+    pub artist_loading: bool,
+    pub artist_selected: usize,
+    pub artist_status: String,
+    pub metadata_requests: std::collections::HashSet<String>,
+    pub metadata_tried: std::collections::HashSet<String>,
+    pub metadata_manual: std::collections::HashSet<String>,
     pub lyrics_worker: LyricsWorker,
     pub spotify_worker: Option<SpotifyWorker>,
     pub tools: ToolStatus,
@@ -442,6 +672,12 @@ pub struct App {
     pub queue_selected: usize,
     pub queue_drag: Option<usize>,
     pub view: Vec<TrackRow>,
+    pub albums: Vec<spote_core::library::AlbumRow>,
+    pub album_selected: usize,
+    pub album_open: Option<spote_core::library::AlbumRow>,
+    pub album_page: Option<AlbumPage>,
+    pub album_page_loading: bool,
+    pub album_page_status: String,
     pub lib_filter: LibFilter,
     pub selected: usize,
     pub list_scroll: Spring,
@@ -453,8 +689,13 @@ pub struct App {
     pub lyrics_key: String,
     pub lyrics_loading: bool,
     pub lyrics_offset_ms: i64,
+    pub trim_start_ms: u64,
+    pub trim_end_ms: Option<u64>,
     pub lyrics_scroll: Spring,
 
+    pub ambient: Viz,
+    pub ambient_art: Option<CoverArt>,
+    pub ambient_art_key: String,
     pub art: Option<CoverArt>,
     pub art_key: String,
     pub art_size: (u16, u16),
@@ -468,9 +709,17 @@ pub struct App {
     pub art_rotate: bool,
     pub art_next_at: Instant,
     pub art_variants: std::collections::HashMap<ArtMode, CoverArt>,
+    /// PNG de la portada actual para el protocolo de Kitty (full-res).
+    pub art_png: Option<Vec<u8>>,
+    pub art_png_key: String,
+    pub art_png_size: Option<(u32, u32)>,
+    /// Rect que ocupa la portada en pantalla este frame; lo consume `hires`.
+    pub art_visible_rect: Option<Rect>,
     pub thumbs: std::collections::HashMap<String, CoverArt>,
     pub thumb_requests: std::collections::HashSet<String>,
     pub art_request: Option<Instant>,
+    pub art_request_key: String,
+    pub art_request_size: (u16, u16),
     pub search_worker: SearchWorker,
     pub palette: PaletteRuntime,
     pub dominant: Palette,
@@ -500,7 +749,12 @@ pub struct App {
     pub status_at: Instant,
     pub downloads: Vec<DownloadInfo>,
     pub dragging_seek: bool,
+    pub dragging_volume: bool,
+    pub resize_drag: Option<Pane>,
+    pub last_main: Rect,
     pub drag_ratio: Option<f32>,
+    pub layout_selected: usize,
+    pub context: Option<ContextMenu>,
 
     pub social: Option<Social>,
     pub rooms: Vec<Room>,
@@ -548,6 +802,20 @@ impl App {
             spotify_jobs: crate::spotify_jobs::SpotifyJobs::start(),
             discord: crate::spotify_jobs::DiscordPresence::start(&cfg),
             art_worker: ArtWorker::start(),
+            meta_worker: MetaWorker::start(),
+            map_worker: SongMapWorker::start(),
+            song_map: None,
+            song_map_key: String::new(),
+            song_intensity: 0.0,
+            song_section: None,
+            artist: None,
+            artist_art: None,
+            artist_loading: false,
+            artist_selected: 0,
+            artist_status: String::new(),
+            metadata_requests: std::collections::HashSet::new(),
+            metadata_tried: std::collections::HashSet::new(),
+            metadata_manual: std::collections::HashSet::new(),
             lyrics_worker: LyricsWorker::start(cfg.lyrics.clone()),
             spotify_worker: None,
             tools: ToolStatus::detect(),
@@ -566,6 +834,12 @@ impl App {
             queue_selected: 0,
             queue_drag: None,
             view: Vec::new(),
+            albums: Vec::new(),
+            album_selected: 0,
+            album_open: None,
+            album_page: None,
+            album_page_loading: false,
+            album_page_status: String::new(),
             lib_filter: LibFilter::All,
             selected: 0,
             list_scroll: Spring::snappy(0.0),
@@ -576,7 +850,12 @@ impl App {
             lyrics_key: String::new(),
             lyrics_loading: false,
             lyrics_offset_ms: 0,
+            trim_start_ms: 0,
+            trim_end_ms: None,
             lyrics_scroll: Spring::new(0.0),
+            ambient: Viz::from_preset(&cfg.ui.fx.ambient),
+            ambient_art: None,
+            ambient_art_key: String::new(),
             art: None,
             art_key: String::new(),
             art_size: (0, 0),
@@ -590,15 +869,21 @@ impl App {
             art_rotate: cfg.ui.art_rotate,
             art_next_at: Instant::now() + std::time::Duration::from_secs(cfg.ui.art_rotate_secs.max(5)),
             art_variants: std::collections::HashMap::new(),
+            art_png: None,
+            art_png_key: String::new(),
+            art_png_size: None,
+            art_visible_rect: None,
             thumbs: std::collections::HashMap::new(),
             thumb_requests: std::collections::HashSet::new(),
             art_request: None,
+            art_request_key: String::new(),
+            art_request_size: (0, 0),
             search_worker: SearchWorker::start(),
             palette: PaletteRuntime::new(Palette::dark(), cfg.ui.theme_fade_ms),
             dominant: Palette::dark(),
             list_cards: cfg.ui.list_cards,
             viz_background: cfg.ui.viz_background,
-            vcenter: cfg.ui.vcenter,
+            vcenter: cfg.ui.layout.vcenter,
             zen: cfg.ui.zen,
             thumb_mode: ThumbMode::from_str(&cfg.ui.thumb_mode),
             playlist_form: PlaylistForm::default(),
@@ -621,7 +906,12 @@ impl App {
             status_at: Instant::now(),
             downloads: Vec::new(),
             dragging_seek: false,
+            dragging_volume: false,
+            resize_drag: None,
+            last_main: Rect::default(),
             drag_ratio: None,
+            layout_selected: 0,
+            context: None,
             social,
             rooms: Vec::new(),
             room: None,
@@ -681,16 +971,57 @@ impl App {
 
     // --------------------------------------------------------------- vista
     pub fn refresh_view(&mut self) {
-        self.view = match self.tab {
-            Tab::Library | Tab::Now => match self.lib_filter {
-                LibFilter::All => self.lib.all_tracks(500).unwrap_or_default(),
-                LibFilter::Favorites => self.lib.favorites().unwrap_or_default(),
-                LibFilter::Downloaded => self.lib.playable(500).unwrap_or_default(),
-                LibFilter::Recent => self.lib.recent(500).unwrap_or_default(),
-                LibFilter::Playlist(id) => self.lib.playlist_tracks(id).unwrap_or_default(),
+        let previous = std::mem::take(&mut self.view);
+        let mut error = None;
+        let load = |lib: &Library, filter: &LibFilter| -> anyhow::Result<Vec<TrackRow>> {
+            Ok(match filter {
+                LibFilter::All => lib.all_tracks(500)?,
+                LibFilter::Favorites => lib.favorites()?,
+                LibFilter::Downloaded => lib.playable(500)?,
+                LibFilter::Recent => lib.recent(500)?,
+                LibFilter::Playlist(id) => lib.playlist_tracks(*id)?,
+            })
+        };
+        let next = match self.tab {
+            Tab::Library | Tab::Now => match load(&self.lib, &self.lib_filter) {
+                Ok(rows) => rows,
+                Err(err) => {
+                    error = Some(err.to_string());
+                    previous.clone()
+                }
             },
+            Tab::Albums => {
+                match self.lib.albums() {
+                    Ok(rows) => self.albums = rows,
+                    Err(err) => {
+                        self.set_status(format!("álbumes: {err}"));
+                    }
+                }
+                if self.album_selected >= self.albums.len() {
+                    self.album_selected = self.albums.len().saturating_sub(1);
+                }
+                if let Some(open) = &self.album_open {
+                    self.lib.album_tracks(&open.album, &open.artist).unwrap_or_default()
+                } else {
+                    Vec::new()
+                }
+            }
             Tab::Search | Tab::Room | Tab::Settings => Vec::new(),
         };
+        self.view = next;
+        if error.is_some() && self.view.is_empty() && !previous.is_empty() {
+            // Solo un error real de SQLite justifica rescatar la vista anterior.
+            // Un filtro vacío (favoritas, lista…) debe verse vacío, no con las
+            // canciones de otro filtro.
+            self.view = previous;
+            self.toast(
+                format!(
+                    "no pude refrescar la biblioteca{}",
+                    error.map(|e| format!(": {e}")).unwrap_or_default()
+                ),
+                ToastKind::Warn,
+            );
+        }
         if self.selected >= self.view.len() {
             self.selected = self.view.len().saturating_sub(1);
         }
@@ -734,9 +1065,17 @@ impl App {
             self.toast(format!("falta el fichero: {}", path.display()), ToastKind::Error);
             return;
         }
+        // Recorte persistente: si el vídeo de YouTube trae intro/outro, se
+        // salta solo sin tocar el fichero (reversible con Backspace).
+        let (trim_start, trim_end) = self.lib.trim(&track.key).unwrap_or((0, None));
+        let duration = track.duration_ms.max(1);
+        self.trim_start_ms = trim_start.min(duration.saturating_sub(500));
+        self.trim_end_ms = trim_end
+            .filter(|end| *end > self.trim_start_ms + 500)
+            .map(|end| end.min(duration));
         self.now.track = Some(track.clone());
         self.now.path = Some(path.clone());
-        self.now.position_ms = 0;
+        self.now.position_ms = self.trim_start_ms;
         self.now.duration_ms = track.duration_ms;
         self.now.playing = true;
         self.now.loading = false;
@@ -744,7 +1083,7 @@ impl App {
         self.now.volume = self.cfg.player.volume;
         if let Some(player) = &self.player {
             player.set_volume(self.now.volume);
-            player.load(path.clone(), 0.0);
+            player.load(path.clone(), self.trim_start_ms as f64 / 1000.0);
         } else {
             self.set_status("mpv no disponible: modo visual");
         }
@@ -757,11 +1096,24 @@ impl App {
         self.art_prev = None;
         self.art_variants.clear();
         self.art_key.clear();
+        self.art_png = None;
+        self.art_png_key.clear();
+        self.art_png_size = None;
+        self.art_request_key.clear();
+        self.art_request_size = (0, 0);
+        self.ambient_art = None;
+        self.ambient_art_key.clear();
         self.art_next_at = Instant::now()
             + std::time::Duration::from_secs(self.cfg.ui.art_rotate_secs.max(5));
         self.load_lyrics(&track);
+        self.song_map = None;
+        self.song_map_key.clear();
+        self.song_intensity = 0.0;
+        self.song_section = None;
+        self.map_worker.request(track.key.clone(), path.clone());
         if !self.follow_spotify {
-            self.spectrum.decode_file(path, 0.0);
+            self.spectrum
+                .decode_file(path, self.trim_start_ms as f64 / 1000.0);
             self.spectrum_at = Instant::now();
         }
         if let Some(row) = self.lib.track_by_key(&track.key).ok().flatten() {
@@ -783,7 +1135,7 @@ impl App {
 
     /// Encola una pista: si no está descargada, lanza la descarga.
     pub fn queue_track(&mut self, track: TrackRef, url: Option<String>) {
-        if let Some(path) = self.lib.local_path(&track.key) {
+        if let Some(path) = self.lib.local_path(&track.key).filter(|path| path.exists()) {
             self.queue.push(QueueEntry {
                 track,
                 path: Some(path),
@@ -829,6 +1181,15 @@ impl App {
                 self.cfg.media_dir(),
             );
             self.queue.push(QueueEntry { track, path: None });
+            return;
+        }
+        // Último recurso: artista + título, que es lo que tienen las pistas
+        // viejas de la librería sin fuente registrada.
+        if !track.artist.is_empty() && !track.title.is_empty() && self.tools.yt_dlp {
+            self.lib.upsert_track(&track).ok();
+            self.start_resolve(&track);
+            self.queue.push(QueueEntry { track, path: None });
+            self.toast("buscando fuente y en cola", ToastKind::Info);
             return;
         }
         self.toast("no hay fuente descargable para esta pista", ToastKind::Error);
@@ -1018,6 +1379,7 @@ impl App {
             self.lyrics = Some(doc);
             self.lyrics_status = if synced { "lrclib" } else { "aprox" }.to_string();
             self.lyrics_key = track.key.clone();
+            self.refine_lyrics_words();
             return;
         }
         // 2. `.lrc` junto al fichero.
@@ -1028,6 +1390,7 @@ impl App {
                 self.lyrics = Some(doc);
                 self.lyrics_status = "local".into();
                 self.lyrics_key = track.key.clone();
+                self.refine_lyrics_words();
                 return;
             }
         }
@@ -1035,6 +1398,148 @@ impl App {
         self.lyrics_loading = true;
         self.lyrics_status = "buscando letra…".into();
         self.lyrics_worker.request(track.clone());
+    }
+
+    /// Marca el inicio del recorte en la posición actual (sáltate la intro).
+    fn trim_start_here(&mut self) {
+        let Some(track) = self.now.track.clone() else { return };
+        let start = self.now.position_ms;
+        if self.trim_end_ms.is_some_and(|end| end <= start + 500) {
+            self.trim_end_ms = None;
+        }
+        self.trim_start_ms = start;
+        self.lib.set_trim(&track.key, start, self.trim_end_ms).ok();
+        self.toast(
+            format!("intro recortada hasta {}", spote_core::util::format_ms(start)),
+            ToastKind::Info,
+        );
+        if self.now.playing {
+            self.seek_to(start);
+        }
+    }
+
+    /// Marca el final del recorte en la posición actual (sáltate el outro).
+    fn trim_end_here(&mut self) {
+        let Some(track) = self.now.track.clone() else { return };
+        let end = self.now.position_ms.max(self.trim_start_ms + 500);
+        self.trim_end_ms = Some(end);
+        self.lib.set_trim(&track.key, self.trim_start_ms, Some(end)).ok();
+        self.toast(
+            format!("outro recortado en {}", spote_core::util::format_ms(end)),
+            ToastKind::Info,
+        );
+    }
+
+    fn clear_trim(&mut self) {
+        let Some(track) = self.now.track.clone() else { return };
+        self.trim_start_ms = 0;
+        self.trim_end_ms = None;
+        self.lib.clear_trim(&track.key).ok();
+        self.toast("recorte quitado", ToastKind::Info);
+    }
+
+    /// Shift+clic en una línea de la letra: alinea esa línea con la posición
+    /// actual sin cortar la reproducción.
+    fn sync_lyrics_to_position(&mut self, line_start_ms: u64) {
+        let Some(track) = self.now.track.clone() else { return };
+        let offset = line_start_ms as i64 - self.now.position_ms as i64;
+        self.lyrics_offset_ms = offset.clamp(-120_000, 120_000);
+        if let Some(doc) = &mut self.lyrics {
+            doc.offset_ms = self.lyrics_offset_ms;
+        }
+        self.lib
+            .set_lyrics_offset(&track.key, self.lyrics_offset_ms)
+            .ok();
+        self.toast(
+            format!("letra sincronizada a esta línea ({:+} ms)", self.lyrics_offset_ms),
+            ToastKind::Ok,
+        );
+    }
+
+    /// Ajuste fino de la letra (`,`/`.`): guarda el offset por pista.
+    fn nudge_lyrics_offset(&mut self, delta_ms: i64) {
+        self.lyrics_offset_ms = (self.lyrics_offset_ms + delta_ms).clamp(-5_000, 5_000);
+        if let Some(doc) = self.lyrics.as_mut() {
+            doc.offset_ms = self.lyrics_offset_ms;
+        }
+        if let Some(track) = &self.now.track {
+            self.lib
+                .set_lyrics_offset(&track.key, self.lyrics_offset_ms)
+                .ok();
+        }
+        self.toast(
+            format!("letra {:+} ms", self.lyrics_offset_ms),
+            ToastKind::Info,
+        );
+    }
+
+    /// Refina los tiempos de palabra estimados con el mapa de energía de la
+    /// canción: las palabras caen donde hay voz/energía real, no repartidas a
+    /// ciegas. Solo toca líneas sin tags LRC de palabra (`words_exact`).
+    fn refine_lyrics_words(&mut self) {
+        let Some(map) = self.song_map.clone() else { return };
+        let Some(doc) = self.lyrics.as_mut() else { return };
+        for line in &mut doc.lines {
+            if line.words_exact || line.words.len() < 2 || line.end_ms <= line.start_ms {
+                continue;
+            }
+            let buckets: Vec<_> = map
+                .buckets
+                .iter()
+                .filter(|b| b.at_ms >= line.start_ms && b.at_ms < line.end_ms)
+                .collect();
+            if buckets.len() < 3 {
+                continue;
+            }
+            let weights: Vec<f32> = buckets
+                .iter()
+                .map(|b| (b.vocal * 1.4 + b.energy * 0.8 + b.mid * 0.2).max(0.01))
+                .collect();
+            let total: f32 = weights.iter().sum();
+            if total <= 0.0 {
+                continue;
+            }
+            // Fracción de texto acumulada por palabra (misma ponderación que el
+            // parser: sílabas + puntuación).
+            let mut text_weights = Vec::with_capacity(line.words.len());
+            for word in &line.words {
+                let vowels = word
+                    .text
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| "aeiouáéíóúüàèìòù".contains(*c))
+                    .count()
+                    .max(1);
+                let pause = if word.text.ends_with([',', '.', '!', '?', ';', '…']) {
+                    1.8
+                } else {
+                    0.0
+                };
+                text_weights.push(vowels as f32 * 1.7 + word.text.chars().count() as f32 * 0.3 + pause);
+            }
+            let text_total: f32 = text_weights.iter().sum::<f32>().max(0.001);
+            let mut cumulative = 0.0f32;
+            let mut starts = Vec::with_capacity(line.words.len());
+            for weight in &text_weights {
+                let target = cumulative / text_total;
+                let mut acc = 0.0;
+                let mut at = line.start_ms;
+                for (bucket, w) in buckets.iter().zip(&weights) {
+                    acc += w / total;
+                    if acc >= target {
+                        at = bucket.at_ms;
+                        break;
+                    }
+                }
+                starts.push(at.clamp(line.start_ms, line.end_ms));
+                cumulative += weight;
+            }
+            starts.sort_unstable();
+            for (i, word) in line.words.iter_mut().enumerate() {
+                word.start_ms = starts[i];
+                word.end_ms = starts.get(i + 1).copied().unwrap_or(line.end_ms);
+            }
+        }
     }
 
     // ---------------------------------------------------------------- tick
@@ -1079,6 +1584,8 @@ impl App {
         self.poll_downloads();
         self.poll_spotify_jobs();
         self.poll_art();
+        self.poll_meta();
+        self.poll_song_map();
         self.poll_lyrics();
         self.poll_spotify(dt);
         self.poll_social();
@@ -1119,6 +1626,17 @@ impl App {
             match event {
                 PlayerEvent::TimePos(position) => {
                     self.now.position_ms = (position.max(0.0) * 1000.0) as u64;
+                    if let Some(end) = self.trim_end_ms {
+                        if self.now.position_ms >= end.saturating_sub(30) {
+                            if let Some(track) = self.now.track.clone() {
+                                self.lib
+                                    .record_play(&track.key, self.now.position_ms, true)
+                                    .ok();
+                            }
+                            self.next_track();
+                            return;
+                        }
+                    }
                 }
                 PlayerEvent::Duration(duration) => {
                     if duration > 0.0 {
@@ -1148,16 +1666,21 @@ impl App {
                 continue;
             }
             match result {
-                Ok(items) if !items.is_empty() => {
-                    let provider = items
-                        .first()
-                        .map(|item| item.provider.clone())
-                        .unwrap_or_default();
-                    self.search.results = items;
+                Ok(all) if !all.is_empty() => {
+                    let provider = all.provider.clone();
+                    self.search.artists = all.artists;
+                    self.search.albums = all.albums;
+                    self.search.results = all
+                        .tracks
+                        .into_iter()
+                        .map(search_item_from_spotify)
+                        .collect();
                     self.search.selected = 0;
                     self.search.loading = false;
                     self.search.message = format!(
-                        "{} resultados · {} · enter para descargar",
+                        "{} artistas · {} álbumes · {} pistas · {}",
+                        self.search.artists.len(),
+                        self.search.albums.len(),
                         self.search.results.len(),
                         provider
                     );
@@ -1189,9 +1712,12 @@ impl App {
                 DownloadEvent::Found { query_id, items } => {
                     if query_id == self.search.last_query_id {
                         self.search.results = items;
+                        self.search.albums.clear();
+                        self.search.artists.clear();
                         self.search.selected = 0;
                         self.search.loading = false;
-                        self.search.message = format!("{} resultados", self.search.results.len());
+                        self.search.message =
+                            format!("{} resultados de yt-dlp", self.search.results.len());
                     }
                 }
                 DownloadEvent::SearchFailed { query_id, message } => {
@@ -1211,6 +1737,18 @@ impl App {
                     self.track_download(key, stage.label().to_string(), percent, false);
                 }
                 DownloadEvent::Done { key, path } => {
+                    // yt-dlp deja la miniatura junto al audio. Se registra en
+                    // la librería ya mismo; si no existe, la portada remota de
+                    // Spotify la pedirá el worker de arte.
+                    for ext in ["jpg", "png", "webp"] {
+                        let cover = path.with_extension(ext);
+                        if cover.exists() {
+                            self.lib.set_art(&key, Some(&cover), None).ok();
+                            self.thumbs.remove(&key);
+                            self.thumb_requests.remove(&key);
+                            break;
+                        }
+                    }
                     if let Ok(Some(row)) = self.lib.track_by_key(&key) {
                         self.lib
                             .set_source(
@@ -1268,17 +1806,44 @@ impl App {
         }
     }
 
-    fn apply_art(&mut self, response: ArtResponse) {
+    fn apply_art(&mut self, mut response: ArtResponse) {
+        if response.key.starts_with("ambient:") {
+            if let Some(art) = response.art {
+                self.ambient_art = Some(art);
+            }
+            return;
+        }
+        if response.key.starts_with("artist:") {
+            if let Some(art) = response.art {
+                self.artist_art = Some(art);
+            }
+            return;
+        }
         // Miniaturas de la lista: caché aparte, no tocan el tema ni el arte grande.
         if response.w <= 8 && response.h <= 4 {
             if let Some(art) = response.art {
-                self.thumbs.insert(response.key, art);
+                self.thumbs.insert(response.key.clone(), art);
+            }
+            if let Some(path) = response.art_path {
+                self.lib.set_art(&response.key, Some(&path), None).ok();
             }
             return;
         }
         let current_key = self.now.track.as_ref().map(|track| track.key.clone());
         if current_key.as_deref() != Some(response.key.as_str()) {
             return;
+        }
+        // Una respuesta de un tamaño anterior (lista 30x15) llegaba después de
+        // pedir la portada grande y la pisaba: se veía pequeña y sin PNG.
+        if (response.w, response.h) != self.art_size_hint {
+            return;
+        }
+        if matches!(response.mode, ArtMode::Plain | ArtMode::Half) {
+            if response.png.is_some() {
+                self.art_png = response.png.take();
+                self.art_png_key = response.key.clone();
+                self.art_png_size = response.png_size;
+            }
         }
         if let Some(palette) = response.palette {
             self.dominant = palette;
@@ -1313,6 +1878,152 @@ impl App {
         }
     }
 
+    fn poll_song_map(&mut self) {
+        while let Some(event) = self.map_worker.try_recv() {
+            match event {
+                SongMapEvent::Loaded { key, map } => {
+                    if self.now.track.as_ref().map(|t| &t.key) != Some(&key) {
+                        continue;
+                    }
+                    self.song_intensity = map.intensity_at(self.now.position_ms);
+                    self.song_section = map.section_at(self.now.position_ms).map(|s| s.kind);
+                    self.song_map = Some(map);
+                    self.song_map_key = key;
+                    self.refine_lyrics_words();
+                }
+                SongMapEvent::Failed { key, error } => {
+                    if self.now.track.as_ref().map(|t| &t.key) == Some(&key) {
+                        tracing::debug!("song map: {error}");
+                    }
+                }
+            }
+        }
+        // El mapa sigue al usuario al hacer seek: se consulta por posición, no
+        // por un reloj interno.
+        if let Some(map) = &self.song_map {
+            self.song_intensity = map.intensity_at(self.now.position_ms);
+            self.song_section = map.section_at(self.now.position_ms).map(|s| s.kind);
+        }
+    }
+
+    fn poll_meta(&mut self) {
+        while let Some(event) = self.meta_worker.try_recv() {
+            match event {
+                MetaEvent::Artist { name, result } => {
+                    if self.artist_loading {
+                        self.artist_loading = false;
+                    }
+                    match result {
+                        Ok(profile) => {
+                            self.artist_status = format!(
+                                "{} · {} fans · {} pistas",
+                                profile.provider,
+                                profile.followers,
+                                profile.top_tracks.len()
+                            );
+                            if let Some(url) = profile.image_url.clone() {
+                                self.art_worker.request(ArtRequest {
+                                    key: format!("artist:{}", profile.id),
+                                    url: Some(url),
+                                    local: None,
+                                    prefer_url: true,
+                                    w: 24,
+                                    h: 12,
+                                    mode: ArtMode::Plain,
+                                });
+                            }
+                            self.artist = Some(profile);
+                            self.artist_selected = 0;
+                        }
+                        Err(err) => {
+                            self.artist_status = format!("{name}: {err}");
+                            self.artist = None;
+                        }
+                    }
+                }
+                MetaEvent::AlbumByName {
+                    album,
+                    artist,
+                    result,
+                } => {
+                    let current = self.album_page.as_ref().is_some_and(|page| {
+                        page.provider == "search"
+                            && page.title.eq_ignore_ascii_case(&album)
+                    });
+                    if current {
+                        self.album_page_loading = false;
+                        match result {
+                            Ok(info) => {
+                                self.open_album_info(info);
+                                self.overlay = Overlay::Album;
+                            }
+                            Err(err) => {
+                                self.album_page_status = format!("álbum: {err}");
+                                self.toast(
+                                    format!("no encontré «{album}» de {artist}: {err}"),
+                                    ToastKind::Warn,
+                                );
+                            }
+                        }
+                    }
+                }
+                MetaEvent::Album {
+                    provider,
+                    id,
+                    result,
+                } => {
+                    let current = self
+                        .album_page
+                        .as_ref()
+                        .is_some_and(|page| page.provider == provider && page.id == id);
+                    if current {
+                        self.album_page_loading = false;
+                        match result {
+                            Ok(info) => {
+                                self.open_album_info(info);
+                                self.overlay = Overlay::Album;
+                            }
+                            Err(err) => {
+                                self.album_page_status = format!("álbum: {err}");
+                                self.toast(format!("no pude cargar el álbum: {err}"), ToastKind::Error);
+                            }
+                        }
+                    }
+                }
+                MetaEvent::Metadata { key, result } => {
+                    self.metadata_requests.remove(&key);
+                    let manual = self.metadata_manual.remove(&key);
+                    if let Some(track) = result {
+                        if let Ok(Some(row)) = self.lib.track_by_key(&key) {
+                            self.lib
+                                .update_metadata(
+                                    &key,
+                                    &track.artists,
+                                    &track.title,
+                                    Some(track.album.as_str()),
+                                    track.duration_ms,
+                                    track.art_url.as_deref(),
+                                )
+                                .ok();
+                            if manual {
+                                self.toast(
+                                    format!("metadatos de Spotify para {}", row.track.title),
+                                    ToastKind::Ok,
+                                );
+                            }
+                        }
+                        self.thumbs.remove(&key);
+                        self.thumb_requests.remove(&key);
+                        self.art_key.clear();
+                        self.refresh_view();
+                    } else if manual {
+                        self.toast("Spotify no encontró la pista", ToastKind::Warn);
+                    }
+                }
+            }
+        }
+    }
+
     fn poll_lyrics(&mut self) {
         while let Some(message) = self.lyrics_worker.try_recv() {
             match message {
@@ -1339,6 +2050,7 @@ impl App {
                             doc.offset_ms = self.lyrics_offset_ms;
                             self.lyrics = Some(doc);
                             self.lyrics_key = key;
+                            self.refine_lyrics_words();
                         }
                         None => {
                             self.lyrics = None;
@@ -1524,6 +2236,8 @@ impl App {
         if mode == ArtMode::Off {
             self.art = None;
             self.art_key.clear();
+            self.art_png = None;
+            self.art_png_key.clear();
             return;
         }
         let (w, h) = self.art_size_hint;
@@ -1538,11 +2252,19 @@ impl App {
             self.art_fade_active = false;
             self.art_variants.clear();
         }
+        let needs_png = matches!(mode, ArtMode::Plain | ArtMode::Half)
+            && w >= 24
+            && h >= 12
+            && self.art_png.is_none();
         let same = self.art_key == track.key
             && self.art_size == (w, h)
             && self.art_mode_seen == mode
-            && self.art.is_some();
+            && self.art.is_some()
+            && !needs_png;
         if same {
+            return;
+        }
+        if self.art_request_key == track.key && self.art_request_size == (w, h) {
             return;
         }
         if let Some(at) = self.art_request {
@@ -1562,10 +2284,31 @@ impl App {
             .art_url
             .clone()
             .or_else(|| self.lib.art_url(&track.key).ok().flatten());
+        if local.is_none() && url.is_none() && !track.artist.is_empty() {
+            // Sin portada local ni remota: se busca en Spotify una sola vez.
+            self.request_spotify_metadata_for_key(&track.key);
+        }
+        let ambient_mode = self.cfg.ui.fx.ambient == "cover";
+        if ambient_mode && self.ambient_art_key != track.key && (local.is_some() || url.is_some()) {
+            self.ambient_art_key = track.key.clone();
+            self.ambient_art = None;
+            self.art_worker.request(ArtRequest {
+                key: format!("ambient:{}", track.key),
+                url: url.clone(),
+                local: local.clone(),
+                prefer_url: true,
+                w: 32,
+                h: 16,
+                mode: ArtMode::Braille,
+            });
+        }
+        self.art_request_key = track.key.clone();
+        self.art_request_size = (w, h);
         self.art_worker.request(ArtRequest {
             key: track.key,
             url,
             local,
+            prefer_url: true,
             w,
             h,
             mode,
@@ -1590,10 +2333,29 @@ impl App {
             .art_url
             .clone()
             .or_else(|| self.lib.art_url(&track.key).ok().flatten());
+        if local.is_none() && url.is_none() && !track.artist.is_empty() {
+            // Sin portada local ni remota: se busca en Spotify una sola vez.
+            self.request_spotify_metadata_for_key(&track.key);
+        }
+        let ambient_mode = self.cfg.ui.fx.ambient == "cover";
+        if ambient_mode && self.ambient_art_key != track.key && (local.is_some() || url.is_some()) {
+            self.ambient_art_key = track.key.clone();
+            self.ambient_art = None;
+            self.art_worker.request(ArtRequest {
+                key: format!("ambient:{}", track.key),
+                url: url.clone(),
+                local: local.clone(),
+                prefer_url: true,
+                w: 32,
+                h: 16,
+                mode: ArtMode::Braille,
+            });
+        }
         self.art_worker.request(ArtRequest {
             key: track.key.clone(),
             url,
             local,
+            prefer_url: true,
             w: 6,
             h: 3,
             mode: ArtMode::Half,
@@ -1608,6 +2370,8 @@ impl App {
             self.art_variants.clear();
             self.art_prev = None;
             self.art_fade_active = false;
+            self.art_request_key.clear();
+            self.art_request_size = (0, 0);
         }
     }
 
@@ -1634,14 +2398,17 @@ impl App {
     fn toggle_favorite(&mut self) {
         match self.tab {
             Tab::Now => self.toggle_favorite_now(),
-            Tab::Search => match self.search.results.get(self.search.selected) {
-                Some(item) => {
-                    let key = item.to_track().key;
-                    self.toggle_favorite_key(&key);
+            Tab::Search => match self.search_entry(self.search.selected) {
+                Some(SearchEntry::Track(index)) => {
+                    if let Some(item) = self.search.results.get(index) {
+                        let key = item.to_track().key;
+                        self.toggle_favorite_key(&key);
+                    }
                 }
+                Some(_) => self.toast("las favoritas son pistas, no artistas/álbumes", ToastKind::Warn),
                 None => self.toast("busca algo y selecciona una fila", ToastKind::Warn),
             },
-            Tab::Library => match self.selected_row().cloned() {
+            Tab::Library | Tab::Albums => match self.selected_row().cloned() {
                 Some(row) => self.toggle_favorite_key(&row.track.key),
                 None => self.toast("no hay ninguna pista seleccionada", ToastKind::Warn),
             },
@@ -1675,12 +2442,17 @@ impl App {
         }
         self.art_mode = mode;
         self.cfg.ui.art_mode = mode.label().to_string();
+        self.cfg.save().ok();
+        self.art_request_key.clear();
+        self.art_request_size = (0, 0);
         if mode == ArtMode::Off {
             self.art_prev = self.art.take();
             self.art_prev_mode = self.art_mode_seen;
             self.art_fade = 0.0;
             self.art_fade_active = true;
             self.art_key.clear();
+            self.art_png = None;
+            self.art_png_key.clear();
             return;
         }
         if let Some(art) = self.art_variants.get(&mode).cloned() {
@@ -1754,13 +2526,18 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) {
+        if self.tab == Tab::Albums && self.album_open.is_none() {
+            self.move_album_selection(delta);
+            return;
+        }
         match self.tab {
             Tab::Search => {
-                if self.search.results.is_empty() {
+                let len = self.search_len();
+                if len == 0 {
                     return;
                 }
                 let next = self.search.selected as i32 + delta;
-                self.search.selected = next.clamp(0, self.search.results.len() as i32 - 1) as usize;
+                self.search.selected = next.clamp(0, len as i32 - 1) as usize;
             }
             _ => {
                 if self.view.is_empty() {
@@ -1769,6 +2546,42 @@ impl App {
                 let next = self.selected as i32 + delta;
                 self.selected = next.clamp(0, self.view.len() as i32 - 1) as usize;
             }
+        }
+    }
+
+    /// Longitud de la lista mixta: artistas, álbumes y pistas.
+    pub fn search_len(&self) -> usize {
+        self.search.artists.len() + self.search.albums.len() + self.search.results.len()
+    }
+
+    pub fn search_entry(&self, index: usize) -> Option<SearchEntry> {
+        if index < self.search.artists.len() {
+            return Some(SearchEntry::Artist(index));
+        }
+        let index = index - self.search.artists.len();
+        if index < self.search.albums.len() {
+            return Some(SearchEntry::Album(index));
+        }
+        let index = index - self.search.albums.len();
+        (index < self.search.results.len()).then_some(SearchEntry::Track(index))
+    }
+
+
+    fn activate_search_selection(&mut self) {
+        let index = self.search.selected;
+        match self.search_entry(index) {
+            Some(SearchEntry::Artist(i)) => {
+                if let Some(artist) = self.search.artists.get(i).cloned() {
+                    self.open_artist_summary(&artist);
+                }
+            }
+            Some(SearchEntry::Album(i)) => {
+                if let Some(album) = self.search.albums.get(i).cloned() {
+                    self.open_album_summary(&album);
+                }
+            }
+            Some(SearchEntry::Track(_)) => self.play_search_selection(),
+            None => {}
         }
     }
 
@@ -1788,6 +2601,9 @@ impl App {
         self.search.loading = true;
         self.search.message = "buscando en el catálogo…".into();
         self.search.results.clear();
+        self.search.albums.clear();
+        self.search.artists.clear();
+        self.search.selected = 0;
         // Metadatos primero (Spotify/Deezer); la descarga se resuelve después
         // con esos datos, no con el texto libre en yt-dlp.
         self.search_worker.search(self.search.last_query_id, query.clone());
@@ -1797,7 +2613,11 @@ impl App {
     }
 
     fn play_search_selection(&mut self) {
-        let Some(item) = self.search.results.get(self.search.selected).cloned() else {
+        let Some(SearchEntry::Track(track_index)) = self.search_entry(self.search.selected) else {
+            self.activate_search_selection();
+            return;
+        };
+        let Some(item) = self.search.results.get(track_index).cloned() else {
             return;
         };
         let track = item.to_track();
@@ -1914,6 +2734,24 @@ impl Tab {
     }
 }
 
+/// Convierte una pista del catálogo de Spotify/Deezer al tipo que ya usa la UI
+/// de búsqueda (el `url` vacío se resuelve luego con yt-dlp).
+fn search_item_from_spotify(track: spote_core::spotify_api::SpotifyTrack) -> SearchItem {
+    SearchItem {
+        provider_id: track.id,
+        provider: track.provider,
+        title: track.title,
+        artist: track.artists,
+        album: Some(track.album).filter(|album| !album.is_empty()),
+        duration_ms: track.duration_ms,
+        channel: String::new(),
+        url: String::new(),
+        art_url: track.art_url,
+        isrc: track.isrc,
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1921,6 +2759,7 @@ mod tests {
     #[test]
     fn tab_cycles_in_both_directions() {
         assert_eq!(Tab::Now.next(), Tab::Search);
+        assert_eq!(Tab::Library.next(), Tab::Room);
         assert_eq!(Tab::Room.next(), Tab::Settings);
         assert_eq!(Tab::Settings.next(), Tab::Now);
         assert_eq!(Tab::Now.prev(), Tab::Settings);

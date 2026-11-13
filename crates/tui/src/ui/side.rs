@@ -1,29 +1,65 @@
-//! Cola, sesión y visualizador.
+//! Cola, amigos y visualizador.
 use super::*;
 
 pub(super) fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
-    // Cola.
+    if layout.queue.height > 2 {
+        draw_queue(app, buf, layout.queue, pal);
+    }
+    if layout.info.height > 2 {
+        draw_friends(app, buf, layout.info, pal);
+    }
+}
+
+fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     panel(
+        Some(app),
         buf,
-        layout.queue,
+        rect,
         pal,
         app.focus == crate::app::Pane::Side,
         0.55,
         Some("cola"),
         app.audio.kick_pulse,
     );
-    let inner = Rect::new(
-        layout.queue.x + 2,
-        layout.queue.y + 2,
-        layout.queue.width.saturating_sub(4),
-        layout.queue.height.saturating_sub(3),
+    app.hit
+        .add(Rect::new(rect.x, rect.y, rect.width, 1), Action::QueueMenu);
+    let mut inner = Rect::new(
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        rect.height.saturating_sub(3),
     );
+    // Lo que suena ahora, siempre arriba de la cola. Antes solo se veía en la
+    // cabecera y en la lista había que adivinar qué entrada estaba sonando.
+    if let Some(track) = app.now.track.clone() {
+        if inner.height >= 4 {
+            let two = inner.height >= 7;
+            let now_h = if two { 2 } else { 1 };
+            let now_rect = Rect::new(inner.x, inner.y, inner.width, now_h);
+            fill_soft(buf, now_rect, mix(pal.surface, pal.primary, 0.16), 0.9, pal.bg);
+            let mut title = track.title.clone();
+            truncate_chars(&mut title, inner.width.saturating_sub(4) as usize);
+            put(buf, inner.x, inner.y, "▶", color(pal.primary), None);
+            put(buf, inner.x + 2, inner.y, &title, color(pal.text), None);
+            if two {
+                let mut artist = track.artist.clone();
+                if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
+                    artist.push_str(" · ");
+                    artist.push_str(album);
+                }
+                truncate_chars(&mut artist, inner.width.saturating_sub(4) as usize);
+                put(buf, inner.x + 2, inner.y + 1, &artist, color(pal.dim), None);
+            }
+            app.hit.add(now_rect, Action::Tab(Tab::Now));
+            inner.y += now_h + 1;
+            inner.height = inner.height.saturating_sub(now_h + 1);
+        }
+    }
     let queue_len = if app.room_queue.is_empty() {
         app.queue.len()
     } else {
         app.room_queue.len()
     };
-    let hint_row = inner.y + inner.height.saturating_sub(1);
     if queue_len == 0 {
         text_at(
             buf,
@@ -32,7 +68,10 @@ pub(super) fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             Style::new().fg(color(pal.dim)),
             Alignment::Left,
         );
-    } else if app.list_cards {
+        return;
+    }
+    let hint_row = inner.y + inner.height.saturating_sub(1);
+    if app.list_cards {
         let card_h = 3u16;
         let visible = (inner.height / card_h).max(1) as usize;
         let start = app.queue_selected.saturating_sub(visible / 2);
@@ -55,23 +94,24 @@ pub(super) fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             if selected {
                 fill(buf, card, mix(pal.surface, pal.primary, 0.18));
             }
-            let (title, artist, path_pending) = if app.room_queue.is_empty() {
+            let (title, artist, path_pending, track_ref) = if app.room_queue.is_empty() {
                 let entry = &app.queue[index];
                 (
                     entry.track.title.clone(),
                     entry.track.artist.clone(),
                     entry.path.is_none(),
+                    entry.track.clone(),
                 )
             } else {
                 let item = &app.room_queue[index];
-                (item.track.title.clone(), item.track.artist.clone(), false)
+                (
+                    item.track.title.clone(),
+                    item.track.artist.clone(),
+                    false,
+                    item.track.clone(),
+                )
             };
-            let thumb = Rect::new(card.x + 1, y, 5, card_h);
-            let track_ref = if app.room_queue.is_empty() {
-                app.queue[index].track.clone()
-            } else {
-                app.room_queue[index].track.clone()
-            };
+            let thumb = Rect::new(card.x + 1, y, 6, card_h);
             draw_thumb(app, buf, thumb, &track_ref, pal);
             let text_x = thumb.x + thumb.width + 1;
             let text_w = (card.x + card.width).saturating_sub(text_x + 3);
@@ -95,231 +135,352 @@ pub(super) fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
                 buf,
                 text_x,
                 y + 2,
-                &format!("{:>2}  ·  {}", index + 1, if path_pending { "pendiente" } else { "lista" }),
+                &format!(
+                    "{:>2}  ·  {}",
+                    index + 1,
+                    if path_pending { "pendiente" } else { "lista" }
+                ),
                 color(pal.dim),
                 None,
             );
             let remove_rect = Rect::new(card.x + card.width - 2, y, 2, 1);
             put(buf, remove_rect.x, y, "×", color(pal.error), None);
-            // El último registro gana: la tarjeta primero y el × encima, para
-            // que un solo clic en la cruz quite la pista.
             app.hit.add(card, Action::QueueRow(index));
+            // El nombre del artista de la tarjeta abre su ficha; la × sigue
+            // teniendo prioridad porque se registra después.
+            let artist_w = (track_ref.artist.chars().count() as u16).min(text_w);
+            if artist_w > 0 {
+                app.hit.add(
+                    Rect::new(text_x, y + 1, artist_w, 1),
+                    Action::OpenArtist(track_ref.artist.clone()),
+                );
+            }
             app.hit.add(remove_rect, Action::QueueRemove(index));
         }
+        return;
+    }
+
+    let visible = inner.height.saturating_sub(1) as usize;
+    let start = app.queue_selected.saturating_sub(visible / 2);
+    let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
+    let shown = (queue_len - start).min(visible);
+    let y_offset = if app.vcenter {
+        inner.height.saturating_sub(1).saturating_sub(shown as u16) / 2
     } else {
-        let visible = inner.height.saturating_sub(1) as usize;
-        let start = app.queue_selected.saturating_sub(visible / 2);
-        let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
-        let shown = (queue_len - start).min(visible);
-        let y_offset = if app.vcenter {
-            inner.height.saturating_sub(1).saturating_sub(shown as u16) / 2
+        0
+    };
+    for offset in 0..visible {
+        let index = start + offset;
+        if index >= queue_len || inner.y + offset as u16 >= hint_row {
+            break;
+        }
+        let y = inner.y + y_offset + offset as u16;
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        let selected = index == app.queue_selected;
+        let hover = app.hover == Some(Action::QueueRow(index));
+        if selected {
+            fill(buf, row, mix(pal.surface, pal.primary, 0.22));
+        } else if hover {
+            fill(buf, row, pal.surface_alt);
+        }
+        let (title, artist, pending) = if app.room_queue.is_empty() {
+            let entry = &app.queue[index];
+            (
+                entry.track.title.clone(),
+                entry.track.artist.clone(),
+                entry.path.is_none(),
+            )
+        } else {
+            let item = &app.room_queue[index];
+            (item.track.title.clone(), item.track.artist.clone(), false)
+        };
+        let remove_rect = Rect::new(row.x + row.width.saturating_sub(2), y, 2, 1);
+        if app.hover == Some(Action::QueueRemove(index)) {
+            fill(buf, remove_rect, pal.error);
+        }
+        put(buf, remove_rect.x, y, "×", color(pal.error), None);
+        app.hit.add(row, Action::QueueRow(index));
+        app.hit.add(remove_rect, Action::QueueRemove(index));
+        put(
+            buf,
+            row.x,
+            y,
+            &format!("{:>2}", index + 1),
+            color(if selected { pal.primary } else { pal.dim }),
+            None,
+        );
+        // Columnas fijas: el título y el artista nunca se pisan.
+        let artist_w = if row.width > 40 {
+            (row.width / 3).min(16)
         } else {
             0
         };
-        for offset in 0..visible {
-            let index = start + offset;
-            if index >= queue_len || inner.y + offset as u16 >= hint_row {
-                break;
+        let title_w = row
+            .width
+            .saturating_sub(6 + remove_rect.width + artist_w + 1) as usize;
+        let mut title = title;
+        truncate_chars(&mut title, title_w);
+        let provider = if app.room_queue.is_empty() {
+            app.queue
+                .get(index)
+                .and_then(|entry| app.lib.track_by_key(&entry.track.key).ok().flatten())
+                .and_then(|row| row.provider)
+        } else {
+            None
+        };
+        put(
+            buf,
+            row.x + 3,
+            y,
+            source_tag(provider.as_deref()),
+            color(pal.secondary),
+            None,
+        );
+        put(
+            buf,
+            row.x + 5,
+            y,
+            &title,
+            color(if selected { pal.text } else { pal.muted }),
+            None,
+        );
+        if artist_w > 4 {
+            let artist_x = row.x + row.width - remove_rect.width - artist_w - 1;
+            let mut artist = artist;
+            truncate_chars(&mut artist, artist_w.saturating_sub(1) as usize);
+            put(buf, artist_x, y, &artist, color(pal.dim), None);
+            if !artist.is_empty() {
+                app.hit.add(
+                    Rect::new(artist_x, y, artist.chars().count() as u16, 1),
+                    Action::OpenArtist(
+                        if app.room_queue.is_empty() {
+                            app.queue[index].track.artist.clone()
+                        } else {
+                            app.room_queue[index].track.artist.clone()
+                        },
+                    ),
+                );
             }
-            let y = inner.y + y_offset + offset as u16;
-            let row = Rect::new(inner.x, y, inner.width, 1);
-            let selected = index == app.queue_selected;
-            let hover = app.hover == Some(Action::QueueRow(index));
-            if selected {
-                fill(buf, row, mix(pal.surface, pal.primary, 0.22));
-            } else if hover {
-                fill(buf, row, pal.surface_alt);
-            }
-            let (title, artist, pending) = if app.room_queue.is_empty() {
-                let entry = &app.queue[index];
-                (
-                    entry.track.title.clone(),
-                    entry.track.artist.clone(),
-                    entry.path.is_none(),
-                )
-            } else {
-                let item = &app.room_queue[index];
-                (item.track.title.clone(), item.track.artist.clone(), false)
-            };
-            let remove_rect = Rect::new(row.x + row.width.saturating_sub(2), y, 2, 1);
-            if app.hover == Some(Action::QueueRemove(index)) {
-                fill(buf, remove_rect, pal.error);
-            }
-            put(buf, remove_rect.x, y, "×", color(pal.error), None);
-            app.hit.add(row, Action::QueueRow(index));
-            app.hit.add(remove_rect, Action::QueueRemove(index));
+        }
+        if pending {
             put(
                 buf,
-                row.x,
+                remove_rect.x.saturating_sub(2),
                 y,
-                &format!("{:>2}", index + 1),
-                color(if selected { pal.primary } else { pal.dim }),
+                "↓",
+                color(pal.warn),
                 None,
             );
-            let room_for_artist = row.width > 34;
-            let artist_w = if room_for_artist {
-                (row.width / 3).min(14)
-            } else {
-                0
-            };
-            let title_w = row
-                .width
-                .saturating_sub(4 + remove_rect.width + artist_w + 1)
-                as usize;
-            let mut title = title;
-            truncate_chars(&mut title, title_w);
-            put(
-                buf,
-                row.x + 3,
-                y,
-                &title,
-                color(if selected { pal.text } else { pal.muted }),
-                None,
-            );
-            if room_for_artist && artist_w > 4 {
-                let mut artist = artist;
-                truncate_chars(&mut artist, artist_w.saturating_sub(1) as usize);
-                put(
-                    buf,
-                    row.x + 3 + title.chars().count() as u16 + 1,
-                    y,
-                    &artist,
-                    color(pal.dim),
-                    None,
-                );
-            }
-            if pending {
-                put(
-                    buf,
-                    remove_rect.x.saturating_sub(2),
-                    y,
-                    "↓",
-                    color(pal.warn),
-                    None,
-                );
-            }
-        }
-        // Ayuda de la cola, en la última fila del panel.
-        if hint_row > inner.y {
-            let text = if app.room_queue.is_empty() {
-                "x quita · arrastra para ordenar"
-            } else {
-                "x quita · la sala la ordena el servidor"
-            };
-            text_at(
-                buf,
-                Rect::new(inner.x, hint_row, inner.width, 1),
-                text.to_string(),
-                Style::new().fg(color(pal.dim)),
-                Alignment::Left,
-            );
         }
     }
-
-    // Info: paleta + estado.
-    panel(buf, layout.info, pal, false, 0.45, Some("sesión"), app.audio.kick_pulse * 0.8);
-    let inner = Rect::new(
-        layout.info.x + 2,
-        layout.info.y + 2,
-        layout.info.width.saturating_sub(4),
-        layout.info.height.saturating_sub(3),
-    );
-    let mut y = inner.y;
-    // Muestras de la paleta: 12 bloques.
-    let swatch_width = inner.width.max(1);
-    for i in 0..swatch_width {
-        let t = i as f32 / swatch_width.max(1) as f32;
-        put_bg(buf, inner.x + i, y, pal.ramp_at(t));
-    }
-    y += 2;
-    let bottom = layout.info.y + layout.info.height;
-    let line = |buf: &mut Buffer, text: String, fg: Rgb, y: &mut u16| {
-        if *y < bottom.saturating_sub(1) {
-            text_at(
-                buf,
-                Rect::new(inner.x, *y, inner.width, 1),
-                text,
-                Style::new().fg(color(fg)),
-                Alignment::Left,
-            );
-        }
-        *y += 1;
-    };
-    if let Some(room) = &app.room {
-        line(buf,
-            format!("sala · {}", app.room_label(&room.id)),
-            pal.primary,
-            &mut y,
+    if hint_row > inner.y {
+        let text = if app.room_queue.is_empty() {
+            "x quita · clic derecho más"
+        } else {
+            "x quita · la sala la ordena el servidor"
+        };
+        text_at(
+            buf,
+            Rect::new(inner.x, hint_row, inner.width, 1),
+            text.to_string(),
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
         );
-    } else if app.follow_spotify {
-        line(buf, "siguiendo spotify".into(), pal.secondary, &mut y);
-    } else if app.social.is_some() {
-        line(buf, "servidor social".into(), pal.secondary, &mut y);
-    } else {
-        line(buf, "modo local".into(), pal.secondary, &mut y);
-    }
-    // Descargas: paso y barra, aunque estés en otra pestaña.
-    let active: Vec<_> = app.downloads.iter().filter(|info| info.active()).take(2).collect();
-    for download in active {
-        let mut title = download.title.clone();
-        truncate_chars(&mut title, inner.width as usize);
-        line(buf, format!("↓ {title}"), pal.warn, &mut y);
-        if y < layout.info.y + layout.info.height.saturating_sub(1) {
-            let width = inner.width.saturating_sub(1);
-            let filled = (width as f32 * download.percent / 100.0).round() as u16;
-            for i in 0..width {
-                put(
-                    buf,
-                    inner.x + i,
-                    y,
-                    if i < filled { "━" } else { "─" },
-                    color(if i < filled { pal.warn } else { pal.border_dim }),
-                    None,
-                );
-            }
-            y += 1;
-        }
-        line(buf,
-            format!("{} {:.0}%", download.stage, download.percent),
-            pal.dim,
-            &mut y,
-        );
-    }
-    line(buf,
-        format!("viz · {} ({})", app.viz.preset_name(), app.viz.layers.len()),
-        pal.dim,
-        &mut y,
-    );
-    line(buf, format!("arte · {}", app.art_mode.label()), pal.dim, &mut y);
-    if app.show_bpm && app.audio.bpm > 0.0 {
-        line(buf,
-            format!(
-                "{:.0} bpm · ♩ {:>3}  ▽ {:>3}  ♯ {:>3}",
-                app.audio.bpm,
-                (app.audio.kick * 100.0) as u32,
-                (app.audio.snare * 100.0) as u32,
-                (app.audio.hat * 100.0) as u32
-            ),
-            pal.dim,
-            &mut y,
-        );
-    }
-    let tools = &app.tools;
-    if !tools.missing().is_empty() {
-        line(buf,
-            format!("faltan: {}", tools.missing().join(", ")),
-            pal.warn,
-            &mut y,
-        );
-    } else {
-        line(buf, "mpv · ffmpeg · yt-dlp ok".into(), pal.dim, &mut y);
-    }
-    if !app.status.is_empty() {
-        y += 1;
-        line(buf, app.status.clone(), pal.muted, &mut y);
     }
 }
 
+/// Panel de amigos/presencia. Sustituye al viejo bloque de "sesión": la
+/// información técnica baja a la vista de sala, donde tiene sentido.
+fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
+    panel(
+        Some(app),
+        buf,
+        rect,
+        pal,
+        false,
+        0.45,
+        Some("amigos"),
+        app.audio.snare_pulse * 0.7,
+    );
+    let inner = Rect::new(
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        rect.height.saturating_sub(3),
+    );
+    let mut y = inner.y;
+    if app.social.is_none() {
+        text_at(
+            buf,
+            Rect::new(inner.x, y, inner.width, 1),
+            "modo local · sin servidor",
+            Style::new().fg(color(pal.secondary)),
+            Alignment::Left,
+        );
+        y += 1;
+        text_at(
+            buf,
+            Rect::new(inner.x, y, inner.width, 1),
+            "configura [server] para ver amigos",
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+    } else {
+        let online = app.presence.iter().filter(|p| p.online).count();
+        text_at(
+            buf,
+            Rect::new(inner.x, y, inner.width, 1),
+            format!("{} online · {} en total", online, app.presence.len()),
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+        y += 1;
+        let mut friends: Vec<_> = app.presence.iter().collect();
+        friends.sort_by_key(|p| (!p.online, p.user.name.to_lowercase()));
+        let rows = inner.height.saturating_sub(2) as usize;
+        for presence in friends.into_iter().take(rows) {
+            if y + 1 >= rect.y + rect.height {
+                break;
+            }
+            let dot = if presence.online { "●" } else { "○" };
+            let dot_color = if presence.online { pal.ok } else { pal.dim };
+            put(buf, inner.x, y, dot, color(dot_color), None);
+            let name = if presence.user.name == app.cfg.server.name {
+                format!("{} (tú)", presence.user.name)
+            } else {
+                presence.user.name.clone()
+            };
+            let mut label = name;
+            truncate_chars(&mut label, inner.width.saturating_sub(2) as usize);
+            put(
+                buf,
+                inner.x + 2,
+                y,
+                &label,
+                color(if presence.online { pal.text } else { pal.muted }),
+                None,
+            );
+            y += 1;
+            if let Some(track) = &presence.now_playing {
+                let mut what = format!("♪ {} · {}", track.title, track.artist);
+                truncate_chars(&mut what, inner.width.saturating_sub(4) as usize);
+                put(buf, inner.x + 3, y, &what, color(pal.dim), None);
+                y += 1;
+            }
+        }
+    }
+
+    // Curva de "feeling" de la canción completa: se ve dónde vienen los drops
+    // y los tramos tranquilos, y la marca sigue la posición actual.
+    if let Some(map) = &app.song_map {
+        if map.duration_ms > 0 && rect.height > 10 {
+            let y = rect.y + rect.height - 5;
+            let w = inner.width.max(4);
+            for x in 0..w {
+                let t = x as f32 / (w.saturating_sub(1)).max(1) as f32;
+                let ms = (map.duration_ms as f32 * t) as u64;
+                let value = map.energy_at(ms);
+                let glyph = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+                    [(value * 7.9).clamp(0.0, 7.0) as usize];
+                put(
+                    buf,
+                    inner.x + x,
+                    y,
+                    glyph,
+                    color(mix_oklab(pal.dim, pal.primary, value)),
+                    None,
+                );
+            }
+            let ratio = if app.now.duration_ms > 0 {
+                app.now.position_ms as f32 / app.now.duration_ms as f32
+            } else {
+                0.0
+            };
+            let marker = inner.x + (w as f32 * ratio.clamp(0.0, 1.0)) as u16;
+            put(
+                buf,
+                marker.min(inner.x + w - 1),
+                y,
+                "│",
+                color(pal.text),
+                None,
+            );
+            if let Some(section) = app.song_section {
+                let label = section.label().to_string();
+                let mut label = label;
+                truncate_chars(&mut label, inner.width as usize);
+                put(
+                    buf,
+                    inner.x,
+                    y.saturating_sub(1),
+                    &label,
+                    color(pal.secondary),
+                    None,
+                );
+            }
+        }
+    }
+
+    // Pie: una o dos líneas de estado técnico, no un bloque entero.
+    let bpm = if app.show_bpm && app.audio.bpm > 0.0 {
+        format!(" · {:.0} bpm", app.audio.bpm)
+    } else {
+        String::new()
+    };
+    let footer = format!(
+        "{} · {}/{}{bpm}",
+        app.viz.preset_name(),
+        app.lib.ready_count().unwrap_or(0),
+        app.lib.count().unwrap_or(0)
+    );
+    if rect.height > 5 {
+        let mut footer = footer;
+        truncate_chars(&mut footer, inner.width as usize);
+        put(
+            buf,
+            inner.x,
+            rect.y + rect.height - 2,
+            &footer,
+            color(pal.dim),
+            None,
+        );
+    }
+    // Descargas activas: el título nunca se come el porcentaje. Título arriba,
+    // barra + porcentaje abajo y un spinner ASCII animado.
+    if let Some(download) = app.downloads.iter().find(|info| info.active()) {
+        if rect.height > 8 {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+            let spin = frames[(app.viz.time * 10.0) as usize % frames.len()];
+            let base = rect.y + rect.height - 4;
+            let mut title = download.title.clone();
+            truncate_chars(&mut title, inner.width.saturating_sub(2) as usize);
+            put(
+                buf,
+                inner.x,
+                base,
+                &format!("{spin} {title}"),
+                color(pal.warn),
+                None,
+            );
+            let bar_w = inner.width.saturating_sub(7).max(4) as usize;
+            let filled = ((download.percent / 100.0) * bar_w as f32).round() as usize;
+            let bar = format!(
+                "{}{} {:>3.0}%",
+                "█".repeat(filled.min(bar_w)),
+                "░".repeat(bar_w.saturating_sub(filled)),
+                download.percent
+            );
+            put(
+                buf,
+                inner.x,
+                base + 1,
+                &bar,
+                color(if download.percent > 0.0 { pal.primary } else { pal.dim }),
+                None,
+            );
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Visualizador
 // ---------------------------------------------------------------------------
@@ -345,6 +506,15 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             .saturating_sub((rect.height / VIZ_SCALE).max(1));
         blit_viz(app, buf, rect, src_y, 1.0, 0.0, VIZ_SCALE);
     }
+    // `clean` puede subir por encima de los paneles: la cresta de la onda se
+    // derrama unas filas hacia arriba con poca opacidad.
+    if app.cfg.ui.fx.clean_spill && app.viz.preset_name() == "clean" && !background_on {
+        clean_spill(app, buf, rect, pal);
+    }
+    // Brasa en el borde inferior de la franja.
+    if app.cfg.ui.fx.edge_flame {
+        edge_flame(app, buf, rect, pal);
+    }
     let label = format!("{} · {}", app.viz.preset_name(), app.viz.preset_description());
     let width = label.chars().count() as u16;
     if rect.width > width + 4 {
@@ -357,8 +527,49 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
 
 /// Copia el canvas del visualizador a la pantalla. `src_y0` permite dibujar
 /// solo una franja; `amount` controla cuánto color se suma al fondo.
+/// Cresta de la onda de `clean` derramada sobre los paneles de arriba.
+fn clean_spill(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
+    let spill = 4u16.min(rect.y.saturating_sub(1));
+    if spill == 0 {
+        return;
+    }
+    let t = app.viz.time;
+    for x in 0..rect.width {
+        let band = app.audio.band(x as f32 / rect.width.max(1) as f32 * 48.0);
+        let wave = (x as f32 * 0.09 + t * 2.1).sin() * 0.5 + 0.5;
+        let level = (band * 0.75 + wave * 0.25) * (0.55 + app.song_intensity * 0.8) * spill as f32;
+        let height = level.round() as u16;
+        for row in 0..height.min(spill) {
+            let y = rect.y - 1 - row;
+            let alpha = 0.58 * (1.0 - row as f32 / spill as f32);
+            let rgb = mix_oklab(pal.bg_deep, pal.primary, alpha);
+            put(buf, x, y, "▁", color(rgb), None);
+        }
+    }
+}
+
+/// Brasa continua en el borde inferior del visualizador. Antes el parpadeo
+/// usaba una seno de frecuencia alta y dibujaba bloques de `▒` con huecos, que
+/// parecían una portada rota; ahora es una línea de color que respira con el
+/// bombo, sin patrones de bloques.
+fn edge_flame(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
+    let y = rect.y + rect.height.saturating_sub(1);
+    let t = app.viz.time;
+    let energy = (app.audio.bass * 0.8 + app.audio.kick_pulse * 0.5)
+        * (0.6 + app.song_intensity * 0.9);
+    for x in 0..rect.width {
+        let nx = x as f32 / rect.width.max(1) as f32;
+        let envelope = (1.0 - (nx * 2.0 - 1.0).abs()).max(0.0);
+        let breathe = ((x as f32 * 0.018 + t * 2.2).sin() * 0.5 + 0.5) * 0.18;
+        let value = (energy * envelope + breathe).clamp(0.0, 1.0);
+        let ch = if value > 0.55 { "▂" } else { "▁" };
+        let rgb = mix_oklab(pal.warn, pal.error, value);
+        put(buf, x, y, ch, color(rgb), None);
+    }
+}
+
 /// Escala del canvas de fondo respecto a la pantalla.
-pub(super) const VIZ_SCALE: u16 = 2;
+pub(super) const VIZ_SCALE: u16 = 1;
 
 pub(super) fn blit_viz(
     app: &App,
@@ -369,34 +580,44 @@ pub(super) fn blit_viz(
     bg_amount: f32,
     scale: u16,
 ) {
-    let layer = &app.viz.output;
+    blit_layer(&app.viz.output, buf, dst, src_y0, fg_amount, bg_amount, scale);
+}
+
+/// Copia una capa ya renderizada. La usa el fondo ambiental (que vive en un
+/// canvas aparte) y el visualizador normal.
+pub(super) fn blit_layer(
+    layer: &crate::viz::Layer,
+    buf: &mut Buffer,
+    dst: Rect,
+    src_y0: u16,
+    fg_amount: f32,
+    bg_amount: f32,
+    scale: u16,
+) {
     if layer.w == 0 || layer.h == 0 {
         return;
     }
-    // El fondo del visualizador puede ser de 200x56: se escribe la celda
-    // directamente en vez de pasar por `put` (bounds + área) por píxel.
     let area = *buf.area();
-    for y in 0..dst.height {
-        let py = dst.y + y;
-        if py >= area.y + area.height {
-            break;
-        }
-        for x in 0..dst.width {
-            let px = dst.x + x;
-            if px >= area.x + area.width {
-                break;
-            }
-            let sx = (x / scale).min(layer.w.saturating_sub(1));
-            let sy = (src_y0 + y / scale).min(layer.h.saturating_sub(1));
+    let clip = dst.intersection(area);
+    if clip.width == 0 || clip.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    for y in clip.y..clip.y + clip.height {
+        let start = (y - area.y) as usize * width + (clip.x - area.x) as usize;
+        let sy = (src_y0 + (y - dst.y) / scale).min(layer.h.saturating_sub(1));
+        for (offset, cell) in buf.content[start..start + clip.width as usize]
+            .iter_mut()
+            .enumerate()
+        {
+            let x = (clip.x + offset as u16 - dst.x) / scale;
+            let sx = x.min(layer.w.saturating_sub(1));
             let Some(src) = layer.get(sx as i32, sy as i32) else {
                 continue;
             };
             if src.alpha <= 0.01 {
                 continue;
             }
-            let Some(cell) = buf.cell_mut((px, py)) else {
-                continue;
-            };
             let pal_hint = (11u8, 11u8, 16u8);
             let fg = mix(pal_hint, src.fg, src.alpha * fg_amount);
             let bg = if bg_amount <= 0.001 {

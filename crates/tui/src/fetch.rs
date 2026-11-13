@@ -9,7 +9,6 @@ use spote_core::config;
 use spote_core::lyrics::{LyricsDoc, LyricsService};
 use spote_core::spotify::{SpotifyState, SpotifyWatcher};
 use spote_core::spotify_api;
-use spote_core::downloader::SearchItem;
 use spote_core::util;
 use spote_protocol::TrackRef;
 
@@ -19,7 +18,7 @@ use spote_protocol::TrackRef;
 
 pub struct SearchWorker {
     requests: Sender<(u64, String)>,
-    responses: Receiver<(u64, Result<Vec<SearchItem>, String>)>,
+    responses: Receiver<(u64, Result<spote_core::spotify_api::SearchAll, String>)>,
 }
 
 impl SearchWorker {
@@ -30,24 +29,7 @@ impl SearchWorker {
             .name("spote-search".into())
             .spawn(move || {
                 while let Ok((id, query)) = request_rx.recv() {
-                    let result = spotify_api::search(&query, 12)
-                        .map(|tracks| {
-                            tracks
-                                .into_iter()
-                                .map(|track| SearchItem {
-                                    provider_id: track.id,
-                                    provider: track.provider,
-                                    title: track.title,
-                                    artist: track.artists,
-                                    album: Some(track.album),
-                                    duration_ms: track.duration_ms,
-                                    channel: String::new(),
-                                    url: String::new(),
-                                    art_url: track.art_url,
-                                    isrc: track.isrc,
-                                })
-                                .collect()
-                        })
+                    let result = spotify_api::search_all(&query, 10)
                         .map_err(|err| err.to_string());
                     if response_tx.send((id, result)).is_err() {
                         return;
@@ -65,7 +47,12 @@ impl SearchWorker {
         let _ = self.requests.send((id, query));
     }
 
-    pub fn try_recv(&self) -> Option<(u64, Result<Vec<SearchItem>, String>)> {
+    pub fn try_recv(
+        &self,
+    ) -> Option<(
+        u64,
+        Result<spote_core::spotify_api::SearchAll, String>,
+    )> {
         self.responses.try_recv().ok()
     }
 }
@@ -79,6 +66,9 @@ pub struct ArtRequest {
     pub key: String,
     pub url: Option<String>,
     pub local: Option<PathBuf>,
+    /// Prefiere la portada remota (Spotify) sobre la miniatura local de
+    /// yt-dlp. Si la remota falla, cae al fichero local.
+    pub prefer_url: bool,
     pub w: u16,
     pub h: u16,
     pub mode: ArtMode,
@@ -90,6 +80,9 @@ pub struct ArtResponse {
     pub palette: Option<Palette>,
     pub art: Option<CoverArt>,
     pub art_path: Option<PathBuf>,
+    /// PNG original para el protocolo de imágenes de Kitty (portada full-res).
+    pub png: Option<Vec<u8>>,
+    pub png_size: Option<(u32, u32)>,
     pub w: u16,
     pub h: u16,
     pub mode: ArtMode,
@@ -165,17 +158,21 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
         palette: None,
         art: None,
         art_path: None,
+        png: None,
+        png_size: None,
         w: request.w,
         h: request.h,
         mode: request.mode,
         error: None,
     };
 
-    let mut image = request
+    let local_image = request
         .local
         .as_ref()
         .and_then(|path| std::fs::read(path).ok())
         .and_then(|bytes| decode_image(&bytes).ok());
+
+    let mut image = if request.prefer_url { None } else { local_image.clone() };
 
     if image.is_none() {
         if let Some(url) = request.url.as_deref() {
@@ -204,6 +201,14 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
             }
         }
     }
+    // Red caída o URL rota: la miniatura local sigue sirviendo.
+    if image.is_none() {
+        image = local_image;
+        if image.is_some() {
+            response.art_path = request.local.clone();
+            response.error = None;
+        }
+    }
 
     let Some(image) = image else {
         if response.error.is_none() {
@@ -222,6 +227,24 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
             response.palette.as_ref().unwrap(),
             0.0,
         ));
+    }
+    // La imagen original solo interesa para la portada grande en Kitty. Se
+    // convierte a PNG una vez por cambio, no por frame.
+    if matches!(request.mode, ArtMode::Plain | ArtMode::Half)
+        && request.w >= 24
+        && request.h >= 12
+    {
+        let mut png = Vec::new();
+        if image
+            .write_to(
+                &mut std::io::Cursor::new(&mut png),
+                image::ImageFormat::Png,
+            )
+            .is_ok()
+        {
+            response.png_size = Some((image.width(), image.height()));
+            response.png = Some(png);
+        }
     }
     response
 }
@@ -396,6 +419,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn art_worker_outputs_png_for_big_plain_cover() {
+        let path = std::path::Path::new("/tmp/cover.img");
+        if !path.exists() {
+            return;
+        }
+        let worker = ArtWorker::start();
+        worker.request(ArtRequest {
+            key: "test-png".into(),
+            url: None,
+            local: Some(path.to_path_buf()),
+            prefer_url: false,
+            w: 60,
+            h: 30,
+            mode: ArtMode::Plain,
+        });
+        let start = std::time::Instant::now();
+        let mut response = None;
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            if let Some(value) = worker.try_recv() {
+                response = Some(value);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let response = response.expect("el worker no respondió");
+        assert!(response.png.is_some(), "no generó PNG: {:?}", response.error);
+    }
+
+    #[test]
     fn art_worker_renders_from_a_local_file() {
         let path = std::path::Path::new("/tmp/spote-demo/Tame Impala/The Slow Rush/cover.jpg");
         if !path.exists() {
@@ -406,6 +458,7 @@ mod tests {
             key: "test".into(),
             url: None,
             local: Some(path.to_path_buf()),
+            prefer_url: false,
             w: 60,
             h: 20,
             mode: ArtMode::Dither,
@@ -427,5 +480,259 @@ mod tests {
         assert_eq!(art.h, 20);
         let drawn = art.cells.iter().filter(|cell| cell.ch != ' ').count();
         assert!(drawn > 100, "drawn={drawn}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Perfiles de artista y metadatos de Spotify/Deezer
+// ---------------------------------------------------------------------------
+
+pub enum MetaJob {
+    Artist(String),
+    ArtistId {
+        provider: String,
+        id: String,
+        name: String,
+    },
+    Album {
+        provider: String,
+        id: String,
+    },
+    AlbumSearch {
+        album: String,
+        artist: String,
+    },
+    Metadata {
+        key: String,
+        artist: String,
+        title: String,
+    },
+}
+
+pub enum MetaEvent {
+    Artist {
+        name: String,
+        result: Result<spote_core::spotify_api::ArtistProfile, String>,
+    },
+    Album {
+        provider: String,
+        id: String,
+        result: Result<spote_core::spotify_api::AlbumInfo, String>,
+    },
+    AlbumByName {
+        album: String,
+        artist: String,
+        result: Result<spote_core::spotify_api::AlbumInfo, String>,
+    },
+    Metadata {
+        key: String,
+        result: Option<spote_core::spotify_api::SpotifyTrack>,
+    },
+}
+
+pub struct MetaWorker {
+    jobs: Sender<MetaJob>,
+    events: Receiver<MetaEvent>,
+}
+
+impl MetaWorker {
+    pub fn start() -> Self {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<MetaJob>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("spote-meta".into())
+            .spawn(move || {
+                while let Ok(job) = job_rx.recv() {
+                    let event = match job {
+                        MetaJob::Artist(name) => {
+                            let result = spotify_api::artist(&name).map_err(|err| err.to_string());
+                            MetaEvent::Artist { name, result }
+                        }
+                        MetaJob::ArtistId {
+                            provider,
+                            id,
+                            name,
+                        } => {
+                            let result = spotify_api::artist_by_id(&provider, &id)
+                                .map_err(|err| err.to_string());
+                            MetaEvent::Artist { name, result }
+                        }
+                        MetaJob::Album { provider, id } => {
+                            let result = spotify_api::album(&provider, &id)
+                                .map_err(|err| err.to_string());
+                            MetaEvent::Album {
+                                provider,
+                                id,
+                                result,
+                            }
+                        }
+                        MetaJob::AlbumSearch { album, artist } => {
+                            let result = search_album(&artist, &album)
+                                .ok_or_else(|| "sin resultados".to_string());
+                            MetaEvent::AlbumByName {
+                                album,
+                                artist,
+                                result,
+                            }
+                        }
+                        MetaJob::Metadata { key, artist, title } => {
+                            let result = search_metadata(&artist, &title);
+                            MetaEvent::Metadata { key, result }
+                        }
+                    };
+                    if event_tx.send(event).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            jobs: job_tx,
+            events: event_rx,
+        }
+    }
+
+    pub fn artist(&self, name: String) {
+        let _ = self.jobs.send(MetaJob::Artist(name));
+    }
+
+    pub fn artist_by_id(&self, provider: String, id: String, name: String) {
+        let _ = self.jobs.send(MetaJob::ArtistId {
+            provider,
+            id,
+            name,
+        });
+    }
+
+    pub fn album(&self, provider: String, id: String) {
+        let _ = self.jobs.send(MetaJob::Album { provider, id });
+    }
+
+    pub fn album_search(&self, album: String, artist: String) {
+        let _ = self.jobs.send(MetaJob::AlbumSearch { album, artist });
+    }
+
+    pub fn metadata(&self, key: String, artist: String, title: String) {
+        let _ = self.jobs.send(MetaJob::Metadata { key, artist, title });
+    }
+
+    pub fn try_recv(&self) -> Option<MetaEvent> {
+        self.events.try_recv().ok()
+    }
+}
+
+/// Busca un álbum por nombre y artista y devuelve su ficha completa.
+fn search_album(artist: &str, album: &str) -> Option<spote_core::spotify_api::AlbumInfo> {
+    let query = format!("{artist} {album}");
+    let results = spotify_api::search_all(&query, 8).ok()?;
+    let wanted = spote_core::util::normalize(album);
+    let candidate = results
+        .albums
+        .into_iter()
+        .filter(|item| {
+            let got = spote_core::util::normalize(&item.title);
+            got == wanted || got.contains(&wanted) || wanted.contains(&got)
+        })
+        .max_by_key(|item| {
+            let artist_match = spote_core::util::normalize(&item.artist)
+                .contains(&spote_core::util::normalize(artist));
+            (artist_match, item.track_count)
+        })?;
+    spotify_api::album(&candidate.provider, &candidate.id).ok()
+}
+
+/// Busca metadatos y se queda con la pista que mejor coincide. Evita coger una
+/// versión en directo o un remix solo porque salió primero.
+fn search_metadata(artist: &str, title: &str) -> Option<spote_core::spotify_api::SpotifyTrack> {
+    let query = format!("{artist} {title}");
+    let tracks = spotify_api::search(&query, 8).ok()?;
+    let wanted_title = util::normalize(title);
+    let wanted_artist = util::normalize(artist);
+    tracks
+        .into_iter()
+        .map(|track| {
+            let t = util::normalize(&track.title);
+            let a = util::normalize(&track.artists);
+            let mut score = 0i32;
+            if t == wanted_title {
+                score += 60;
+            } else if t.contains(&wanted_title) || wanted_title.contains(&t) {
+                score += 30;
+            }
+            if a == wanted_artist {
+                score += 40;
+            } else if a.contains(&wanted_artist) || wanted_artist.contains(&a) {
+                score += 20;
+            }
+            if track.duration_ms > 0 {
+                score += 5;
+            }
+            (score, track)
+        })
+        // Por debajo de esto es otra canción con un nombre parecido: mejor no
+        // pisar los metadatos del usuario.
+        .filter(|(score, _)| *score >= 30)
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, track)| track)
+}
+
+// ---------------------------------------------------------------------------
+// Mapa de energía de la canción completa ("feeling")
+// ---------------------------------------------------------------------------
+
+pub struct SongMapWorker {
+    jobs: Sender<(String, PathBuf)>,
+    events: Receiver<SongMapEvent>,
+}
+
+pub enum SongMapEvent {
+    Loaded {
+        key: String,
+        map: spote_core::audio_map::SongMap,
+    },
+    Failed {
+        key: String,
+        error: String,
+    },
+}
+
+impl SongMapWorker {
+    pub fn start() -> Self {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<(String, PathBuf)>();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("spote-song-map".into())
+            .spawn(move || {
+                while let Ok(mut job) = job_rx.recv() {
+                    // Si el usuario salta de pista, solo interesa la última.
+                    while let Ok(next) = job_rx.try_recv() {
+                        job = next;
+                    }
+                    let (key, path) = job;
+                    let event = match spote_core::audio_map::analyze_file(&path) {
+                        Ok(map) => SongMapEvent::Loaded { key, map },
+                        Err(error) => SongMapEvent::Failed {
+                            key,
+                            error: error.to_string(),
+                        },
+                    };
+                    if event_tx.send(event).is_err() {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            jobs: job_tx,
+            events: event_rx,
+        }
+    }
+
+    pub fn request(&self, key: String, path: PathBuf) {
+        let _ = self.jobs.send((key, path));
+    }
+
+    pub fn try_recv(&self) -> Option<SongMapEvent> {
+        self.events.try_recv().ok()
     }
 }

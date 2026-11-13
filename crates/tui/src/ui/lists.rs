@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = content_rect(app, layout);
-    if app.now.track.is_some() {
+    if app.now.track.is_some() && layout.art.width > 0 {
         draw_art(app, buf, layout.art, pal, 0.85);
         frame_art(buf, layout.art, pal);
     }
@@ -19,6 +19,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         filter => format!("librería · {}", filter.label()),
     };
     panel(
+        Some(app),
         buf,
         rect,
         pal,
@@ -68,8 +69,15 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         chip_right = chip_right.saturating_sub(1);
     }
 
-    // Cabecera de la lista: portada y descripción, si hay una abierta.
-    let mut list_area = inner;
+    // Cabecera de la lista: portada y descripción, si hay una abierta. Los
+    // chips de gestión ocupan la primera fila; la lista empieza debajo para
+    // que las canciones no se pinten encima de «N lista / I importar».
+    let mut list_area = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
     if let crate::app::LibFilter::Playlist(id) = app.lib_filter {
         if let Ok(Some(list)) = app.lib.playlist(id) {
             let header = Rect::new(inner.x, inner.y + 2, inner.width, 3);
@@ -129,9 +137,25 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         }
     }
 
+    if !app.view.is_empty() {
+        // Backfill silencioso: las canciones viejas sin portada la piden solas
+        // a Spotify (máximo 3 a la vez, una sola vez por pista).
+        let missing: Vec<_> = app
+            .view
+            .iter()
+            .filter(|row| row.art_path.is_none() && row.track.art_url.is_none())
+            .take(3)
+            .cloned()
+            .collect();
+        for row in missing {
+            app.ensure_missing_art(&row);
+        }
+    }
     if app.view.is_empty() {
         let message = if in_playlist {
             "lista vacía · l añade desde la biblioteca · d borra la lista"
+        } else if app.lib.count().unwrap_or(0) > 0 {
+            "no hay pistas en este filtro · [ ] cambia de filtro"
         } else {
             "librería vacía · / para buscar · spote ingest <dir> para importar"
         };
@@ -173,7 +197,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         }
         let ready = row.playable();
         let duration = format_ms(row.track.duration_ms);
-        let duration_width = duration.chars().count() as u16;
+        let duration_w = duration.chars().count() as u16;
         let playing = app
             .now
             .track
@@ -194,35 +218,95 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             pal.warn
         };
         put(buf, row_rect.x + 2, y, marker, color(marker_color), None);
-        // Corazón siempre visible si es favorita, con su propio hueco. Si la
-        // pista se está descargando, ese hueco lo ocupa el progreso.
-        let heart_x = row_rect.x + row_rect.width - duration_width - 2;
-        if let Some(download) = app.download_for(&row.track.key) {
-            let label = format!("↓{:.0}%", download.percent);
-            let label_x = heart_x.saturating_sub(label.len() as u16);
-            put(buf, label_x, y, &label, color(pal.warn), None);
-        } else if row.favorite {
-            put(buf, heart_x, y, "♥", color(pal.error), None);
-        }
-        let title_width = row_rect.width.saturating_sub(6 + duration_width + 3) as usize;
+        // Columnas fijas: título, artista y duración nunca se pisan aunque el
+        // título sea larguísimo (el bug de la captura).
+        let right_reserved = duration_w + 3;
+        let content_x = row_rect.x + 4;
+        let content_w = row_rect.width.saturating_sub(6 + right_reserved);
+        let wide = content_w >= 48;
+        let title_w = if wide {
+            (content_w * 50 / 100).max(18)
+        } else {
+            content_w
+        };
+        let artist_x = content_x + title_w + 2;
+        let artist_w = content_w.saturating_sub(title_w + 2);
         let style = Style::new()
             .fg(color(if selected { pal.text } else { pal.muted }))
             .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() });
         let mut title = row.track.title.clone();
-        truncate_chars(&mut title, title_width);
-        put(buf, row_rect.x + 4, y, &title, style.fg.unwrap_or(color(pal.text)), None);
-        let title_len = title.chars().count() as u16;
-        let artist_x = row_rect.x + 4 + title_len + 2;
-        let max_artist =
-            (heart_x).saturating_sub(artist_x + 1);
-        if max_artist > 4 {
+        truncate_chars(&mut title, title_w as usize);
+        put(buf, content_x, y, &title, style.fg.unwrap_or(color(pal.text)), None);
+        if wide && artist_w > 4 {
+            let album = row
+                .track
+                .album
+                .as_deref()
+                .filter(|album| !album.is_empty())
+                .map(str::to_string);
+            // Icono de origen (YouTube/SoundCloud/Spotify/local) antes del
+            // artista; así se ve de dónde salió la descarga de un vistazo.
+            let tag = source_tag(row.provider.as_deref());
+            put(buf, artist_x, y, tag, color(pal.secondary), None);
+            let artist_x = artist_x + 2;
+            let artist_w = artist_w.saturating_sub(2);
+            let artist_limit = if album.is_some() {
+                (artist_w / 2).max(6)
+            } else {
+                artist_w
+            } as usize;
             let mut artist = row.track.artist.clone();
-            truncate_chars(&mut artist, max_artist as usize);
+            truncate_chars(&mut artist, artist_limit);
+            let artist_draw_w = artist.chars().count() as u16;
             put(buf, artist_x, y, &artist, color(pal.dim), None);
+            if !artist.is_empty() {
+                app.hit.add(
+                    Rect::new(artist_x, y, artist_draw_w.min(artist_w), 1),
+                    Action::OpenArtist(row.track.artist.clone()),
+                );
+            }
+            if let Some(album) = album {
+                let album_x = artist_x + artist_draw_w + 3;
+                let album_w = (artist_x + artist_w).saturating_sub(album_x);
+                if album_w > 3 {
+                    let mut shown = album.clone();
+                    truncate_chars(&mut shown, album_w as usize);
+                    put(
+                        buf,
+                        album_x,
+                        y,
+                        &format!("· {shown}"),
+                        color(pal.dim),
+                        None,
+                    );
+                    app.hit.add(
+                        Rect::new(album_x, y, album_w, 1),
+                        Action::OpenAlbum(album, row.track.artist.clone()),
+                    );
+                }
+            }
+        }
+        // Estado: favorita, descarga o pendiente, antes de la duración.
+        let status_x = row_rect.x + row_rect.width - duration_w - 3;
+        if let Some(download) = app.download_for(&row.track.key) {
+            let label = format!("↓{:.0}%", download.percent);
+            let label_w = label.chars().count() as u16;
+            put(
+                buf,
+                status_x.saturating_sub(label_w),
+                y,
+                &label,
+                color(pal.warn),
+                None,
+            );
+        } else if row.favorite {
+            put(buf, status_x, y, "♥", color(pal.error), None);
+        } else if !ready {
+            put(buf, status_x, y, "↓", color(pal.warn), None);
         }
         put(
             buf,
-            row_rect.x + row_rect.width - duration_width,
+            row_rect.x + row_rect.width - duration_w,
             y,
             &duration,
             color(pal.dim),
@@ -296,7 +380,12 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
         }
         truncate_chars(&mut artist, text_w as usize);
         put(buf, text_x, y + 1, &artist, color(pal.dim), None);
-        let mut meta = format!("{}  ·  {}", format_ms(row.track.duration_ms), status_label(row));
+        let mut meta = format!(
+            "{}  ·  {}  ·  {}",
+            format_ms(row.track.duration_ms),
+            status_label(row),
+            source_tag(row.provider.as_deref())
+        );
         if row.favorite {
             meta.push_str("  ·  ♥");
         }
@@ -313,6 +402,24 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             None,
         );
         app.hit.add(card, Action::SelectRow(index));
+        // El artista de la tarjeta gana al clic de fila: abre su ficha.
+        let artist_w = (row.track.artist.chars().count() as u16).min(text_w);
+        if artist_w > 0 {
+            app.hit.add(
+                Rect::new(text_x, y + 1, artist_w, 1),
+                Action::OpenArtist(row.track.artist.clone()),
+            );
+        }
+        if let Some(album) = row.track.album.as_deref().filter(|album| !album.is_empty()) {
+            let album_x = text_x + artist_w + 3;
+            let album_w = (text_x + text_w).saturating_sub(album_x);
+            if album_w > 3 {
+                app.hit.add(
+                    Rect::new(album_x, y + 1, album_w, 1),
+                    Action::OpenAlbum(album.to_string(), row.track.artist.clone()),
+                );
+            }
+        }
         y += card_h;
     }
 }
@@ -330,26 +437,34 @@ pub(super) fn status_label(row: &spote_core::library::TrackRow) -> &'static str 
 
 pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = content_rect(app, layout);
-    if app.now.track.is_some() {
+    if app.now.track.is_some() && layout.art.width > 0 {
         draw_art(app, buf, layout.art, pal, 0.85);
         frame_art(buf, layout.art, pal);
     }
-    panel(buf, rect, pal, true, 0.78, Some("buscar"), app.audio.kick_pulse);
-    let inner = Rect::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(4), rect.height.saturating_sub(3));
+    panel(Some(app), buf, rect, pal, true, 0.78, Some("buscar"), app.audio.kick_pulse);
+    let inner = Rect::new(
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        rect.height.saturating_sub(3),
+    );
 
     // Campo de búsqueda.
     let input_rect = Rect::new(inner.x, inner.y, inner.width, 1);
-    fill(buf, input_rect, pal.bg_deep);
+    // Limpieza explícita celda a celda: este campo se redibuja mientras se
+    // escribe y no puede quedarse el placeholder de la consulta anterior.
+    for x in input_rect.x..input_rect.x + input_rect.width {
+        put_bg(buf, x, input_rect.y, pal.bg_deep);
+    }
     put(buf, input_rect.x + 1, input_rect.y, "/", color(pal.primary), None);
     let empty = app.search.query.is_empty();
     let query = if empty {
-        "escribe y pulsa enter…".to_string()
+        "artistas, álbumes y canciones…".to_string()
     } else {
         app.search.query.clone()
     };
     let fg = if empty { pal.dim } else { pal.text };
     put(buf, input_rect.x + 3, input_rect.y, &query, color(fg), None);
-    // Cursor solo con texto: con el placeholder se ve más limpio.
     let cursor_x = input_rect.x + 3 + app.search.query.chars().count() as u16;
     if !empty && cursor_x < input_rect.x + input_rect.width {
         put(buf, cursor_x, input_rect.y, "▌", color(pal.primary), None);
@@ -360,7 +475,7 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            "buscando en el catálogo…",
+            "buscando artistas, álbumes y canciones…",
             Style::new().fg(color(pal.warn)),
             Alignment::Left,
         );
@@ -376,63 +491,299 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         y += 1;
     }
 
-    let rows = (inner.y + inner.height).saturating_sub(y) as usize;
-    for (index, item) in app.search.results.iter().enumerate().take(rows) {
-        let row_y = y + index as u16;
-        let selected = index == app.search.selected;
-        let row_rect = Rect::new(inner.x, row_y, inner.width, 1);
-        if selected {
-            fill(buf, row_rect, mix(pal.surface, pal.primary, 0.22));
-            put(buf, row_rect.x, row_y, "▍", color(pal.primary), None);
-        }
-        let duration = format_ms(item.duration_ms);
-        let duration_width = duration.chars().count() as u16;
-        let topic = item.channel.ends_with(" - Topic");
-        let marker = if topic { "♪" } else { "▷" };
-        put(
-            buf,
-            row_rect.x + 2,
-            row_y,
-            marker,
-            color(if selected { pal.secondary } else { pal.dim }),
-            None,
-        );
-        // Título y artista/álbum en la misma fila: con solo el título no se
-        // sabía qué versión era.
-        let title_width = row_rect.width.saturating_sub(6 + duration_width) as usize;
-        let mut title = item.title.clone();
-        let title_chars = title.chars().count();
-        truncate_chars(&mut title, title_width);
-        put(
-            buf,
-            row_rect.x + 4,
-            row_y,
-            &title,
-            color(if selected { pal.text } else { pal.muted }),
-            None,
-        );
-        let after = row_rect.x + 4 + title_chars.min(title_width) as u16 + 2;
-        let meta = match &item.album {
-            Some(album) if !album.is_empty() => format!("{}  ·  {}", item.artist, album),
-            _ => item.artist.clone(),
-        };
-        let meta_room = (row_rect.x + row_rect.width - duration_width - 2)
-            .saturating_sub(after);
-        if meta_room > 6 && title_width > title_chars {
-            let mut meta = meta;
-            truncate_chars(&mut meta, meta_room as usize);
-            put(buf, after, row_y, &meta, color(pal.dim), None);
-        }
-        put(
-            buf,
-            row_rect.x + row_rect.width - duration_width,
-            row_y,
-            &duration,
-            color(pal.dim),
-            None,
-        );
-        app.hit.add(row_rect, Action::SearchPlay(index));
+    // Lista mixta: artistas, álbumes y canciones, como Spotify.
+    #[derive(Clone, Copy)]
+    enum Row {
+        Section(&'static str),
+        Entry(crate::app::SearchEntry),
     }
+    let mut rows: Vec<Row> = Vec::new();
+    if !app.search.artists.is_empty() {
+        rows.push(Row::Section("ARTISTAS"));
+        for index in 0..app.search.artists.len() {
+            rows.push(Row::Entry(crate::app::SearchEntry::Artist(index)));
+        }
+    }
+    if !app.search.albums.is_empty() {
+        rows.push(Row::Section("ÁLBUMES"));
+        for index in 0..app.search.albums.len() {
+            rows.push(Row::Entry(crate::app::SearchEntry::Album(index)));
+        }
+    }
+    if !app.search.results.is_empty() {
+        rows.push(Row::Section("CANCIONES"));
+        for index in 0..app.search.results.len() {
+            rows.push(Row::Entry(crate::app::SearchEntry::Track(index)));
+        }
+    }
+    if rows.is_empty() {
+        if !app.search.loading && !empty {
+            text_at(
+                buf,
+                Rect::new(inner.x, y + 1, inner.width, 1),
+                "sin resultados · prueba otro título o artista",
+                Style::new().fg(color(pal.dim)),
+                Alignment::Center,
+            );
+        }
+        return;
+    }
+
+    // Cada entrada ocupa 2 filas; las cabeceras 1. Se desplaza la selección.
+    let selected_flat = app.search.selected;
+    let selected_row = rows
+        .iter()
+        .position(|row| {
+            matches!(row, Row::Entry(entry) if entry_flat(app, *entry) == selected_flat)
+        })
+        .unwrap_or(0);
+    let available = (inner.y + inner.height).saturating_sub(y) as usize;
+    let row_h = if app.list_cards { 2 } else { 1 };
+    let start = selected_row.saturating_sub(available / (row_h * 3).max(1));
+    let mut row_y = y;
+    for row in rows.iter().skip(start) {
+        if row_y + 1 >= inner.y + inner.height {
+            break;
+        }
+        match row {
+            Row::Section(label) => {
+                text_at(
+                    buf,
+                    Rect::new(inner.x, row_y, inner.width, 1),
+                    *label,
+                    Style::new()
+                        .fg(color(pal.primary))
+                        .add_modifier(Modifier::BOLD),
+                    Alignment::Left,
+                );
+                row_y += 1;
+            }
+            Row::Entry(entry) if !app.list_cards => {
+                let flat = entry_flat(app, *entry);
+                let selected = flat == selected_flat;
+                let row_rect = Rect::new(inner.x, row_y, inner.width, 1);
+                if selected {
+                    fill(buf, row_rect, mix(pal.surface, pal.primary, 0.22));
+                    put(buf, row_rect.x, row_y, "▍", color(pal.primary), None);
+                }
+                let (title, meta, right, provider, _) = search_entry_view(app, *entry);
+                let right_w = right.chars().count() as u16 + provider.chars().count() as u16 + 3;
+                let mut title = format!("{title}  ·  {meta}");
+                truncate_chars(&mut title, row_rect.width.saturating_sub(right_w + 4) as usize);
+                put(
+                    buf,
+                    row_rect.x + 2,
+                    row_y,
+                    &title,
+                    color(if selected { pal.text } else { pal.muted }),
+                    None,
+                );
+                if !right.is_empty() {
+                    put(
+                        buf,
+                        row_rect.x + row_rect.width - right_w,
+                        row_y,
+                        &format!("{right} [{provider}]"),
+                        color(pal.dim),
+                        None,
+                    );
+                }
+                app.hit.add(row_rect, Action::SearchPlay(flat));
+                row_y += 1;
+            }
+            Row::Entry(entry) => {
+                let flat = entry_flat(app, *entry);
+                let selected = flat == selected_flat;
+                let row_rect = Rect::new(inner.x, row_y, inner.width, 2);
+                if selected {
+                    fill(buf, row_rect, mix(pal.surface, pal.primary, 0.22));
+                    put(buf, row_rect.x, row_y, "▍", color(pal.primary), None);
+                }
+                let thumb = Rect::new(row_rect.x + 2, row_y, 4, 2);
+                let (title, meta, right, provider, thumb_track) = search_entry_view(app, *entry);
+                draw_thumb(app, buf, thumb, &thumb_track, pal);
+                let text_x = thumb.x + thumb.width + 1;
+                let right_w = right.chars().count() as u16;
+                let provider_w = provider.chars().count() as u16 + 2;
+                let text_w = (row_rect.x + row_rect.width)
+                    .saturating_sub(text_x + right_w + provider_w + 3);
+                let mut title = title;
+                truncate_chars(&mut title, text_w as usize);
+                put(
+                    buf,
+                    text_x,
+                    row_y,
+                    &title,
+                    color(if selected { pal.text } else { pal.muted }),
+                    None,
+                );
+                let mut meta = meta;
+                truncate_chars(&mut meta, text_w as usize);
+                put(buf, text_x, row_y + 1, &meta, color(pal.dim), None);
+                if !right.is_empty() {
+                    put(
+                        buf,
+                        row_rect.x + row_rect.width - right_w,
+                        row_y,
+                        &right,
+                        color(pal.dim),
+                        None,
+                    );
+                }
+                // Etiqueta de proveedor, pequeña, a la derecha de la meta.
+                if !provider.is_empty() {
+                    let tag = format!("[{provider}]");
+                    let tw = tag.chars().count() as u16;
+                    if text_x + text_w + 1 + tw <= row_rect.x + row_rect.width {
+                        put(
+                            buf,
+                            row_rect.x + row_rect.width - tw,
+                            row_y + 1,
+                            &tag,
+                            color(pal.secondary),
+                            None,
+                        );
+                    }
+                }
+                app.hit.add(row_rect, Action::SearchPlay(flat));
+                if let Some(artist) = search_entry_artist(app, *entry) {
+                    let width = artist.chars().count() as u16;
+                    app.hit.add(
+                        Rect::new(text_x, row_y + 1, width.min(text_w), 1),
+                        Action::OpenArtist(artist.clone()),
+                    );
+                    if let Some(album) = search_entry_album(app, *entry) {
+                        let album_x = text_x + width.min(text_w) + 3;
+                        let album_w = (row_rect.x + row_rect.width).saturating_sub(album_x);
+                        if album_w > 3 {
+                            app.hit.add(
+                                Rect::new(album_x, row_y + 1, album_w, 1),
+                                Action::OpenAlbum(album, artist),
+                            );
+                        }
+                    }
+                }
+                row_y += 2;
+            }
+        }
+    }
+}
+
+fn entry_flat(app: &App, entry: crate::app::SearchEntry) -> usize {
+    match entry {
+        crate::app::SearchEntry::Artist(i) => i,
+        crate::app::SearchEntry::Album(i) => app.search.artists.len() + i,
+        crate::app::SearchEntry::Track(i) => {
+            app.search.artists.len() + app.search.albums.len() + i
+        }
+    }
+}
+
+fn search_entry_view(
+    app: &App,
+    entry: crate::app::SearchEntry,
+) -> (String, String, String, String, spote_protocol::TrackRef) {
+    match entry {
+        crate::app::SearchEntry::Artist(index) => {
+            let Some(artist) = app.search.artists.get(index) else {
+                return (String::new(), String::new(), String::new(), String::new(), empty_track());
+            };
+            let meta = if artist.followers > 0 {
+                format!("artista · {} fans", artist.followers)
+            } else {
+                "artista".to_string()
+            };
+            (
+                artist.name.clone(),
+                meta,
+                String::new(),
+                artist.provider.clone(),
+                spote_protocol::TrackRef {
+                    key: format!("searchartist:{}:{}", artist.provider, artist.id),
+                    title: artist.name.clone(),
+                    artist: artist.name.clone(),
+                    album: None,
+                    duration_ms: 0,
+                    art_url: artist.image_url.clone(),
+                    source_hint: None,
+                },
+            )
+        }
+        crate::app::SearchEntry::Album(index) => {
+            let Some(album) = app.search.albums.get(index) else {
+                return (String::new(), String::new(), String::new(), String::new(), empty_track());
+            };
+            let mut meta = album.artist.clone();
+            if let Some(year) = album.release_year {
+                meta.push_str(&format!(" · {year}"));
+            }
+            if album.track_count > 0 {
+                meta.push_str(&format!(" · {} pistas", album.track_count));
+            }
+            (
+                album.title.clone(),
+                meta,
+                "álbum".to_string(),
+                album.provider.clone(),
+                spote_protocol::TrackRef {
+                    key: format!("searchalbum:{}:{}", album.provider, album.id),
+                    title: album.title.clone(),
+                    artist: album.artist.clone(),
+                    album: Some(album.title.clone()),
+                    duration_ms: 0,
+                    art_url: album.cover_url.clone(),
+                    source_hint: None,
+                },
+            )
+        }
+        crate::app::SearchEntry::Track(index) => {
+            let Some(item) = app.search.results.get(index) else {
+                return (String::new(), String::new(), String::new(), String::new(), empty_track());
+            };
+            let mut meta = item.artist.clone();
+            if let Some(album) = item.album.as_deref().filter(|album| !album.is_empty()) {
+                meta.push_str(" · ");
+                meta.push_str(album);
+            }
+            (
+                item.title.clone(),
+                meta,
+                format_ms(item.duration_ms),
+                item.provider.clone(),
+                item.to_track(),
+            )
+        }
+    }
+}
+
+fn search_entry_album(app: &App, entry: crate::app::SearchEntry) -> Option<String> {
+    match entry {
+        crate::app::SearchEntry::Artist(_) => None,
+        crate::app::SearchEntry::Album(index) => app.search.albums.get(index).map(|album| album.title.clone()),
+        crate::app::SearchEntry::Track(index) => app
+            .search
+            .results
+            .get(index)
+            .and_then(|item| item.album.clone()),
+    }
+}
+
+fn search_entry_artist(app: &App, entry: crate::app::SearchEntry) -> Option<String> {
+    match entry {
+        crate::app::SearchEntry::Artist(_) => None,
+        crate::app::SearchEntry::Album(index) => {
+            app.search.albums.get(index).map(|album| album.artist.clone())
+        }
+        crate::app::SearchEntry::Track(index) => app
+            .search
+            .results
+            .get(index)
+            .map(|item| item.artist.clone()),
+    }
+}
+
+fn empty_track() -> spote_protocol::TrackRef {
+    spote_protocol::TrackRef::new("", "", "")
 }
 
 pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
@@ -442,6 +793,7 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         frame_art(buf, layout.art, pal);
     }
     panel(
+        Some(app),
         buf,
         rect,
         pal,
@@ -636,6 +988,50 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             "enter sobre una sala para entrar · L para salir",
             Style::new().fg(color(pal.dim)),
             Alignment::Left,
+        );
+    }
+
+    // La antigua "sesión" cabe aquí en dos líneas: modo, viz, arte y tools.
+    if inner.height > 4 {
+        let tools = if app.tools.missing().is_empty() {
+            "mpv · ffmpeg · yt-dlp ok".to_string()
+        } else {
+            format!("faltan: {}", app.tools.missing().join(", "))
+        };
+        let mode = if app.room.is_some() {
+            "sala"
+        } else if app.follow_spotify {
+            "spotify"
+        } else if app.social.is_some() {
+            "servidor"
+        } else {
+            "local"
+        };
+        let sesion = format!(
+            "sesión · {mode} · viz {} · arte {} · {:.0} bpm",
+            app.viz.preset_name(),
+            app.art_mode.label(),
+            app.audio.bpm
+        );
+        let mut sesion = sesion;
+        truncate_chars(&mut sesion, inner.width as usize);
+        put(
+            buf,
+            inner.x,
+            rect.y + rect.height - 3,
+            &sesion,
+            color(pal.dim),
+            None,
+        );
+        let mut tools = tools;
+        truncate_chars(&mut tools, inner.width as usize);
+        put(
+            buf,
+            inner.x,
+            rect.y + rect.height - 2,
+            &tools,
+            color(if app.tools.missing().is_empty() { pal.dim } else { pal.warn }),
+            None,
         );
     }
 }

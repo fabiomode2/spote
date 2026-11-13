@@ -5,6 +5,7 @@
 
 pub mod artwork;
 pub mod audio;
+pub mod audio_map;
 pub mod catalog;
 pub mod config;
 pub mod discord;
