@@ -211,6 +211,13 @@ se re-resuelve el source sin perder playlists ni historial.
 
 ### 5.4 Letras (portado de lyricbar)
 
+**Implementado**: el motor de lyricbar se usa como proveedor principal a través
+de `scripts/lyricbar_bridge.py` (`[lyrics] bridge = true`). Se llama a su
+`LyricsService.resolve()` con el intérprete de su venv y se convierte el
+resultado a `LyricsDoc`; si el checkout no existe o falla, se cae al proveedor
+interno LRCLIB de Rust. Esto aporta Genius, captions de YouTube, reparto de
+letras planas y la caché de lyricbar sin reimplementarlo.
+
 Base: **LRCLIB** (`/api/get`, `/api/search`, `/api/get/{id}`), gratis y sin auth.
 Fallbacks: letra plana (Genius no da tiempos → reparto aproximado), y las
 auto-captions de YouTube que lyricbar ya usa para alinear mejor.
@@ -269,9 +276,14 @@ Modos (tecla `f` cicla):
   como modo artístico, no como default.
 - **`Braille`**: umbralización 2×4 por celda con braille, tinta plana del
   acento. Más "plotter", menos foto.
+- **`Gradient`**: degradado de la paleta + inicial del artista. Es el estado
+  "sin portada" y también un modo artístico más.
 - **Default: `Half`.** En una portada grande es el único que se lee como imagen
   (2 píxeles por celda) y sigue siendo "pixelado" a la vista. `A` cicla los
-  cuatro modos.
+  cinco modos y `r` activa la rotación automática (cada 24 s por defecto) con
+  disolución ordenada (Bayer) entre el arte viejo y el nuevo. Dither y braille
+  se muestrean a 2×2 celdas cuando el panel es grande, para que el patrón se vea
+  como pixel art y no como estática.
 - **`Off`**: solo gradiente de fondo.
 
 El arte se cachea en disco por `track_key` + tamaño + modo (`~/.cache/spote/art`),
@@ -312,10 +324,12 @@ small_image = "spote"   # nombre del asset cuando se suba el logo
 
 El nombre y los assets que se ven en el perfil salen de esa app. Cuando exista
 el logo de spote se sube en *Rich Presence → Art Assets* con el nombre `spote` y
-se activa `small_image`. Probar sin esperar a la TUI:
+se activa `small_image`. Puesta en marcha paso a paso, problemas típicos y qué
+límites tiene: **[`docs/discord-rich-presence.md`](docs/discord-rich-presence.md)**.
+Resumen:
 
 ```bash
-spote discord --id <application-id>
+spote discord --id <application-id> --save   # guarda el ID y prueba la conexión
 ```
 
 ## 6. Spotify: qué hay y qué no (estado verificado)
@@ -817,6 +831,24 @@ defaults de este documento.
   servidor real: unirse → recibir `RoomState` → cargar el fichero local → seek).
 - **Herramientas**: `scripts/frame.py` (captura la TUI en un pty, interpreta
   ANSI y genera HTML/PNG sin tmux), `scripts/ansi2html.py`, `scripts/shot.sh`.
+
+### Cambios de la ronda 2 (13-nov, madrugada)
+
+- Nombre configurable (`[app] name`).
+- Modo de arte `gradient` + rotación automática con disolución + muestreo 2×2
+  para dither/braille en paneles grandes.
+- `spote` usa **lyricbar** como proveedor de letras (`scripts/lyricbar_bridge.py`).
+- Buscar escribe directamente; `/` solo sirve para entrar en la vista.
+- Corazón visible en favoritas (lista, tarjetas y panel de ahora).
+- Cola: quitar (`x`/`×`/clic), reordenar (arrastrar, `shift ↑↓`, `, .`).
+- Lista y cola en **tarjetas** de 3 filas con miniatura (`z`).
+- Analizador con bombo/caja/charles/voz y BPM; la UI y los efectos laten con
+  cada instrumento.
+- Visualizador como **fondo** de toda la TUI (`b`), paneles translúcidos.
+- Clic en la portada o en la letra para que ocupen el centro (`c`, `C`).
+- Arregladas las mayúsculas: `A` ya no añade a la cola, y el resto de hotkeys
+  respetan shift.
+- `run.sh` y repo git inicializado.
 
 ### Nota sobre trabajo en paralelo
 

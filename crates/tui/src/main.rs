@@ -138,7 +138,8 @@ USO:
          [--flac] [--from-now] [--seconds N]
   spote harvest [<url>]            saca el audio descifrado de la memoria del
          [--step ms]               cliente saltando por la pista (2-4× más rápido)
-  spote discord --id <app-id>      prueba el Rich Presence de Discord
+  spote discord --id <app-id>      prueba el Rich Presence y guarda el ID
+         [--save] [--seconds N]
   spote doctor                     comprueba dependencias y rutas
   spote version | help
 

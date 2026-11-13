@@ -18,7 +18,6 @@ use spote_protocol::TrackRef;
 #[derive(Debug, Clone)]
 pub struct ArtRequest {
     pub key: String,
-    pub thumb: bool,
     pub url: Option<String>,
     pub local: Option<PathBuf>,
     pub w: u16,
@@ -338,7 +337,6 @@ mod tests {
         let worker = ArtWorker::start();
         worker.request(ArtRequest {
             key: "test".into(),
-            thumb: false,
             url: None,
             local: Some(path.to_path_buf()),
             w: 60,

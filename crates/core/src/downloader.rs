@@ -605,7 +605,22 @@ pub fn ingest_dir(lib: &mut Library, dir: &Path, copy_to: &Path) -> Result<Inges
             file_size(&destination),
         )?;
         if let Some(cover) = find_cover(&file) {
-            lib.set_art(&track.key, Some(&cover), None)?;
+            // La portada se copia al directorio de medios: la ruta original es
+            // temporal (carpeta de importación) y las miniaturas la necesitan.
+            let extension = cover
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("jpg");
+            let cover_dest = copy_to.join(format!(
+                "{}.{}",
+                util::slug(&track.key, 90),
+                extension
+            ));
+            if !cover_dest.exists() {
+                std::fs::copy(&cover, &cover_dest).ok();
+            }
+            let source = if cover_dest.exists() { cover_dest } else { cover };
+            lib.set_art(&track.key, Some(&source), None)?;
         }
         report.imported += 1;
     }

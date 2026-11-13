@@ -14,6 +14,8 @@ crates/
 
 ![spote](docs/screenshots/now.png)
 
+![tarjetas](docs/screenshots/cards.png)
+
 ## Requisitos
 
 `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. Para el visualizador con audio del
@@ -22,6 +24,8 @@ sistema, `parec` (PipeWire/PulseAudio). Rust 1.82+.
 ## Compilar y ejecutar
 
 ```bash
+./run.sh                               # compila si hace falta y abre la TUI
+./run.sh --follow-spotify              # modo acompañante de Spotify
 cargo build --release
 ./target/release/spote                 # TUI (modo local)
 ./target/release/spote --follow-spotify # acompaña al cliente oficial por MPRIS
@@ -55,10 +59,31 @@ fps = 60
 ## Teclas
 
 `space` play/pausa · `←/→` seek ±5 s (`shift` ±30 s) · `↑/↓` selección ·
-`enter` reproducir / unirse a sala · `a` encolar · `f` favorita · `/` buscar ·
-`tab` cambiar vista · `t` seguir Spotify · `v` siguiente visualización ·
-`V` visualización a pantalla completa · `e` capas · `A` modo de arte ·
-`F` portada a pantalla completa · `m` mute · `y` copiar letra · `?` ayuda.
+`enter` reproducir / unirse a sala · `a` encolar · `x` quitar de la cola ·
+`shift ↑/↓` o `, .` mover por la cola · `f` favorita · `/` buscar (en la vista
+de buscar ya escribes directamente) · `tab` cambiar vista · `t` seguir Spotify
+(también el chip `○ spotify` de la barra) · `v` siguiente visualización ·
+`V` visualización a pantalla completa · `b` visualizador de fondo ·
+`c` portada a todo el centro · `C` letra a todo el centro · `e` capas ·
+`A` siguiente modo de arte · `r` rotación automática del arte · `z` lista
+compacta / tarjetas · `F` portada a pantalla completa · `m` mute · `y` copiar
+letra · `?` ayuda.
+
+## Extras
+
+- **Arte rotando**: cada 24 s cambia entre `half`, `dither`, `braille` y
+  `gradient` con disolución progresiva (`r` lo activa/desactiva, `A` cambia a
+  mano).
+- **Tarjetas**: `z` muestra la lista y la cola en bloques de 3 filas con
+  miniatura de portada, artista y estado.
+- **Instrumentos**: el analizador detecta bombo, caja, charles y voz; los
+  bordes, la portada, el playhead y las letras laten con ellos, y el BPM se
+  estima con los bombos.
+- **Letras de lyricbar**: si existe `/home/fabio/Code/lyricbar`, spote usa su
+  motor (LRCLIB + Genius + captions) vía `scripts/lyricbar_bridge.py`;
+  `[lyrics] bridge = false` lo desactiva.
+- **Visualizador de fondo**: `b` pinta los efectos por toda la TUI, con los
+  paneles ligeramente translúcidos.
 
 ## Documentación
 

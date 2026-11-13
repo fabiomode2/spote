@@ -1235,7 +1235,6 @@ impl App {
             .or_else(|| self.lib.art_url(&track.key).ok().flatten());
         self.art_worker.request(ArtRequest {
             key: track.key,
-            thumb: false,
             url,
             local,
             w,
@@ -1264,7 +1263,6 @@ impl App {
             .or_else(|| self.lib.art_url(&track.key).ok().flatten());
         self.art_worker.request(ArtRequest {
             key: track.key.clone(),
-            thumb: true,
             url,
             local,
             w: 6,
@@ -1718,14 +1716,6 @@ impl App {
         self.load_lyrics(&track);
     }
 
-    fn queue_search_selection(&mut self) {
-        let Some(item) = self.search.results.get(self.search.selected).cloned() else {
-            return;
-        };
-        let track = item.to_track();
-        self.queue_track(track, Some(item.url));
-    }
-
     fn copy_lyrics(&mut self) {
         let Some(doc) = &self.lyrics else {
             return;
@@ -1812,7 +1802,7 @@ impl App {
                             }
                         }
                     }
-                    Action::SelectRow(index) | Action::QueueRow(index) => {
+                    Action::SelectRow(index) => {
                         let now = Instant::now();
                         let double = self
                             .last_click

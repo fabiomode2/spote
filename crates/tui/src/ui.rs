@@ -570,7 +570,7 @@ fn local_offset_secs() -> i64 {
 fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.nav;
     let focused = app.focus == crate::app::Pane::Nav;
-    panel(buf, rect, pal, focused, 0.55, Some("spote"), app.audio.kick_pulse);
+    panel(buf, rect, pal, focused, 0.55, Some("vistas"), app.audio.kick_pulse);
     app.hit.add(rect, Action::Focus(crate::app::Pane::Nav));
 
     let mut y = rect.y + 2;
@@ -863,11 +863,7 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
                 color(if favorite { pal.error } else { pal.dim }),
                 None,
             );
-            app.hit.add(
-                Rect::new(badge_x, y, 2, 1),
-                Action::Favorite,
-            );
-            badge_x += 3;
+            app.hit.add(Rect::new(badge_x, y, 2, 1), Action::Favorite);
         }
         y += 2;
     }
@@ -880,15 +876,6 @@ fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     );
     app.hit.add(lyrics_rect, Action::CenterLyrics);
     draw_lyrics(app, buf, lyrics_rect, pal);
-    if !lyrics_focus && lyrics_rect.height > 2 {
-        text_at(
-            buf,
-            Rect::new(lyrics_rect.x, lyrics_rect.y + lyrics_rect.height - 1, lyrics_rect.width, 1),
-            "C  ·  letra a pantalla completa",
-            Style::new().fg(color(pal.dim)),
-            Alignment::Right,
-        );
-    }
 }
 
 /// Placeholder cuando no hay portada: degradado del tema + inicial del artista.
@@ -1376,6 +1363,7 @@ fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
         let selected = index == app.selected;
         let hover = app.hover == Some(Action::SelectRow(index));
         let card = Rect::new(inner.x, y, inner.width, card_h);
+        fill_soft(buf, card, mix(pal.bg, pal.surface, 0.45), 1.0, pal.bg);
         if selected {
             fill(buf, card, mix(pal.surface, pal.primary, 0.18));
         } else if hover {
@@ -1834,6 +1822,72 @@ fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
             Style::new().fg(color(pal.dim)),
             Alignment::Left,
         );
+    } else if app.list_cards {
+        let card_h = 3u16;
+        let visible = (inner.height / card_h).max(1) as usize;
+        let start = app.queue_selected.saturating_sub(visible / 2);
+        let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
+        for offset in 0..visible {
+            let index = start + offset;
+            if index >= queue_len || inner.y + (offset as u16 + 1) * card_h > inner.y + inner.height {
+                break;
+            }
+            let y = inner.y + offset as u16 * card_h;
+            let card = Rect::new(inner.x, y, inner.width, card_h);
+            fill_soft(buf, card, mix(pal.bg, pal.surface, 0.5), 1.0, pal.bg);
+            let selected = index == app.queue_selected;
+            if selected {
+                fill(buf, card, mix(pal.surface, pal.primary, 0.18));
+            }
+            let (title, artist, path_pending) = if app.room_queue.is_empty() {
+                let entry = &app.queue[index];
+                (
+                    entry.track.title.clone(),
+                    entry.track.artist.clone(),
+                    entry.path.is_none(),
+                )
+            } else {
+                let item = &app.room_queue[index];
+                (item.track.title.clone(), item.track.artist.clone(), false)
+            };
+            let thumb = Rect::new(card.x + 1, y, 5, card_h);
+            let track_ref = if app.room_queue.is_empty() {
+                app.queue[index].track.clone()
+            } else {
+                app.room_queue[index].track.clone()
+            };
+            draw_thumb(app, buf, thumb, &track_ref, pal);
+            let text_x = thumb.x + thumb.width + 1;
+            let text_w = (card.x + card.width).saturating_sub(text_x + 3);
+            let mut title = title;
+            title.truncate(text_w as usize);
+            put(
+                buf,
+                text_x,
+                y,
+                &title,
+                color(if selected { pal.text } else { pal.muted }),
+                None,
+            );
+            let mut artist = artist;
+            if path_pending {
+                artist.push_str("  ·  ↓");
+            }
+            artist.truncate(text_w as usize);
+            put(buf, text_x, y + 1, &artist, color(pal.dim), None);
+            put(
+                buf,
+                text_x,
+                y + 2,
+                &format!("{:>2}  ·  {}", index + 1, if path_pending { "pendiente" } else { "lista" }),
+                color(pal.dim),
+                None,
+            );
+            let remove_rect = Rect::new(card.x + card.width - 2, y, 2, 1);
+            put(buf, remove_rect.x, y, "×", color(pal.error), None);
+            app.hit.add(remove_rect, Action::QueueRemove(index));
+            app.hit.add(card, Action::QueueRow(index));
+        }
     } else {
         let visible = inner.height.saturating_sub(1) as usize;
         let start = app.queue_selected.saturating_sub(visible / 2);
