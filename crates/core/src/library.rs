@@ -1,7 +1,8 @@
 //! Librería local: SQLite con FTS5. Es la única fuente de verdad del cliente.
 
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -58,6 +59,29 @@ impl TrackRow {
     }
 }
 
+/// Álbum agrupado de la biblioteca.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumRow {
+    pub album: String,
+    pub artist: String,
+    pub track_count: i64,
+    pub ready_count: i64,
+    pub duration_ms: u64,
+    pub art_path: Option<PathBuf>,
+    pub art_url: Option<String>,
+    pub favorite_count: u32,
+}
+
+impl AlbumRow {
+    pub fn label(&self) -> String {
+        format!("{} · {}", self.artist, self.album)
+    }
+
+    pub fn playable(&self) -> bool {
+        self.ready_count > 0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Playlist {
     pub id: i64,
@@ -73,6 +97,11 @@ pub struct Playlist {
 pub struct Library {
     conn: Connection,
     path: PathBuf,
+    /// La UI pregunta por estos totales varias veces por frame (barra, panel,
+    /// leyenda). SQLite es rápido, pero no gratis a 120 fps.
+    count_cache: Cell<Option<(Instant, i64)>>,
+    ready_cache: Cell<Option<(Instant, i64)>>,
+    playlists_cache: RefCell<Option<(Instant, Vec<Playlist>)>>,
 }
 
 impl Library {
@@ -85,6 +114,9 @@ impl Library {
         let mut lib = Self {
             conn,
             path: path.to_path_buf(),
+            count_cache: Cell::new(None),
+            ready_cache: Cell::new(None),
+            playlists_cache: RefCell::new(None),
         };
         lib.configure()?;
         lib.migrate()?;
@@ -96,6 +128,9 @@ impl Library {
         let mut lib = Self {
             conn,
             path: PathBuf::from(":memory:"),
+            count_cache: Cell::new(None),
+            ready_cache: Cell::new(None),
+            playlists_cache: RefCell::new(None),
         };
         lib.configure()?;
         lib.migrate()?;
@@ -174,6 +209,11 @@ impl Library {
               key   TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS track_trim(
+              track_id INTEGER PRIMARY KEY REFERENCES track(id) ON DELETE CASCADE,
+              start_ms INTEGER NOT NULL DEFAULT 0,
+              end_ms   INTEGER
+            );
             CREATE INDEX IF NOT EXISTS idx_track_artist ON track(artist);
             CREATE INDEX IF NOT EXISTS idx_track_added ON track(added_at DESC);
             CREATE INDEX IF NOT EXISTS idx_source_status ON source(status);
@@ -227,6 +267,7 @@ impl Library {
 
     /// Inserta o actualiza una canción canónica. Devuelve su id local.
     pub fn upsert_track(&mut self, track: &TrackRef) -> Result<i64> {
+        self.count_cache.set(None);
         let now = now_ms();
         self.conn.execute(
             r#"
@@ -268,6 +309,7 @@ impl Library {
         status: SourceStatus,
         size: Option<u64>,
     ) -> Result<()> {
+        self.ready_cache.set(None);
         let ext = path.and_then(|p| p.extension()).and_then(|e| e.to_str());
         self.conn.execute(
             r#"
@@ -412,6 +454,56 @@ impl Library {
         Ok(rows)
     }
 
+    /// Álbumes de la biblioteca agrupados por artista+álbum, con su portada y
+    /// cuántas pistas hay descargadas. Es la base de la pantalla de álbumes.
+    pub fn albums(&self) -> Result<Vec<AlbumRow>> {
+        let sql = r#"
+            SELECT t.album, t.artist, count(*),
+                   sum(CASE WHEN s.status = 'ready' THEN 1 ELSE 0 END),
+                   sum(t.duration_ms),
+                   max(coalesce(t.art_path, '')),
+                   max(coalesce(t.art_url, '')),
+                   sum(t.favorite)
+            FROM track t
+            LEFT JOIN source s ON s.track_id = t.id
+              AND s.id = (SELECT id FROM source x WHERE x.track_id = t.id
+                          ORDER BY (x.status = 'ready') DESC, x.id DESC LIMIT 1)
+            WHERE t.album IS NOT NULL AND t.album <> ''
+            GROUP BY t.album, t.artist
+            ORDER BY t.artist COLLATE NOCASE, t.album COLLATE NOCASE
+        "#;
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let path: String = row.get(5)?;
+                let url: String = row.get(6)?;
+                Ok(AlbumRow {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                    track_count: row.get(2)?,
+                    ready_count: row.get(3)?,
+                    duration_ms: row.get::<_, i64>(4)?.max(0) as u64,
+                    art_path: (!path.is_empty()).then(|| PathBuf::from(path)),
+                    art_url: (!url.is_empty()).then_some(url),
+                    favorite_count: row.get::<_, i64>(7)?.max(0) as u32,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Pistas de un álbum concreto, en orden de inserción.
+    pub fn album_tracks(&self, album: &str, artist: &str) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "{SELECT_TRACK} WHERE t.album = ?1 AND t.artist = ?2 ORDER BY t.id"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![album, artist], row_to_track)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn recent(&self, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!("{SELECT_TRACK} ORDER BY t.added_at DESC, t.id DESC LIMIT ?1");
         let mut stmt = self.conn.prepare(&sql)?;
@@ -468,15 +560,29 @@ impl Library {
     }
 
     pub fn count(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT count(*) FROM track", [], |r| r.get(0))?)
+        if let Some((at, value)) = self.count_cache.get() {
+            if at.elapsed() < Duration::from_millis(250) {
+                return Ok(value);
+            }
+        }
+        let value = self.conn.query_row("SELECT count(*) FROM track", [], |r| r.get(0))?;
+        self.count_cache.set(Some((Instant::now(), value)));
+        Ok(value)
     }
 
     pub fn ready_count(&self) -> Result<i64> {
-        Ok(self.conn.query_row(
+        if let Some((at, value)) = self.ready_cache.get() {
+            if at.elapsed() < Duration::from_millis(250) {
+                return Ok(value);
+            }
+        }
+        let value = self.conn.query_row(
             "SELECT count(*) FROM source WHERE status = 'ready'",
             [],
             |r| r.get(0),
-        )?)
+        )?;
+        self.ready_cache.set(Some((Instant::now(), value)));
+        Ok(value)
     }
 
     pub fn record_play(&mut self, key: &str, ms_played: u64, completed: bool) -> Result<()> {
@@ -543,6 +649,47 @@ impl Library {
         Ok(self.lyrics(key)?.map(|(_, _, offset)| offset).unwrap_or(0))
     }
 
+    // -------------------------------------------------------------- recorte
+    /// Recorte persistente de una pista: intro a saltar y final opcional.
+    pub fn trim(&self, key: &str) -> Result<(u64, Option<u64>)> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT t.start_ms, t.end_ms FROM track_trim t
+                 JOIN track k ON k.id = t.track_id WHERE k.key = ?1",
+                params![key],
+                |r| Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        Ok(row
+            .map(|(start, end)| (start, end.map(|v| v.max(0) as u64)))
+            .unwrap_or((0, None)))
+    }
+
+    pub fn set_trim(&mut self, key: &str, start_ms: u64, end_ms: Option<u64>) -> Result<()> {
+        let Some(id) = self
+            .conn
+            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| r.get::<_, i64>(0))
+            .optional()?
+        else {
+            return Ok(());
+        };
+        self.conn.execute(
+            r#"INSERT INTO track_trim(track_id, start_ms, end_ms) VALUES (?1, ?2, ?3)
+               ON CONFLICT(track_id) DO UPDATE SET start_ms = excluded.start_ms, end_ms = excluded.end_ms"#,
+            params![id, start_ms as i64, end_ms.map(|v| v as i64)],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_trim(&mut self, key: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM track_trim WHERE track_id = (SELECT id FROM track WHERE key = ?1)",
+            params![key],
+        )?;
+        Ok(())
+    }
+
     // --------------------------------------------------------------- arte
     pub fn art_path(&self, key: &str) -> Result<Option<PathBuf>> {
         let value: Option<String> = self
@@ -575,6 +722,11 @@ impl Library {
 
     // ---------------------------------------------------------- playlists
     pub fn playlists(&self) -> Result<Vec<Playlist>> {
+        if let Some((at, rows)) = self.playlists_cache.borrow().as_ref() {
+            if at.elapsed() < Duration::from_millis(250) {
+                return Ok(rows.clone());
+            }
+        }
         let mut stmt = self.conn.prepare(
             "SELECT p.id, p.name, (SELECT count(*) FROM playlist_item i WHERE i.playlist_id = p.id),
                     p.description, p.cover_key, p.cover_url
@@ -592,6 +744,7 @@ impl Library {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        *self.playlists_cache.borrow_mut() = Some((Instant::now(), rows.clone()));
         Ok(rows)
     }
 
@@ -608,6 +761,7 @@ impl Library {
         cover_key: Option<&str>,
         cover_url: Option<&str>,
     ) -> Result<i64> {
+        *self.playlists_cache.borrow_mut() = None;
         self.conn.execute(
             "INSERT INTO playlist(name, description, cover_key, cover_url, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -617,6 +771,7 @@ impl Library {
     }
 
     pub fn delete_playlist(&mut self, playlist_id: i64) -> Result<()> {
+        *self.playlists_cache.borrow_mut() = None;
         self.conn
             .execute("DELETE FROM playlist WHERE id = ?1", params![playlist_id])?;
         Ok(())
@@ -704,6 +859,7 @@ impl Library {
     }
 
     pub fn add_to_playlist(&mut self, playlist_id: i64, key: &str) -> Result<()> {
+        *self.playlists_cache.borrow_mut() = None;
         self.conn.execute(
             r#"
             INSERT OR IGNORE INTO playlist_item(playlist_id, track_id, position)
@@ -716,6 +872,7 @@ impl Library {
     }
 
     pub fn remove_from_playlist(&mut self, playlist_id: i64, key: &str) -> Result<()> {
+        *self.playlists_cache.borrow_mut() = None;
         self.conn.execute(
             "DELETE FROM playlist_item WHERE playlist_id = ?1
              AND track_id = (SELECT id FROM track WHERE key = ?2)",
@@ -738,6 +895,67 @@ impl Library {
             "INSERT INTO setting(key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// Borra una pista de la biblioteca (fuentes, listas, letras y eventos
+    /// caen en cascada). Devuelve la ruta del audio para poder borrarla del
+    /// disco si el usuario lo pide.
+    pub fn delete_track(&mut self, key: &str) -> Result<Option<PathBuf>> {
+        self.count_cache.set(None);
+        self.ready_cache.set(None);
+        *self.playlists_cache.borrow_mut() = None;
+        let path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT s.path FROM source s JOIN track t ON t.id = s.track_id
+                 WHERE t.key = ?1 AND s.path IS NOT NULL
+                 ORDER BY (s.status = 'ready') DESC LIMIT 1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        self.conn
+            .execute("DELETE FROM track WHERE key = ?1", params![key])?;
+        Ok(path.map(PathBuf::from))
+    }
+
+    /// Pistas a las que les falta portada, para el backfill desde Spotify.
+    pub fn tracks_without_art(&self, limit: usize) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "{SELECT_TRACK}
+             WHERE t.art_path IS NULL AND t.art_url IS NULL
+             ORDER BY t.added_at DESC LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64], row_to_track)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Actualiza metadatos que llegan de Spotify/Deezer sin pisar lo que ya
+    /// había con datos peores (álbum vacío, duración 0...).
+    pub fn update_metadata(
+        &mut self,
+        key: &str,
+        artist: &str,
+        title: &str,
+        album: Option<&str>,
+        duration_ms: u64,
+        art_url: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE track SET
+                 artist = CASE WHEN ?2 <> '' THEN ?2 ELSE artist END,
+                 title = CASE WHEN ?3 <> '' THEN ?3 ELSE title END,
+                 album = coalesce(?4, album),
+                 duration_ms = CASE WHEN ?5 > 0 THEN ?5 ELSE duration_ms END,
+                 art_url = coalesce(?6, art_url)
+               WHERE key = ?1"#,
+            params![key, artist, title, album, duration_ms as i64, art_url],
         )?;
         Ok(())
     }
@@ -806,6 +1024,39 @@ mod tests {
             art_url: None,
             source_hint: None,
         }
+    }
+
+    #[test]
+    fn albums_group_tracks_and_keep_cover() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let mut first = track("k1", "One", "Artist");
+        first.album = Some("Album".into());
+        first.art_url = Some("https://example.com/a.jpg".into());
+        let mut second = track("k2", "Two", "Artist");
+        second.album = Some("Album".into());
+        let mut other = track("k3", "Three", "Other");
+        other.album = Some("Another".into());
+        for item in [&first, &second, &other] {
+            lib.upsert_track(item).unwrap();
+        }
+        let albums = lib.albums().unwrap();
+        assert_eq!(albums.len(), 2);
+        let album = albums.iter().find(|a| a.album == "Album").unwrap();
+        assert_eq!(album.artist, "Artist");
+        assert_eq!(album.track_count, 2);
+        assert_eq!(album.art_url.as_deref(), Some("https://example.com/a.jpg"));
+        assert_eq!(lib.album_tracks("Album", "Artist").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delete_track_removes_sources_and_playlists() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
+        let list = lib.create_playlist("List").unwrap();
+        lib.add_to_playlist(list, "k").unwrap();
+        assert!(lib.delete_track("k").unwrap().is_none());
+        assert_eq!(lib.playlist_tracks(list).unwrap().len(), 0);
+        assert!(lib.track_by_key("k").unwrap().is_none());
     }
 
     #[test]
@@ -908,6 +1159,17 @@ mod tests {
         assert!(synced);
         lib.set_lyrics_offset("sha1:a", 250).unwrap();
         assert_eq!(lib.lyrics_offset("sha1:a").unwrap(), 250);
+    }
+
+    #[test]
+    fn trim_roundtrip_is_persistent_and_reversible() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&track("sha1:trim", "A", "X")).unwrap();
+        assert_eq!(lib.trim("sha1:trim").unwrap(), (0, None));
+        lib.set_trim("sha1:trim", 12_500, Some(180_000)).unwrap();
+        assert_eq!(lib.trim("sha1:trim").unwrap(), (12_500, Some(180_000)));
+        lib.clear_trim("sha1:trim").unwrap();
+        assert_eq!(lib.trim("sha1:trim").unwrap(), (0, None));
     }
 
     #[test]

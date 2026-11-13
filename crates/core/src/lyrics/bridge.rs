@@ -166,6 +166,7 @@ pub fn fetch(bridge: &BridgeConfig, track: &TrackRef) -> Result<Option<LyricsDoc
             end_ms: line.end_ms.unwrap_or(0),
             text: line.text,
             words: Vec::new(),
+            words_exact: false,
         })
         .collect();
     lines.sort_by_key(|line| line.start_ms);

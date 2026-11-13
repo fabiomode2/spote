@@ -8,6 +8,7 @@ use spote_protocol::TrackRef;
 
 mod bridge;
 mod remote;
+mod text;
 
 /// Palabra con tiempos (tags `<mm:ss.xx>` dentro de una línea LRC mejorada).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -23,6 +24,9 @@ pub struct LyricLine {
     pub end_ms: u64,
     pub text: String,
     pub words: Vec<Word>,
+    /// `true` si los tiempos de palabra vienen de tags LRC mejorados; `false`
+    /// si se repartieron por sílabas (la UI puede refinarlos con el audio).
+    pub words_exact: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,6 +61,30 @@ pub struct LyricsDoc {
     pub offset_ms: i64,
 }
 
+/// Una línea es "de fondo" cuando todo su contenido va entre paréntesis o
+/// corchetes: `(oh oh)`, `[yeah]`, `(background vocals)`. Esas líneas no deben
+/// robar la línea activa a la letra principal; si no, el karaoke se queda
+/// esperando adlibs mientras la voz principal ya avanzó.
+pub fn is_background_line(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut has_outside = false;
+    for ch in text.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 && !ch.is_whitespace() && !ch.is_ascii_punctuation() => {
+                has_outside = true;
+            }
+            _ => {}
+        }
+    }
+    !has_outside
+}
+
 impl LyricsDoc {
     /// Reconstruye un documento desde LRC cacheado. `synced` manda sobre lo que
     /// detecte el parser: una letra plana sigue siendo plana aunque el texto
@@ -82,14 +110,21 @@ impl LyricsDoc {
             return None;
         }
         let target = (ms as i64 + self.offset_ms).max(0) as u64;
-        match self
+        let mut index = match self
             .lines
             .binary_search_by(|line| line.start_ms.cmp(&target))
         {
-            Ok(index) => Some(index),
-            Err(0) => None,
-            Err(next) => Some(next - 1),
+            Ok(index) => index,
+            Err(0) => return None,
+            Err(next) => next - 1,
+        };
+        // Si la marca actual es un adlib entre paréntesis, la línea activa
+        // sigue siendo la última letra principal. Así no se queda "atascada"
+        // esperando coros de fondo.
+        while index > 0 && is_background_line(&self.lines[index].text) {
+            index -= 1;
         }
+        Some(index)
     }
 
     /// Línea activa y progreso dentro de ella (0..1).
@@ -214,37 +249,60 @@ impl Default for LyricsService {
 /// Parsea LRC (con o sin tags de palabra) a un documento utilizable.
 ///
 /// Reglas:
-/// - Tags `[mm:ss.xx]` o `[mm:ss:xx]`; varias marcas por línea comparten texto.
-/// - Tags `[ti:]`, `[ar:]`, `[al:]`, `[by:]`, `[offset:]` se ignoran salvo
-///   `offset`, que se aplica al documento.
-/// - Las líneas sin tiempo al principio (letra plana) se reparten si no hay
-///   ninguna marca temporal.
-/// - `end_ms` de cada línea = inicio de la siguiente; la última usa +6 s.
+/// - Varias marcas por línea (`[00:12.34][00:30.00]`) comparten texto.
+/// - Timestamps `[mm:ss]`, con 1, 2 o 3 decimales y también con coma o con
+///   `[mm:ss:xx]` (variante antigua).
+/// - `[offset:±NNN]` se guarda en el documento (la UI suma su propio ajuste).
+/// - `[ti:]`, `[ar:]`, `[al:]`, `[by:]`, `[length:]` y similares son metadatos y
+///   no llegan a las líneas; `[Verse 1]`, `[Chorus]`… tampoco.
+/// - Los tags `<mm:ss.xx>` de palabra se aceptan absolutos (lo normal) y
+///   relativos al inicio de la línea (lo que escriben algunos editores).
+/// - Las marcas sin texto son huecos instrumentales: se pintan con `♪`, igual
+///   que los silencios largos entre dos versos.
+/// - Si no hay ninguna marca temporal, las líneas se reparten de forma
+///   aproximada (4 s por línea) y el documento queda como no sincronizado.
 pub fn parse_lrc(text: &str) -> LyricsDoc {
     let mut doc = LyricsDoc::default();
     let mut timed: Vec<LyricLine> = Vec::new();
     let mut plain: Vec<String> = Vec::new();
 
     for raw in text.lines() {
-        let mut rest = raw.trim();
-        if rest.is_empty() {
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw).trim();
+        if raw.is_empty() {
             continue;
         }
-        let mut stamps: Vec<u64> = Vec::new();
-        loop {
-            if !rest.starts_with('[') {
-                break;
-            }
+        // Etiquetas `[...]` al principio de la línea: tiempos, metadatos o
+        // títulos de sección. Solo los tiempos cuentan; el resto se tira.
+        let mut tags: Vec<&str> = Vec::new();
+        let mut rest = raw;
+        while rest.starts_with('[') {
             let Some(end) = rest.find(']') else { break };
-            let tag = &rest[1..end];
-            if let Some(ms) = parse_timestamp(tag) {
-                stamps.push(ms);
-            } else if let Some(value) = tag.strip_prefix("offset:") {
-                doc.offset_ms = value.trim().parse::<i64>().unwrap_or(0);
-            }
+            tags.push(&rest[1..end]);
             rest = rest[end + 1..].trim_start();
         }
-        let (body, words) = split_words(rest);
+        let mut stamps: Vec<u64> = Vec::new();
+        let mut leftover = String::new();
+        for tag in tags {
+            if let Some(ms) = parse_timestamp(tag) {
+                stamps.push(ms);
+            } else if let Some(offset) = parse_offset(tag) {
+                doc.offset_ms = offset;
+            } else if is_metadata_tag(tag) || is_section_label(tag) {
+                // Metadato o marca de sección: no es letra.
+            } else {
+                // Un corchete que no reconocemos se conserva como texto.
+                leftover.push('[');
+                leftover.push_str(tag);
+                leftover.push(']');
+                leftover.push(' ');
+            }
+        }
+        let source = if leftover.is_empty() {
+            rest.to_string()
+        } else {
+            format!("{leftover}{rest}")
+        };
+        let (body, words) = split_words(&source);
         if stamps.is_empty() {
             if !body.is_empty() {
                 plain.push(body);
@@ -252,19 +310,7 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
             continue;
         }
         for stamp in stamps {
-            timed.push(LyricLine {
-                start_ms: stamp,
-                end_ms: 0,
-                text: body.clone(),
-                words: words
-                    .iter()
-                    .map(|(ms, text)| Word {
-                        start_ms: stamp + ms,
-                        end_ms: 0,
-                        text: text.clone(),
-                    })
-                    .collect(),
-            });
+            timed.push(build_line(stamp, &body, &words));
         }
     }
 
@@ -277,6 +323,7 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
                 end_ms: (i as u64 + 1) * 4_000,
                 text: line.clone(),
                 words: Vec::new(),
+                words_exact: false,
             });
         }
         doc.synced = false;
@@ -285,22 +332,69 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
     }
 
     timed.sort_by_key(|line| line.start_ms);
-    let count = timed.len();
-    for i in 0..count {
-        let next = timed
-            .get(i + 1)
-            .map(|line| line.start_ms)
-            .unwrap_or(timed[i].start_ms + 6_000);
-        // Hueco instrumental largo → línea `♪` para que la UI no se quede muda.
-        timed[i].end_ms = next;
-        if let Some(words) = word_times(timed[i].start_ms, next, &timed[i].text) {
-            if timed[i].words.is_empty() {
-                timed[i].words = words;
-            }
+    // Marcas repetidas con el mismo texto (LRC generados por herramientas).
+    timed.dedup_by(|a, b| a.start_ms == b.start_ms && a.text == b.text);
+    for line in &mut timed {
+        if line.text.is_empty() || is_instrumental_text(&line.text) {
+            line.text = INSTRUMENTAL_MARK.to_string();
+            line.words.clear();
+            line.words_exact = false;
         }
     }
-    // Rellena el final de las palabras con el inicio de la siguiente.
-    for line in &mut timed {
+    // Un `[mm:ss]` vacío al final es la convención de "aquí acaba el último
+    // verso": se usa como final en vez de pintarse como una línea más.
+    let closing = match timed.last() {
+        Some(last)
+            if last.text == INSTRUMENTAL_MARK
+                && timed.iter().any(|line| line.text != INSTRUMENTAL_MARK) =>
+        {
+            let start = last.start_ms;
+            timed.pop();
+            Some(start)
+        }
+        _ => None,
+    };
+
+    let mut out: Vec<LyricLine> = Vec::with_capacity(timed.len() + 4);
+    let mut iter = timed.into_iter().peekable();
+    while let Some(mut line) = iter.next() {
+        let boundary = iter.peek().map(|next| next.start_ms).or(closing);
+        let estimate = line_estimate_ms(&line);
+        let Some(end) = boundary.filter(|end| *end > line.start_ms) else {
+            line.end_ms = line.start_ms + estimate;
+            out.push(line);
+            continue;
+        };
+        // Hueco instrumental largo → línea `♪` para que la UI no se quede
+        // mostrando un verso ya cantado durante medio minuto.
+        if end.saturating_sub(line.start_ms) > GAP_MARK_MS && line.text != INSTRUMENTAL_MARK {
+            line.end_ms = line.start_ms + estimate.min(end - line.start_ms);
+            let marker_start = line.end_ms;
+            out.push(line);
+            out.push(LyricLine {
+                start_ms: marker_start,
+                end_ms: end,
+                text: INSTRUMENTAL_MARK.to_string(),
+                ..LyricLine::default()
+            });
+        } else {
+            line.end_ms = end;
+            out.push(line);
+        }
+    }
+    // El orden de inserción del hueco tiene que quedar creciente y sin dos
+    // marcas instrumentales pegadas.
+    out.sort_by_key(|line| line.start_ms);
+    out.dedup_by(|a, b| a.text == INSTRUMENTAL_MARK && b.text == INSTRUMENTAL_MARK);
+
+    for line in &mut out {
+        if line.words.is_empty() {
+            if let Some(words) = word_times(line.start_ms, line.end_ms, &line.text) {
+                line.words = words;
+                line.words_exact = false;
+            }
+        }
+        // Rellena el final de las palabras con el inicio de la siguiente.
         let end = line.end_ms;
         let starts: Vec<u64> = line.words.iter().map(|word| word.start_ms).collect();
         for (i, word) in line.words.iter_mut().enumerate() {
@@ -308,33 +402,194 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
         }
     }
 
-    doc.lines = timed;
+    doc.instrumental = !out.is_empty() && out.iter().all(|line| line.text == INSTRUMENTAL_MARK);
+    doc.lines = out;
     doc.synced = true;
     doc.source = LyricsSource::Lrclib;
     doc
 }
 
-fn parse_timestamp(tag: &str) -> Option<u64> {
-    let mut parts = tag.split([':', '.']);
-    let minutes: u64 = parts.next()?.trim().parse().ok()?;
-    let seconds: u64 = parts.next()?.trim().parse().ok()?;
-    let frac_raw = parts.next().unwrap_or("0").trim();
-    let frac: u64 = match frac_raw.len() {
-        0 => 0,
-        1 => frac_raw.parse::<u64>().ok()? * 100,
-        2 => frac_raw.parse::<u64>().ok()? * 10,
-        _ => frac_raw[..3].parse::<u64>().ok()?,
+/// Marca de hueco instrumental.
+const INSTRUMENTAL_MARK: &str = "♪";
+/// Silencio a partir del cual se pinta una línea instrumental entre dos versos.
+const GAP_MARK_MS: u64 = 12_000;
+/// Duración estimada de un verso sin tags de palabra.
+const LINE_ESTIMATE_MIN_MS: u64 = 2_500;
+const LINE_ESTIMATE_MAX_MS: u64 = 8_000;
+const LINE_MS_PER_CHAR: u64 = 75;
+
+/// Construye una línea temporal con sus palabras (si el LRC las trae).
+fn build_line(stamp: u64, body: &str, words: &[(u64, String)]) -> LyricLine {
+    // Los tags de palabra suelen ser absolutos (`<00:12.00>` = 12 s de canción).
+    // Si vienen muy por debajo del inicio de la línea son relativos a ella.
+    let base = match words.first() {
+        Some((first, _)) if *first + 1_000 < stamp => stamp,
+        _ => 0,
     };
-    if seconds >= 60 && !tag.contains(':') {
+    let mut timed: Vec<Word> = words
+        .iter()
+        .map(|(ms, text)| Word {
+            start_ms: (base + ms).max(stamp),
+            end_ms: 0,
+            text: text.clone(),
+        })
+        .collect();
+    timed.sort_by_key(|word| word.start_ms);
+    timed.dedup_by(|a, b| a.start_ms == b.start_ms && a.text == b.text);
+    LyricLine {
+        start_ms: stamp,
+        end_ms: 0,
+        text: body.to_string(),
+        words_exact: !timed.is_empty(),
+        words: timed,
+    }
+}
+
+fn line_estimate_ms(line: &LyricLine) -> u64 {
+    if let Some(last) = line.words.last() {
+        let span = last.end_ms.saturating_sub(line.start_ms);
+        if span > 0 {
+            return span.clamp(LINE_ESTIMATE_MIN_MS, LINE_ESTIMATE_MAX_MS);
+        }
+    }
+    let chars = line.text.chars().count() as u64;
+    (chars * LINE_MS_PER_CHAR).clamp(LINE_ESTIMATE_MIN_MS, LINE_ESTIMATE_MAX_MS)
+}
+
+fn is_instrumental_text(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let lower = lower.trim().trim_matches(|ch: char| !ch.is_alphanumeric());
+    matches!(lower, "instrumental" | "instrumental break" | "interludio")
+}
+
+/// `[offset:+500]`, `[offset:-120]` o `[offset: 30 ]`.
+fn parse_offset(tag: &str) -> Option<i64> {
+    let (key, value) = tag.split_once(':')?;
+    if !key.trim().eq_ignore_ascii_case("offset") {
+        return None;
+    }
+    let value = value
+        .trim()
+        .trim_start_matches('+')
+        .replace([' ', '\t'], "");
+    value.parse::<i64>().ok()
+}
+
+/// Claves de metadatos del estándar LRC (y primas de ID3).
+const METADATA_KEYS: &[&str] = &[
+    "ti", "ar", "al", "au", "by", "re", "ve", "length", "tool", "encoding", "lang", "la", "id",
+    "album", "artist", "title", "offset",
+];
+
+fn is_metadata_tag(tag: &str) -> bool {
+    let Some((key, _)) = tag.split_once(':') else {
+        return false;
+    };
+    let key = key.trim().to_lowercase();
+    METADATA_KEYS.contains(&key.as_str())
+}
+
+/// Nombres de sección que algunos LRC cuelan como si fueran versos.
+const SECTION_WORDS: &[&str] = &[
+    "intro",
+    "verse",
+    "verse1",
+    "verse2",
+    "chorus",
+    "prechorus",
+    "pre",
+    "post",
+    "bridge",
+    "outro",
+    "hook",
+    "refrain",
+    "instrumental",
+    "interlude",
+    "interludio",
+    "spoken",
+    "skit",
+    "adlib",
+    "part",
+    "repetition",
+    "coda",
+    "break",
+    "drop",
+    "solo",
+    "vocal",
+    "vocals",
+];
+
+fn is_section_label(tag: &str) -> bool {
+    let normalized: String = tag
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect();
+    let mut saw_word = false;
+    for token in normalized.split_whitespace() {
+        let token = token.to_lowercase();
+        if token.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+        if token.len() == 1 {
+            // "Verse A", "Chorus 2x".
+            continue;
+        }
+        if SECTION_WORDS.contains(&token.as_str()) {
+            saw_word = true;
+            continue;
+        }
+        return false;
+    }
+    saw_word
+}
+
+fn parse_timestamp(tag: &str) -> Option<u64> {
+    let tag = tag.trim();
+    // Separador decimal con punto o con coma, 1..=3 dígitos.
+    let (head, frac) = match tag.rsplit_once(['.', ',']) {
+        Some((head, frac))
+            if (1..=3).contains(&frac.len()) && frac.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            (head, frac)
+        }
+        _ => (tag, ""),
+    };
+    let mut parts = head.split(':');
+    let minutes_raw = parts.next()?;
+    let seconds_raw = parts.next()?;
+    let frac_raw = match parts.next() {
+        // `[mm:ss:xx]`, variante antigua de `[mm:ss.xx]`.
+        Some(tail) => {
+            if !frac.is_empty() || parts.next().is_some() {
+                return None;
+            }
+            tail
+        }
+        None => frac,
+    };
+    let minutes: u64 = minutes_raw.trim().parse().ok()?;
+    let seconds: u64 = seconds_raw.trim().parse().ok()?;
+    // 600 min son 10 h: por encima es basura de un tag que no era un tiempo.
+    if seconds >= 60 || minutes > 600 {
+        return None;
+    }
+    let frac: u64 = match frac_raw.trim().len() {
+        0 => 0,
+        1 => frac_raw.trim().parse::<u64>().ok()? * 100,
+        2 => frac_raw.trim().parse::<u64>().ok()? * 10,
+        _ => frac_raw.trim().parse::<u64>().ok()?,
+    };
+    if frac >= 1_000 {
         return None;
     }
     Some(minutes * 60_000 + seconds * 1_000 + frac)
 }
 
-/// Separa los tags `<mm:ss.xx>` de una línea LRC mejorada.
+/// Separa los tags `<mm:ss.xx>` de una línea LRC mejorada. Devuelve el texto
+/// plano y los tiempos de palabra tal cual vienen en el fichero.
 fn split_words(body: &str) -> (String, Vec<(u64, String)>) {
     if !body.contains('<') {
-        return (body.to_string(), Vec::new());
+        return (body.trim().to_string(), Vec::new());
     }
     let mut words: Vec<(u64, String)> = Vec::new();
     let mut text = String::new();
@@ -345,35 +600,28 @@ fn split_words(body: &str) -> (String, Vec<(u64, String)>) {
         let prefix = &rest[..start];
         if !prefix.is_empty() {
             text.push_str(prefix);
-            if let Some(ts) = current {
-                match words.last_mut() {
-                    Some(last) if last.0 == ts => last.1.push_str(prefix),
-                    _ => words.push((ts, prefix.to_string())),
-                }
-            }
+            push_word(&mut words, current, prefix);
         }
         let Some(end_rel) = rest[start..].find('>') else {
             break;
         };
         let end = start + end_rel;
         let inner = &rest[start + 1..end];
-        if let Some(ms) = parse_timestamp(inner) {
-            current = Some(ms);
-            words.push((ms, String::new()));
-        } else {
-            // Un `<...>` que no es tiempo es texto normal.
-            text.push_str(&rest[start..=end]);
+        match parse_timestamp(inner) {
+            Some(ms) => {
+                current = Some(ms);
+                words.push((ms, String::new()));
+            }
+            None => {
+                // Un `<...>` que no es tiempo es texto normal.
+                text.push_str(&rest[start..=end]);
+            }
         }
         rest = &rest[end + 1..];
     }
     if !rest.is_empty() {
         text.push_str(rest);
-        if let Some(ts) = current {
-            match words.last_mut() {
-                Some(last) if last.0 == ts => last.1.push_str(rest),
-                _ => words.push((ts, rest.to_string())),
-            }
-        }
+        push_word(&mut words, current, rest);
     }
     let words = words
         .into_iter()
@@ -383,18 +631,46 @@ fn split_words(body: &str) -> (String, Vec<(u64, String)>) {
     (text.trim().to_string(), words)
 }
 
+/// Acumula texto en la última palabra con ese tiempo (o abre una nueva).
+fn push_word(words: &mut Vec<(u64, String)>, stamp: Option<u64>, text: &str) {
+    let Some(stamp) = stamp else { return };
+    match words.last_mut() {
+        Some(last) if last.0 == stamp => last.1.push_str(text),
+        _ => words.push((stamp, text.to_string())),
+    }
+}
+
 fn word_times(start: u64, end: u64, text: &str) -> Option<Vec<Word>> {
     let chunks: Vec<&str> = text.split_whitespace().collect();
     if chunks.len() < 2 {
         return None;
     }
+    // Peso por sílabas (grupos de vocales) + signos: una palabra larga o con
+    // pausa detrás tarda más en cantarse que una corta. Es más exacto que
+    // repartir por caracteres, sobre todo en español.
+    let weights: Vec<f32> = chunks
+        .iter()
+        .map(|chunk| {
+            let lower = chunk.to_lowercase();
+            let vowels = lower
+                .chars()
+                .filter(|c| "aeiouáéíóúüàèìòù".contains(*c))
+                .count()
+                .max(1);
+            let pause = if chunk.ends_with([',', '.', '!', '?', ';', '…']) {
+                1.8
+            } else {
+                0.0
+            };
+            vowels as f32 * 1.7 + chunk.chars().count() as f32 * 0.3 + pause
+        })
+        .collect();
+    let total: f32 = weights.iter().sum::<f32>().max(0.001);
     let span = end.saturating_sub(start);
-    let total: usize = chunks.iter().map(|w| w.chars().count()).sum();
     let mut words = Vec::with_capacity(chunks.len());
     let mut cursor = start;
-    for chunk in chunks {
-        let share = chunk.chars().count() as f32 / total as f32;
-        let duration = (span as f32 * share) as u64;
+    for (chunk, weight) in chunks.iter().zip(weights) {
+        let duration = (span as f32 * weight / total) as u64;
         words.push(Word {
             start_ms: cursor,
             end_ms: cursor + duration,
@@ -403,6 +679,28 @@ fn word_times(start: u64, end: u64, text: &str) -> Option<Vec<Word>> {
         cursor += duration;
     }
     Some(words)
+}
+
+#[cfg(test)]
+pub(crate) fn build_test_doc(lines: &[(u64, &str)]) -> LyricsDoc {
+    let mut doc = LyricsDoc {
+        synced: true,
+        source: LyricsSource::Lrclib,
+        ..LyricsDoc::default()
+    };
+    for (index, (start, text)) in lines.iter().enumerate() {
+        let end = lines
+            .get(index + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(start + 4_000);
+        doc.lines.push(LyricLine {
+            start_ms: *start,
+            end_ms: end,
+            text: (*text).to_string(),
+            ..LyricLine::default()
+        });
+    }
+    doc
 }
 
 #[cfg(test)]
@@ -417,15 +715,19 @@ mod tests {
     #[test]
     fn parses_timed_lines_and_offsets() {
         let doc = parse_lrc(LRC);
-        assert_eq!(doc.lines.len(), 3);
         assert!(doc.synced);
         assert_eq!(doc.lines[0].start_ms, 12_300);
         assert_eq!(doc.lines[0].end_ms, 18_900);
-        assert_eq!(doc.lines[1].text, "Do you ever get that fear that you can't shift the tide");
+        assert_eq!(
+            doc.lines[1].text,
+            "Do you ever get that fear that you can't shift the tide"
+        );
         assert_eq!(doc.index_at(0), None);
         assert_eq!(doc.index_at(12_000), None);
         assert_eq!(doc.index_at(12_400), Some(0));
-        assert_eq!(doc.index_at(60_000), Some(1));
+        // A mitad del hueco instrumental ya no manda el segundo verso.
+        assert_eq!(doc.index_at(60_000), Some(2));
+        assert_eq!(doc.lines[2].text, "♪");
     }
 
     #[test]
@@ -438,11 +740,76 @@ mod tests {
     }
 
     #[test]
-    fn plain_lyrics_are_estimated() {
-        let doc = parse_lrc("one\ntwo\nthree");
+    fn long_gap_becomes_an_instrumental_line() {
+        let doc = parse_lrc(LRC);
+        // Niño, verso y ♪ que cubre el hueco hasta las 1:20.
+        assert_eq!(doc.lines.len(), 3, "{:?}", doc.lines);
+        let marker = doc
+            .lines
+            .iter()
+            .find(|line| line.text == "♪")
+            .expect("hay marca instrumental");
+        assert_eq!(marker.start_ms, doc.lines[1].end_ms);
+        assert!(marker.end_ms > marker.start_ms);
+        // El verso no se queda activo 60 s esperando al siguiente.
+        assert!(doc.lines[1].end_ms - doc.lines[1].start_ms <= 8_000);
+    }
+
+    #[test]
+    fn metadata_tags_do_not_become_lyrics() {
+        let text = "[ti:Do I Wanna Know?]\n[ar:Arctic Monkeys]\n[al:AM]\n\
+[by:someone]\n[length:04:32]\n\
+[00:01.00]primera\n[Verse 1]\n[00:02.00]segunda";
+        let doc = parse_lrc(text);
+        assert_eq!(doc.lines.len(), 2);
+        assert_eq!(doc.lines[0].text, "primera");
+        assert_eq!(doc.lines[1].text, "segunda");
+    }
+
+    #[test]
+    fn offset_tag_is_applied_to_the_document() {
+        let doc = parse_lrc("[offset:+250]\n[00:10.00]hola");
+        assert_eq!(doc.offset_ms, 250);
+        // El offset positivo adelanta la letra, como marca el estándar LRC.
+        assert_eq!(doc.index_at(9_700), None);
+        assert_eq!(doc.index_at(9_800), Some(0));
+
+        let negative = parse_lrc("[offset:-500]\n[00:10.00]hola");
+        assert_eq!(negative.offset_ms, -500);
+        assert_eq!(negative.index_at(10_400), None);
+        assert_eq!(negative.index_at(10_500), Some(0));
+    }
+
+    #[test]
+    fn timestamps_accept_one_to_three_decimals() {
+        let cases = [
+            ("[00:12.3]a", 12_300),
+            ("[00:12.34]a", 12_340),
+            ("[00:12.345]a", 12_345),
+            ("[00:12,5]a", 12_500),
+            ("[00:12]a", 12_000),
+            ("[00:12:50]a", 12_500),
+            ("[01:02.00]a", 62_000),
+        ];
+        for (lrc, expected) in cases {
+            let doc = parse_lrc(lrc);
+            assert_eq!(doc.lines.len(), 1, "{lrc}");
+            assert_eq!(doc.lines[0].start_ms, expected, "{lrc}");
+            assert_eq!(doc.lines[0].text, "a", "{lrc}");
+        }
+        // Basura que parece un tiempo no debe colarse.
+        let doc = parse_lrc("[00:99.00]a\n[00:10.9999]b");
         assert!(!doc.synced);
+    }
+
+    #[test]
+    fn several_time_tags_share_the_text() {
+        let doc = parse_lrc("[00:10.00][00:20.00]estribillo\n[00:30.00]final");
         assert_eq!(doc.lines.len(), 3);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.lines[0].text, "estribillo");
+        assert_eq!(doc.lines[1].text, "estribillo");
+        assert_eq!(doc.lines[1].start_ms, 20_000);
+        assert_eq!(doc.lines[2].start_ms, 30_000);
     }
 
     #[test]
@@ -454,9 +821,75 @@ mod tests {
     }
 
     #[test]
+    fn enhanced_tags_are_absolute() {
+        // Formato estándar: el tag de palabra es la marca absoluta de la canción.
+        let doc = parse_lrc("[01:00.00]<01:00.00>Hello <01:00.50>world");
+        assert!(doc.lines[0].words_exact);
+        assert_eq!(doc.lines[0].words[0].start_ms, 60_000);
+        assert_eq!(doc.lines[0].words[1].start_ms, 60_500);
+        assert!(doc.lines[0].words[0].start_ms >= doc.lines[0].start_ms);
+    }
+
+    #[test]
+    fn relative_word_tags_get_shifted_to_the_line() {
+        let doc = parse_lrc("[01:00.00]<00:00.00>Hello <00:00.50>world");
+        assert_eq!(doc.lines[0].words[0].start_ms, 60_000);
+        assert_eq!(doc.lines[0].words[1].start_ms, 60_500);
+    }
+
+    #[test]
+    fn trailing_mark_extends_the_last_verse() {
+        // Convención LRC: una marca vacía al final cierra el último verso.
+        let doc = parse_lrc("[00:05.00]hola\n[00:09.00]");
+        assert_eq!(doc.lines.len(), 1);
+        assert_eq!(doc.lines[0].end_ms, 9_000);
+
+        // Con un silencio largo de por medio sí se pinta el hueco.
+        let doc = parse_lrc("[00:05.00]hola\n[00:40.00]");
+        assert_eq!(doc.lines.len(), 2);
+        assert_eq!(doc.lines[1].text, "♪");
+        assert_eq!(doc.lines[1].start_ms, doc.lines[0].end_ms);
+        assert_eq!(doc.lines[1].end_ms, 40_000);
+    }
+
+    #[test]
+    fn empty_timed_lines_are_instrumental() {
+        let doc = parse_lrc("[00:00.00]\n[00:05.00]");
+        assert!(doc.synced);
+        assert!(doc.instrumental);
+        assert!(doc.lines.iter().all(|line| line.text == "♪"));
+    }
+
+    #[test]
+    fn plain_lyrics_are_estimated() {
+        let doc = parse_lrc("one\ntwo\nthree");
+        assert!(!doc.synced);
+        assert_eq!(doc.lines.len(), 3);
+        assert_eq!(doc.source, LyricsSource::Plain);
+    }
+
+    #[test]
     fn window_is_clamped() {
         let doc = parse_lrc(LRC);
         let (start, end) = doc.window(12_400, 2, 2);
         assert_eq!((start, end), (0, 3));
+    }
+}
+
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+
+    #[test]
+    fn parenthetical_lines_do_not_steal_the_active_line() {
+        let doc = LyricsDoc::from_lrc(
+            "[00:01.00]Main line\n[00:04.00](oh oh)\n[00:07.00]Next main",
+            true,
+        );
+        assert!(is_background_line("(oh oh)"));
+        assert!(!is_background_line("Main (oh oh)"));
+        assert_eq!(doc.index_at(5_000), Some(0));
+        assert_eq!(doc.index_at(8_000), Some(2));
     }
 }
