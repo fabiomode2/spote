@@ -39,7 +39,7 @@ pub struct LyricsCfg {
     pub python: String,
     /// Ruta del puente. Relativa al repo si se arranca desde ahí.
     pub script: String,
-    /// Checkout de lyricbar.
+    /// Checkout de lyricbar. Vacío = usar `LYRICBAR_ROOT` o desactivar el puente.
     pub root: String,
 }
 
@@ -49,7 +49,7 @@ impl Default for LyricsCfg {
             bridge: true,
             python: "python3".to_string(),
             script: "scripts/lyricbar_bridge.py".to_string(),
-            root: "/home/fabio/Code/lyricbar".to_string(),
+            root: String::new(),
         }
     }
 }

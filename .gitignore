@@ -1,9 +1,91 @@
+# Compilación y toolchain
 /target
+.venv/
+__pycache__/
+*.py[cod]
+
+# Bases de datos locales: librería del cliente y del servidor social
 *.db
 *.db-shm
 *.db-wal
-.venv/
-__pycache__/
+*.sqlite
+*.sqlite3
+
+# Salida de las capturas. Las que se publican viven en docs/screenshots/.
 *.png
 *.html
 !docs/**/*.png
+
+# ---------------------------------------------------------------------------
+# Material obtenido al scrapear / descargar. No se publica: audio con derechos,
+# portadas cacheadas, volcados, tokens y sesiones. El código y la documentación
+# del repo sí se versionan; esto cubre sólo los datos que genera la app.
+# ---------------------------------------------------------------------------
+
+# Audio y vídeo: yt-dlp, `spote record`, `spote harvest`, descargas a medias
+/media/
+/downloads/
+/recordings/
+/record/
+/harvest/
+*.opus
+*.ogg
+*.oga
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.wav
+*.wma
+*.webm
+*.mp4
+*.mkv
+*.mov
+*.part
+*.ytdl
+*.temp
+*.tmp
+
+# Carátulas y metadatos cacheados
+/covers/
+/artwork/
+/thumbs/
+/art/
+*.jpg
+*.jpeg
+*.webp
+*.img
+!docs/**/*.jpg
+!docs/**/*.jpeg
+!docs/**/*.webp
+
+# Cachés y datos si SPOTE_HOME (o [download].dir) apunta dentro del repo
+/data/
+/cache/
+/spote-home/
+*.log
+
+# Credenciales, tokens, cookies y sesiones
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+*.secret
+cookies.txt
+cookies-*.txt
+*.cookie
+*.session
+/secrets/
+
+# Volcados de memoria y material crudo de investigación
+*.mem
+*.memdump
+*.dump
+/recovered*.ogg
+/research/raw/
+/research/dumps/
+/research/scratch/
+spote-research/
+scrape_output.*

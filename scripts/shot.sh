@@ -3,8 +3,8 @@
 #
 #   scripts/shot.sh <out.html> [cols] [rows] [segundos] -- <comando…>
 #
-# El PNG se saca luego con cualquier navegador headless:
-#   chromium --headless --screenshot=out.png --window-size=2400,1400 file://$PWD/out.html
+# El PNG se saca luego con scripts/html2png.py (busca un navegador headless):
+#   scripts/html2png.py out.html out.png
 #
 # Requiere: tmux, python3. No toca la sesión tmux del usuario.
 set -euo pipefail

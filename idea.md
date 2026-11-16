@@ -222,7 +222,7 @@ Base: **LRCLIB** (`/api/get`, `/api/search`, `/api/get/{id}`), gratis y sin auth
 Fallbacks: letra plana (Genius no da tiempos → reparto aproximado), y las
 auto-captions de YouTube que lyricbar ya usa para alinear mejor.
 
-Lo que se reutiliza de `/home/fabio/Code/lyricbar/` (Python, ~11k líneas) es el
+Lo que se reutiliza de un checkout local de lyricbar (Python, ~11k líneas) es el
 **conocimiento**, no el código:
 
 - `lyricbar/lrc.py` — parser LRC (incluye tags `<mm:ss.xx>` por palabra),

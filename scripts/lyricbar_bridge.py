@@ -37,7 +37,10 @@ def main() -> int:
     if not title:
         return fail("sin título")
 
-    root = Path(data.get("root") or os.environ.get("LYRICBAR_ROOT") or "/home/fabio/Code/lyricbar")
+    root_raw = data.get("root") or os.environ.get("LYRICBAR_ROOT") or ""
+    if not root_raw:
+        return fail("sin ruta de lyricbar ([lyrics] root o LYRICBAR_ROOT)")
+    root = Path(root_raw)
     if not (root / "lyricbar").is_dir():
         return fail(f"lyricbar no encontrado en {root}")
     sys.path.insert(0, str(root))

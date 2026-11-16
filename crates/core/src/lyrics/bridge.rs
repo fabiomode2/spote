@@ -1,4 +1,4 @@
-//! Puente con el motor de letras de lyricbar (`/home/fabio/Code/lyricbar`).
+//! Puente opcional con el motor de letras de lyricbar.
 //!
 //! lyricbar resuelve LRCLIB, Genius, captions de YouTube y el reparto de letras
 //! planas, y afina los tiempos con su caché. En vez de reimplementar eso en
@@ -30,11 +30,13 @@ impl BridgeConfig {
             return None;
         }
         let script = resolve_script(&cfg.script)?;
-        let root = PathBuf::from(if cfg.root.is_empty() {
-            std::env::var("LYRICBAR_ROOT").unwrap_or_else(|_| "/home/fabio/Code/lyricbar".into())
+        // Sin ruta configurada ni variable de entorno, el puente se apaga:
+        // lyricbar es opcional y spote sigue con su proveedor interno.
+        let root = if cfg.root.is_empty() {
+            PathBuf::from(std::env::var_os("LYRICBAR_ROOT")?)
         } else {
-            cfg.root.clone()
-        });
+            PathBuf::from(&cfg.root)
+        };
         if !root.join("lyricbar").is_dir() {
             return None;
         }
@@ -77,7 +79,10 @@ fn resolve_script(configured: &str) -> Option<PathBuf> {
     if local.is_file() {
         return Some(local.to_path_buf());
     }
-    let repo = Path::new("/home/fabio/Code/spote").join(configured);
+    // Raíz del workspace deducida en compilación, sin rutas de nadie.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(configured);
     if repo.is_file() {
         return Some(repo);
     }
@@ -225,7 +230,7 @@ mod tests {
             bridge: true,
             python: "python3".into(),
             script: "/no/existe/lyricbar_bridge.py".into(),
-            root: "/home/fabio/Code/lyricbar".into(),
+            root: "/no/existe/lyricbar".into(),
         };
         assert!(BridgeConfig::resolve(&cfg).is_none());
     }
