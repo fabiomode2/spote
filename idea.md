@@ -396,9 +396,6 @@ Lo que **no** da, y se probó por varias vías:
 En la app, un artista se trata como colección de sólo temas: `spote import
 <url-de-artista>` indexa sus 10 temas sin crear playlist.
 
-Detalle completo con evidencia, offsets, comandos y lo descartado:
-[`research/spotify-drm.md`](research/spotify-drm.md).
-
 **Consecuencia de diseño (importante):** spote **no depende** de esto. La app
 funciona con yt-dlp y con ficheros locales. Cuando el extractor produzca Ogg
 válidos (por RAM, por clave, o grabando), se meten con `spote ingest` y punto.

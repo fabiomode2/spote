@@ -79,13 +79,13 @@ cookies-*.txt
 *.session
 /secrets/
 
-# Volcados de memoria y material crudo de investigación
+# Investigación local sobre DRM/scraping: no se publica
+/research/
+
+# Volcados de memoria y material crudo
 *.mem
 *.memdump
 *.dump
 /recovered*.ogg
-/research/raw/
-/research/dumps/
-/research/scratch/
 spote-research/
 scrape_output.*

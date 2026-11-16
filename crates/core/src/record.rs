@@ -7,7 +7,7 @@
 //! recompresión adicional si se guarda en FLAC.
 //!
 //! Coste: 1× tiempo real. No hay atajo: el cliente descifra justo a tiempo, así
-//! que ni leyendo su memoria se puede ir más rápido (ver `research/spotify-drm.md`).
+//! que ni leyendo su memoria se puede ir más rápido.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
