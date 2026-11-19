@@ -7,8 +7,8 @@
 //! esas zonas con 15 s de contexto a cada lado. De las lecturas se queda la
 //! que mejor encaja.
 //!
-//! Es el equivalente Rust de la técnica de lyricbar; spote no importa su
-//! código para esto.
+//! La alineación y la decisión de qué releer son de spote; el script de Python
+//! solo ejecuta el modelo.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -43,23 +43,20 @@ impl AsrConfig {
         if !cfg.asr {
             return None;
         }
-        let script = super::bridge::resolve_script(&cfg.asr_script)?;
+        let script = super::resolve_script(&cfg.asr_script)?;
         let mut python = if cfg.python.trim().is_empty() {
             "python3".to_string()
         } else {
             cfg.python.clone()
         };
         // El instalador crea un venv propio con faster-whisper; si no,
-        // reutiliza el de lyricbar. También se puede forzar por entorno.
+        // se puede forzar por entorno.
         if python == "python3" {
             let mut candidates: Vec<PathBuf> = Vec::new();
             if let Some(path) = std::env::var_os("SPOTE_ASR_PYTHON") {
                 candidates.push(PathBuf::from(path));
             }
             candidates.push(crate::config::data_dir().join("venv/bin/python"));
-            if !cfg.root.is_empty() {
-                candidates.push(Path::new(&cfg.root).join(".venv/bin/python"));
-            }
             if let Some(venv) = candidates.into_iter().find(|path| path.is_file()) {
                 python = venv.to_string_lossy().into_owned();
             }

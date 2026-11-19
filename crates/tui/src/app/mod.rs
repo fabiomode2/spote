@@ -1739,8 +1739,9 @@ impl App {
                 self.lyrics_retry.insert(track.key.clone());
                 self.lyrics_loading = true;
                 self.lyrics_status = "afinando con el audio…".into();
+                let request_track = self.lyrics_track(&track);
                 self.lyrics_worker.request(
-                    track.clone(),
+                    request_track,
                     audio,
                     stale_alignment || broken_sync,
                 );
@@ -1765,7 +1766,24 @@ impl App {
         self.lyrics_loading = true;
         self.lyrics_status = "buscando letra…".into();
         let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-        self.lyrics_worker.request(track.clone(), audio, false);
+        let request_track = self.lyrics_track(&track);
+        self.lyrics_worker.request(request_track, audio, false);
+    }
+
+    /// Copia la pista con el hint de su fuente. Los captions de YouTube usan
+    /// el id del vídeo del que salió el audio para no buscar a ciegas.
+    fn lyrics_track(&self, track: &TrackRef) -> TrackRef {
+        let mut track = track.clone();
+        if track.source_hint.is_none() {
+            if let Some((provider, id)) = self.lib.source_hint(&track.key) {
+                track.source_hint = Some(spote_protocol::SourceHint {
+                    provider,
+                    id,
+                    duration_ms: track.duration_ms,
+                });
+            }
+        }
+        track
     }
 
     /// Marca el inicio del recorte en la posición actual (sáltate la intro).

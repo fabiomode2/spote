@@ -2,13 +2,12 @@
 # Instalación y actualización de spote.
 #
 #   ./scripts/install.sh                  # compila, instala y prepara ASR
-#   ./scripts/install.sh --lyricbar ~/Code/lyricbar
 #   ./scripts/install.sh --update         # git pull + recompilar + instalar
 #   ./scripts/install.sh --no-asr         # sin faster-whisper
 #
 # No usa sudo ni toca el sistema: binarios en ~/.local/bin y datos en
-# ~/.local/share/spote (o $SPOTE_HOME/data). La TUI detecta ese venv y el
-# lyricbar enlazado sin tener que editar el config a mano.
+# ~/.local/share/spote (o $SPOTE_HOME/data). La TUI detecta ese venv sin
+# tener que editar el config a mano.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,17 +18,14 @@ else
 fi
 BIN_DIR="${SPOTE_BIN_DIR:-$HOME/.local/bin}"
 VENV="${SPOTE_VENV:-$DATA_DIR/venv}"
-LYRICBAR="${LYRICBAR_ROOT:-}"
 ASR=1
 UPDATE=0
-YES=0
 
 usage() {
   cat <<EOF
 uso: scripts/install.sh [opciones]
 
   --update              git pull --ff-only antes de compilar
-  --lyricbar <ruta>     captions de YouTube desde un checkout local (opcional)
   --no-asr              no instala faster-whisper
   --bin-dir <ruta>      destino de los binarios (defecto: ~/.local/bin)
   --venv <ruta>         venv de Python (defecto: $DATA_DIR/venv)
@@ -41,10 +37,6 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --update) UPDATE=1 ;;
-    --lyricbar)
-      LYRICBAR="${2:?falta la ruta de lyricbar}"
-      shift
-      ;;
     --no-asr) ASR=0 ;;
     --bin-dir)
       BIN_DIR="${2:?falta la ruta de binarios}"
@@ -54,7 +46,7 @@ while [[ $# -gt 0 ]]; do
       VENV="${2:?falta la ruta del venv}"
       shift
       ;;
-    -y|--yes) YES=1 ;;
+    -y|--yes) ;;
     -h|--help)
       usage
       exit 0
@@ -106,42 +98,12 @@ fi
 
 install -d "$DATA_DIR/scripts"
 install -m 755 "$ROOT/scripts/asr_words.py" "$DATA_DIR/scripts/asr_words.py"
-install -m 755 "$ROOT/scripts/lyricbar_bridge.py" "$DATA_DIR/scripts/lyricbar_bridge.py"
+# Restos de la versión con puente a lyricbar.
+rm -f "$DATA_DIR/scripts/lyricbar_bridge.py"
 
-# Sin --lyricbar, intenta el checkout típico junto al repo y el del entorno.
-if [[ -z "$LYRICBAR" ]]; then
-  for candidate in "$ROOT/../lyricbar" "$HOME/Code/lyricbar"; do
-    if [[ -d "$candidate/lyricbar" ]]; then
-      LYRICBAR="$candidate"
-      break
-    fi
-  done
-fi
-if [[ -n "$LYRICBAR" ]]; then
-  if [[ ! -d "$LYRICBAR" ]]; then
-    warn "$LYRICBAR no existe; se instala sin lyricbar"
-    LYRICBAR=""
-  else
-    LYRICBAR="$(cd "$LYRICBAR" && pwd)"
-    if [[ ! -d "$LYRICBAR/lyricbar" ]]; then
-      warn "$LYRICBAR no parece un checkout de lyricbar; se ignora"
-      LYRICBAR=""
-    fi
-  fi
-fi
-
-if [[ -n "$LYRICBAR" ]]; then
-  if [[ -L "$DATA_DIR/lyricbar" || ! -e "$DATA_DIR/lyricbar" ]]; then
-    ln -sfn "$LYRICBAR" "$DATA_DIR/lyricbar"
-    say "lyricbar enlazado desde $LYRICBAR"
-  else
-    warn "$DATA_DIR/lyricbar ya existe y no es un enlace; se respeta"
-  fi
-fi
-
-if [[ "$ASR" == 1 || -n "$LYRICBAR" ]]; then
+if [[ "$ASR" == 1 ]]; then
   command -v python3 >/dev/null || {
-    echo "falta python3 para el ASR/puente de letras" >&2
+    echo "falta python3 para el ASR" >&2
     exit 1
   }
   if [[ ! -x "$VENV/bin/python" ]]; then
@@ -149,17 +111,9 @@ if [[ "$ASR" == 1 || -n "$LYRICBAR" ]]; then
     python3 -m venv "$VENV"
   fi
   "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null
-  if [[ "$ASR" == 1 ]] && ! "$VENV/bin/python" -c 'import faster_whisper' 2>/dev/null; then
+  if ! "$VENV/bin/python" -c 'import faster_whisper' 2>/dev/null; then
     say "instalando faster-whisper (puede tardar)"
     "$VENV/bin/python" -m pip install --quiet faster-whisper
-  fi
-  if [[ -n "$LYRICBAR" ]] && ! "$VENV/bin/python" -c 'import requests, bs4, yt_dlp' 2>/dev/null; then
-    say "instalando dependencias de lyricbar"
-    "$VENV/bin/python" -m pip install --quiet requests beautifulsoup4 yt-dlp
-  fi
-  if ! command -v yt-dlp >/dev/null && [[ -x "$VENV/bin/yt-dlp" ]]; then
-    ln -sfn "$VENV/bin/yt-dlp" "$BIN_DIR/yt-dlp"
-    say "yt-dlp enlazado en $BIN_DIR"
   fi
 fi
 
@@ -169,8 +123,5 @@ case ":$PATH:" in
 esac
 
 say "listo · lanza: spote"
-if [[ -n "$LYRICBAR" ]]; then
-  say "letras: LRCLIB + Genius internos + captions (lyricbar) + ASR"
-elif [[ "$ASR" == 1 ]]; then
-  say "letras: LRCLIB + Genius internos + ASR (sin captions de YouTube)"
-fi
+say "letras: LRCLIB + Genius + captions de YouTube"
+[[ "$ASR" == 1 ]] && say "timings: ASR local con faster-whisper"

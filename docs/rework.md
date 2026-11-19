@@ -76,8 +76,9 @@
   acabaron los restos de la vista anterior a través de los bordes.
 - **Letras**: las palabras entre paréntesis son opcionales para el progreso y
   la línea activa; una línea de adlib nunca roba el turno a la principal. El
-  puente a lyricbar puede alinear la letra contra el audio local con
-  faster-whisper (`aligned=true`) cuando el LRC viene estimado o de Genius.
+  motor interno (LRCLIB + Genius + captions de YouTube) y el ASR de Rust
+  alinean la letra contra el audio local cuando el LRC viene estimado, plano
+  o roto.
   Las letras aproximadas cacheadas se reintentan una vez por sesión si hay
   audio local. El ASR lee por pasadas: la canción completa y, si quedan
   líneas sin anclar (outro, instrumental), solo esa zona con 15 s de contexto;

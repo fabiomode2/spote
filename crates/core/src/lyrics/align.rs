@@ -1,10 +1,9 @@
 //! Alineación forzada de la letra conocida contra las palabras que detecta el
 //! ASR.
 //!
-//! Esto es el port a Rust de la técnica que usaba lyricbar: el texto de la
-//! letra ya se conoce, así que no se compara una transcripción literal (el
-//! modelo se equivoca mucho cantando) sino que se hace un alineamiento global
-//! fonético. Las palabras que casan anclan su línea; las que no, se interpolan
+//! El texto de la letra ya se conoce, así que no se compara una transcripción
+//! literal (el modelo se equivoca mucho cantando) sino que se hace un
+//! alineamiento global fonético. Las palabras que casan anclan su línea; las que no, se interpolan
 //! entre las anclas vecinas.
 //!
 //! El módulo es puro: recibe líneas y palabras con tiempos y no toca audio,

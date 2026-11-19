@@ -34,13 +34,8 @@ impl Default for AppCfg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LyricsCfg {
-    /// Usa el motor de lyricbar (LRCLIB + Genius + captions) como primer proveedor.
-    pub bridge: bool,
+    /// Intérprete para el transcriptor ASR (faster-whisper).
     pub python: String,
-    /// Ruta del puente. Relativa al repo si se arranca desde ahí.
-    pub script: String,
-    /// Checkout de lyricbar. Vacío = usar `LYRICBAR_ROOT` o desactivar el puente.
-    pub root: String,
     /// Afina las líneas estimadas contra el audio local con faster-whisper.
     /// La alineación es de spote; solo se delega la transcripción.
     pub asr: bool,
@@ -55,10 +50,7 @@ pub struct LyricsCfg {
 impl Default for LyricsCfg {
     fn default() -> Self {
         Self {
-            bridge: true,
             python: "python3".to_string(),
-            script: "scripts/lyricbar_bridge.py".to_string(),
-            root: String::new(),
             asr: true,
             asr_script: "scripts/asr_words.py".to_string(),
             asr_model: "small".to_string(),

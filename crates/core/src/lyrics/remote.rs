@@ -61,7 +61,8 @@ const SYNC_MIN_LINES: usize = 2;
 // API pública
 // ---------------------------------------------------------------------------
 
-/// Busca letra sincronizada en LRCLIB, con fallbacks. `Ok(None)` = no hay nada.
+/// Busca letra en LRCLIB, Genius y captions de YouTube. `Ok(None)` = no hay
+/// nada.
 pub async fn fetch_track(
     client: &reqwest::Client,
     track: &TrackRef,
@@ -71,34 +72,56 @@ pub async fn fetch_track(
     }
     let variants = query_variants(track);
     let deadline = Instant::now() + TOTAL_BUDGET;
-    // 1) Metadatos exactos: si LRCLIB lo tiene, es el bueno sin ranking.
+    let mut fallback: Option<LyricsDoc> = None;
+
+    // 1) Metadatos exactos: si LRCLIB lo tiene sincronizado, es el bueno.
     for variant in &variants {
         if Instant::now() >= deadline {
-            return Ok(None);
+            break;
         }
         if let Ok(Some(doc)) = fetch_exact(client, variant).await {
-            return Ok(Some(doc));
+            if let Some(doc) = keep_fallback(&mut fallback, doc) {
+                return Ok(Some(doc));
+            }
         }
     }
     // 2) Búsqueda libre + ranking por título, artista, duración y versión.
-    //    Las variantes van de más a menos específica y la última es solo título,
-    //    que es lo que salva los artistas colaborativos y los canales raros.
     for variant in &variants {
         if Instant::now() >= deadline {
             break;
         }
         if let Ok(Some(doc)) = fetch_search(client, variant).await {
-            return Ok(Some(doc));
+            if let Some(doc) = keep_fallback(&mut fallback, doc) {
+                return Ok(Some(doc));
+            }
         }
     }
-    // 3) Genius: letra plana. Es el respaldo que hace que spote no dependa de
-    //    un checkout de lyricbar para las canciones que no están en LRCLIB.
+    // 3) Genius: letra plana.
     if Instant::now() < deadline {
         if let Ok(Some(doc)) = fetch_genius(client, track).await {
-            return Ok(Some(doc));
+            if let Some(doc) = keep_fallback(&mut fallback, doc) {
+                return Ok(Some(doc));
+            }
         }
     }
-    Ok(None)
+    // 4) Captions de YouTube: si hay letra conocida, alinean; si no, sirven
+    //    como letra sincronizada de emergencia.
+    if let Some(doc) = super::youtube::fetch(track, fallback.as_ref()).await {
+        return Ok(Some(doc));
+    }
+    Ok(fallback)
+}
+
+/// Los documentos sincronizados ganan; los planos se guardan como respaldo.
+fn keep_fallback(fallback: &mut Option<LyricsDoc>, doc: LyricsDoc) -> Option<LyricsDoc> {
+    if doc.synced {
+        Some(doc)
+    } else {
+        if fallback.is_none() {
+            *fallback = Some(doc);
+        }
+        None
+    }
 }
 
 /// Variantes de la pista para probar, de la más específica a la más laxa.
@@ -834,12 +857,6 @@ fn best_genius_song<'a>(search: &'a GeniusSearch, track: &TrackRef) -> Option<&'
                 continue;
             }
             let title_score = title_similarity(&song.title, track);
-            if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
-                eprintln!(
-                    "[genius] hit kind={:?} title={:?} artist={:?} path={:?} title_score={title_score:.2}",
-                    song.kind, song.title, song.artist_names, song.path
-                );
-            }
             if title_score < 0.50 {
                 continue;
             }
@@ -1273,31 +1290,6 @@ mod tests {
             &track(),
         );
         assert!((clean - noisy).abs() < 1e-9, "{clean} != {noisy}");
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn genius_live() {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap();
-        let track = TrackRef {
-            key: "x".into(),
-            title: "Kariñosa".into(),
-            artist: "Guxo".into(),
-            duration_ms: 176_062,
-            ..TrackRef::default()
-        };
-        let doc = fetch_genius(&client, &track).await.unwrap();
-        eprintln!(
-            "{:?}",
-            doc.map(|doc| (
-                doc.source.label(),
-                doc.lines.len(),
-                doc.lines.iter().take(4).map(|line| line.text.clone()).collect::<Vec<_>>()
-            ))
-        );
     }
 
     #[test]

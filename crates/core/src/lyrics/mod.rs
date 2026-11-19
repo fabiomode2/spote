@@ -8,9 +8,9 @@ use spote_protocol::TrackRef;
 
 mod align;
 mod asr;
-mod bridge;
 mod remote;
 mod text;
+mod youtube;
 
 /// Palabra con tiempos (tags `<mm:ss.xx>` dentro de una línea LRC mejorada).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -39,6 +39,7 @@ pub enum LyricsSource {
     #[default]
     None,
     Lrclib,
+    Captions,
     Plain,
     Estimated,
     Local,
@@ -49,6 +50,7 @@ impl LyricsSource {
         match self {
             Self::None => "",
             Self::Lrclib => "lrclib",
+            Self::Captions => "captions",
             Self::Plain => "plain",
             Self::Estimated => "approx",
             Self::Local => "local",
@@ -60,6 +62,7 @@ impl LyricsSource {
     pub fn from_label(label: &str) -> Option<Self> {
         match label.trim().to_ascii_lowercase().as_str() {
             "lrclib" => Some(Self::Lrclib),
+            "captions" => Some(Self::Captions),
             "plain" => Some(Self::Plain),
             "approx" => Some(Self::Estimated),
             "local" => Some(Self::Local),
@@ -329,10 +332,34 @@ pub enum LyricsError {
     Parse(String),
 }
 
+/// Busca un script auxiliar en los sitios razonables: ruta configurada,
+/// `SPOTE_ROOT`, instalación junto a los datos o checkout del repo.
+pub(crate) fn resolve_script(configured: &str) -> Option<std::path::PathBuf> {
+    let candidate = std::path::PathBuf::from(configured);
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    if let Some(root) = std::env::var_os("SPOTE_ROOT") {
+        let path = std::path::PathBuf::from(root).join(configured);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(name) = candidate.file_name() {
+        let installed = crate::config::data_dir().join("scripts").join(name);
+        if installed.is_file() {
+            return Some(installed);
+        }
+    }
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(configured);
+    repo.is_file().then_some(repo)
+}
+
 /// Cliente de letras. La caché vive en la librería SQLite.
 pub struct LyricsService {
     client: reqwest::Client,
-    bridge: Option<bridge::BridgeConfig>,
     asr: Option<asr::AsrConfig>,
 }
 
@@ -345,31 +372,15 @@ impl LyricsService {
             .unwrap_or_default();
         Self {
             client,
-            bridge: None,
             asr: None,
         }
     }
 
-    /// Con puente a lyricbar: se intenta primero y, si falla, LRCLIB interno.
-    pub fn with_bridge(bridge: bridge::BridgeConfig) -> Self {
-        let mut service = Self::new();
-        service.bridge = Some(bridge);
-        service
-    }
-
-    /// Construye el servicio desde la configuración (respeta `lyrics.bridge`).
+    /// Construye el servicio desde la configuración.
     pub fn from_config(cfg: &crate::config::LyricsCfg) -> Self {
-        let mut service = match bridge::BridgeConfig::resolve(cfg) {
-            Some(bridge) => Self::with_bridge(bridge),
-            None => Self::new(),
-        };
+        let mut service = Self::new();
         service.asr = asr::AsrConfig::resolve(cfg);
         service
-    }
-
-    /// `true` si hay puente a lyricbar activo.
-    pub fn has_bridge(&self) -> bool {
-        self.bridge.is_some()
     }
 
     /// Busca la letra de `track`. Devuelve `Ok(None)` si no hay nada mejor que
@@ -386,7 +397,7 @@ impl LyricsService {
         audio: Option<&std::path::Path>,
         force_align: bool,
     ) -> Result<Option<LyricsDoc>, LyricsError> {
-        let doc = self.resolve_text(track).await?;
+        let doc = remote::fetch_track(&self.client, track).await?;
         let Some(mut doc) = doc else {
             return Ok(None);
         };
@@ -429,27 +440,6 @@ impl LyricsService {
             }
         }
         Ok(Some(doc))
-    }
-
-    /// Resuelve el texto (LRCLIB, Genius, captions o interno) sin tocar audio.
-    async fn resolve_text(&self, track: &TrackRef) -> Result<Option<LyricsDoc>, LyricsError> {
-        if let Some(bridge) = &self.bridge {
-            match bridge::fetch(bridge, track) {
-                // Letra con marcas reales: gana.
-                Ok(Some(doc)) if doc.synced || doc.aligned => return Ok(Some(doc)),
-                // Letra plana de Genius: se enseña, pero si el proveedor
-                // interno tiene una versión sincronizada es mejor esa.
-                Ok(Some(doc)) => {
-                    return match remote::fetch_track(&self.client, track).await {
-                        Ok(Some(remote)) if remote.synced => Ok(Some(remote)),
-                        _ => Ok(Some(doc)),
-                    };
-                }
-                Ok(None) => {}
-                Err(_) => {}
-            }
-        }
-        remote::fetch_track(&self.client, track).await
     }
 
     /// Igual que [`fetch`](Self::fetch) pero sin red: solo parsea texto LRC.

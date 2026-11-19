@@ -211,16 +211,14 @@ se re-resuelve el source sin perder playlists ni historial.
 
 ### 5.4 Letras (portado de lyricbar)
 
-**Implementado**: el motor de lyricbar se usa como proveedor principal a través
-de `scripts/lyricbar_bridge.py` (`[lyrics] bridge = true`). Se llama a su
-`LyricsService.resolve()` con el intérprete de su venv y se convierte el
-resultado a `LyricsDoc`; si el checkout no existe o falla, se cae al proveedor
-interno LRCLIB de Rust. Esto aporta Genius, captions de YouTube, reparto de
-letras planas y la caché de lyricbar sin reimplementarlo.
+**Implementado** en Rust: LRCLIB (sincronizado y plano), Genius (letra plana),
+captions de YouTube y ASR local con faster-whisper. El reparto de letras
+planas, la alineación fonética, las relecturas y la caché son de spote; no hay
+dependencia de ningún checkout externo.
 
 Base: **LRCLIB** (`/api/get`, `/api/search`, `/api/get/{id}`), gratis y sin auth.
-Fallbacks: letra plana (Genius no da tiempos → reparto aproximado), y las
-auto-captions de YouTube que lyricbar ya usa para alinear mejor.
+Fallbacks: letra plana de Genius (reparto aproximado) y captions de YouTube,
+ya integradas en el motor interno.
 
 Lo que se reutiliza de un checkout local de lyricbar (Python, ~11k líneas) es el
 **conocimiento**, no el código:
@@ -834,7 +832,8 @@ defaults de este documento.
 - Nombre configurable (`[app] name`).
 - Modo de arte `gradient` + rotación automática con disolución + muestreo 2×2
   para dither/braille en paneles grandes.
-- `spote` usa **lyricbar** como proveedor de letras (`scripts/lyricbar_bridge.py`).
+- `spote` lleva su propio proveedor de letras (LRCLIB, Genius, captions de
+  YouTube y ASR en Rust).
 - Buscar escribe directamente; `/` solo sirve para entrar en la vista.
 - Corazón visible en favoritas (lista, tarjetas y panel de ahora).
 - Cola: quitar (`x`/`×`/clic), reordenar (arrastrar, `shift ↑↓`, `, .`).

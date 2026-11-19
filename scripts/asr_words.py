@@ -48,8 +48,7 @@ def _models_root() -> Path:
     home = os.environ.get("SPOTE_HOME")
     if home:
         candidates.insert(0, Path(home) / "cache" / "models")
-    # Reutiliza el modelo que ya tenga lyricbar instalado antes de bajar otra
-    # copia de medio giga.
+    # Reutiliza un modelo ya descargado antes de bajar otra copia de medio giga.
     candidates.append(Path.home() / ".cache" / "lyricbar" / "models")
     for candidate in candidates:
         if candidate.is_dir() and any(candidate.iterdir()):

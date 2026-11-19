@@ -97,7 +97,7 @@ pub struct Playlist {
 }
 
 /// Fila de letra cacheada. `source`/`aligned` se restauran para no repetir
-/// el auto-ajuste sobre una letra que ya vino alineada del bridge ASR.
+/// el auto-ajuste sobre una letra que ya vino alineada por ASR.
 #[derive(Debug, Clone)]
 pub struct LyricsRow {
     pub lrc: String,
