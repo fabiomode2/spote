@@ -83,8 +83,13 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     if app.list_cards {
         let card_h = 3u16;
         let visible = (inner.height / card_h).max(1) as usize;
-        let start = app.queue_selected.saturating_sub(visible / 2);
-        let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
+        let start = super::lists::keep_visible(
+            app.queue_start,
+            app.queue_selected,
+            visible,
+            queue_len,
+        );
+        app.queue_start = start;
         let shown = (queue_len - start).min(visible);
         let y_offset = if app.vcenter {
             inner.height.saturating_sub(shown as u16 * card_h) / 2
@@ -170,8 +175,13 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     }
 
     let visible = inner.height.saturating_sub(1) as usize;
-    let start = app.queue_selected.saturating_sub(visible / 2);
-    let start = start.min(queue_len.saturating_sub(visible.min(queue_len)));
+    let start = super::lists::keep_visible(
+        app.queue_start,
+        app.queue_selected,
+        visible,
+        queue_len,
+    );
+    app.queue_start = start;
     let shown = (queue_len - start).min(visible);
     let y_offset = if app.vcenter {
         inner.height.saturating_sub(1).saturating_sub(shown as u16) / 2

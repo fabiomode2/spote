@@ -24,16 +24,6 @@ impl Spring {
         }
     }
 
-    pub fn snappy(value: f32) -> Self {
-        Self {
-            value,
-            target: value,
-            velocity: 0.0,
-            stiffness: 320.0,
-            damping: 30.0,
-        }
-    }
-
     pub fn set_target(&mut self, target: f32) {
         self.target = target;
     }

@@ -728,7 +728,14 @@ pub struct App {
     pub album_page_status: String,
     pub lib_filter: LibFilter,
     pub selected: usize,
-    pub list_scroll: Spring,
+    /// Primera fila visible de la biblioteca. El scroll es por bordes: la
+    /// selección se mueve dentro de la página y la lista solo desplaza cuando
+    /// hace falta, sin que la "cámara" persiga al cursor con un muelle.
+    pub list_start: usize,
+    /// Primera entrada visible de la cola, con la misma regla.
+    pub queue_start: usize,
+    /// Primera fila visible de la búsqueda mixta (secciones + entradas).
+    pub search_start: usize,
     pub search: SearchState,
     pub pending_play: Option<String>,
 
@@ -921,7 +928,9 @@ impl App {
             album_page_status: String::new(),
             lib_filter: LibFilter::All,
             selected: 0,
-            list_scroll: Spring::snappy(0.0),
+            list_start: 0,
+            queue_start: 0,
+            search_start: 0,
             search: SearchState::default(),
             pending_play: None,
             lyrics: None,
@@ -1957,8 +1966,6 @@ impl App {
             let next = modes[(current + 1) % modes.len()];
             self.set_art_mode(next);
         }
-        self.list_scroll.set_target(self.selected as f32);
-        self.list_scroll.update(dt);
         if let Some(doc) = &self.lyrics {
             if let Some(index) = doc.index_at(self.display_position_ms()) {
                 if self.lyrics_scroll_index != Some(index) {

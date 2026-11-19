@@ -175,9 +175,8 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     let inner = list_area;
     let row_h = 2u16;
     let rows = (inner.height / row_h).max(1) as usize;
-    let start = (app.list_scroll.value.max(0.0) as usize)
-        .saturating_sub(rows / 2)
-        .min(app.view.len().saturating_sub(rows.min(app.view.len())));
+    let start = keep_visible(app.list_start, app.selected, rows, app.view.len());
+    app.list_start = start;
     let shown = app.view.len().saturating_sub(start).min(rows) as u16;
     let y_offset = if app.vcenter {
         inner.height.saturating_sub(shown * row_h) / 2
@@ -395,8 +394,8 @@ fn added_label(added_at: i64) -> String {
 pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Palette) {
     let card_h = 3u16;
     let per_page = (inner.height / card_h).max(1) as usize;
-    let start = app.selected.saturating_sub(per_page / 2);
-    let start = start.min(app.view.len().saturating_sub(per_page.min(app.view.len())));
+    let start = keep_visible(app.list_start, app.selected, per_page, app.view.len());
+    app.list_start = start;
     let rows: Vec<spote_core::library::TrackRow> = app
         .view
         .iter()
@@ -614,7 +613,29 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         .unwrap_or(0);
     let available = (inner.y + inner.height).saturating_sub(y) as usize;
     let row_h = if app.list_cards { 2 } else { 1 };
-    let start = selected_row.saturating_sub(available / (row_h * 3).max(1));
+    // Scroll por bordes también en la búsqueda: la selección se mueve dentro
+    // de la página y la lista solo avanza cuando hace falta. Antes la lista
+    // perseguía al cursor y parecía que se movían dos cosas a la vez.
+    let height_of = |row: &Row| -> usize {
+        match row {
+            Row::Section(_) => 1,
+            Row::Entry(_) => row_h as usize,
+        }
+    };
+    let mut start = app.search_start.min(rows.len().saturating_sub(1));
+    if selected_row < start {
+        start = selected_row;
+    } else {
+        let mut used: usize = rows[start..=selected_row]
+            .iter()
+            .map(|row| height_of(row))
+            .sum();
+        while used > available && start < selected_row {
+            used = used.saturating_sub(height_of(&rows[start]));
+            start += 1;
+        }
+    }
+    app.search_start = start;
     let mut row_y = y;
     for row in rows.iter().skip(start) {
         if row_y + 1 >= inner.y + inner.height {
@@ -1114,3 +1135,21 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
 // ---------------------------------------------------------------------------
 // Panel lateral
 // ---------------------------------------------------------------------------
+
+
+/// Ajusta la primera fila visible para que la selección esté dentro de la
+/// página. Solo desplaza cuando el cursor cruza un borde: así no hay dos
+/// movimientos (fila y cámara) por cada pulsación.
+pub(super) fn keep_visible(start: usize, selected: usize, rows: usize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let rows = rows.max(1).min(len);
+    let mut start = start.min(len.saturating_sub(rows));
+    if selected < start {
+        start = selected;
+    } else if selected >= start + rows {
+        start = selected + 1 - rows;
+    }
+    start.min(len.saturating_sub(rows))
+}
