@@ -1159,6 +1159,9 @@ impl App {
         path: Option<PathBuf>,
         record_history: bool,
     ) {
+        // Elegir otra pista cancela la reproducción que esperaba una descarga;
+        // si no, al terminar esa descarga interrumpía lo que ya estaba sonando.
+        self.pending_play = None;
         let Some(path) = path.or_else(|| self.lib.local_path(&track.key)) else {
             self.queue_track(track, None);
             return;
@@ -1350,6 +1353,15 @@ impl App {
             }
             return;
         }
+        if self.now.path.is_none() {
+            // Pista en espera de descarga: no hay nada en mpv que pausar.
+            if self.pending_play.is_some() {
+                self.toast("esperando descarga…", ToastKind::Info);
+            } else if let Some(track) = self.now.track.clone() {
+                self.queue_track(track, None);
+            }
+            return;
+        }
         self.now.playing = !self.now.playing;
         if let Some(player) = &self.player {
             player.pause(!self.now.playing);
@@ -1416,8 +1428,41 @@ impl App {
             if let Some(path) = path {
                 self.play_local(entry.track, Some(path));
             } else {
-                self.now.track = Some(entry.track.clone());
+                // Ojo: aquí todavía no hay nada cargado en mpv. Antes se
+                // cambiaba `now.track` y se dejaba el fichero anterior en el
+                // reproductor: la UI decía Chanel pero seguía sonando la
+                // canción de antes, y un seek/atrás reproducía esa.
+                if let Some(current) = self.now.track.clone() {
+                    if current.key != entry.track.key {
+                        self.history.push((current, self.now.path.clone()));
+                        if self.history.len() > 100 {
+                            self.history.remove(0);
+                        }
+                    }
+                }
                 self.pending_play = Some(entry.track.key.clone());
+                self.now.track = Some(entry.track.clone());
+                self.now.path = None;
+                self.now.position_ms = 0;
+                self.now.duration_ms = entry.track.duration_ms;
+                self.now.playing = false;
+                self.now.loading = true;
+                self.now.message = "esperando descarga…".into();
+                self.lyrics = None;
+                self.lyrics_status = "esperando descarga…".into();
+                self.lyrics_key.clear();
+                self.art = None;
+                self.art_key.clear();
+                self.art_png = None;
+                self.art_png_key.clear();
+                self.ambient_art = None;
+                self.ambient_art_key.clear();
+                self.song_map = None;
+                self.song_map_key.clear();
+                self.spectrum.stop();
+                if let Some(player) = &self.player {
+                    player.stop();
+                }
                 self.set_status("esperando descarga…");
             }
             return;
@@ -1437,7 +1482,9 @@ impl App {
             self.send_control(ControlAction::Prev, None);
             return;
         }
-        if self.now.position_ms > 3_000 {
+        // Solo se rebobina si de verdad hay un fichero cargado. Con una pista
+        // esperando descarga, `position_ms` es 0 y no hay nada que seekear.
+        if self.now.path.is_some() && self.now.position_ms > 3_000 {
             self.seek_to(0);
             return;
         }
@@ -1554,6 +1601,11 @@ impl App {
                     let _ = spote_core::mpris::call("Seek", &delta);
                 });
             }
+            return;
+        }
+        if self.now.path.is_none() {
+            // Pista pendiente de descarga: no hay fichero en mpv al que
+            // saltar. Evita resucitar por accidente la canción anterior.
             return;
         }
         self.send_control(ControlAction::Seek, Some(ms));
@@ -1998,6 +2050,7 @@ impl App {
                 }
                 PlayerEvent::Paused(paused) => self.now.playing = !paused,
                 PlayerEvent::Eof => {
+                    self.now.playing = false;
                     if let Some(track) = self.now.track.clone() {
                         self.lib
                             .record_play(&track.key, self.now.position_ms, true)
@@ -2153,6 +2206,14 @@ impl App {
                         self.pending_play = None;
                     }
                     self.now.loading = false;
+                    if self.now.track.as_ref().map(|track| track.key.as_str())
+                        == Some(key.as_str())
+                        && self.now.path.is_none()
+                    {
+                        self.now.playing = false;
+                        self.now.message = "descarga fallida".into();
+                        self.lyrics_status = "descarga fallida".into();
+                    }
                     self.finish_download(&key, true);
                     self.toast(format!("descarga fallida: {message}"), ToastKind::Error);
                 }
