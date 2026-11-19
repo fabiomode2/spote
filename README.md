@@ -63,9 +63,26 @@ Config, librería y caché viven en XDG (`~/.config/spote`,
 
 `?` abre la ayuda con todas las teclas.
 
-## Compilar y usar
+## Instalar y actualizar
 
 `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`; `parec` para `record`. Rust 1.82+.
+
+```bash
+git clone https://github.com/fabiomode2/spote && cd spote
+./scripts/install.sh                # compila, instala en ~/.local/bin y prepara el ASR
+./scripts/install.sh --lyricbar ~/Code/lyricbar   # además Genius y captions
+./scripts/update.sh                 # git pull + recompilar + instalar
+```
+
+El instalador crea un venv en `~/.local/share/spote/venv` con
+`faster-whisper`, copia los scripts junto a los datos y enlaza el checkout de
+lyricbar (si se pasa o si está en `../lyricbar`). No hace falta editar el
+`config.toml`: la app detecta ese venv y el lyricbar enlazado.
+
+Al arrancar, la TUI consulta el último commit de `main` en GitHub. Si el
+binario es más viejo, sale un aviso: `enter` lanza `scripts/install.sh
+--update` en segundo plano y cierra la app al terminar; `esc` lo deja para
+luego. `SPOTE_NO_UPDATE_CHECK=1` lo desactiva.
 
 ```bash
 cargo build --release

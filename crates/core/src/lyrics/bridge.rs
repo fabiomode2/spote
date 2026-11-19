@@ -30,10 +30,16 @@ impl BridgeConfig {
             return None;
         }
         let script = resolve_script(&cfg.script)?;
-        // Sin ruta configurada ni variable de entorno, el puente se apaga:
-        // lyricbar es opcional y spote sigue con su proveedor interno.
-        let root = if cfg.root.is_empty() {
-            PathBuf::from(std::env::var_os("LYRICBAR_ROOT")?)
+        // Sin ruta configurada ni variable de entorno, se usa el lyricbar
+        // que haya enlazado el instalador en el directorio de datos.
+        let root = if cfg.root.trim().is_empty() {
+            let env_root = std::env::var_os("LYRICBAR_ROOT").map(PathBuf::from);
+            let managed = crate::config::data_dir().join("lyricbar");
+            match env_root {
+                Some(path) if path.join("lyricbar").is_dir() => path,
+                _ if managed.join("lyricbar").is_dir() => managed,
+                _ => return None,
+            }
         } else {
             PathBuf::from(&cfg.root)
         };
@@ -45,11 +51,16 @@ impl BridgeConfig {
         } else {
             cfg.python.clone()
         };
-        // Si el intérprete es el del sistema, preferimos el venv de lyricbar:
-        // allí están requests, bs4 y compañía.
+        // Si el intérprete es el del sistema, preferimos el venv gestionado
+        // (o el de lyricbar), donde están requests, bs4, yt-dlp y compañía.
         if python == "python3" {
-            let venv = root.join(".venv/bin/python");
-            if venv.is_file() {
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            if let Some(path) = std::env::var_os("SPOTE_LYRICBAR_PYTHON") {
+                candidates.push(PathBuf::from(path));
+            }
+            candidates.push(crate::config::data_dir().join("venv/bin/python"));
+            candidates.push(root.join(".venv/bin/python"));
+            if let Some(venv) = candidates.into_iter().find(|path| path.is_file()) {
                 python = venv.to_string_lossy().into_owned();
             }
         }
@@ -79,6 +90,13 @@ pub(crate) fn resolve_script(configured: &str) -> Option<PathBuf> {
     let local = Path::new(configured);
     if local.is_file() {
         return Some(local.to_path_buf());
+    }
+    // Instalación sin el checkout: los scripts se copian junto a los datos.
+    if let Some(name) = Path::new(configured).file_name() {
+        let installed = crate::config::data_dir().join("scripts").join(name);
+        if installed.is_file() {
+            return Some(installed);
+        }
     }
     // Raíz del workspace deducida en compilación, sin rutas de nadie.
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))

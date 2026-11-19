@@ -9,6 +9,14 @@ impl App {
             Overlay::Layout => self.handle_layout_key(key),
             Overlay::Artist => self.handle_artist_key(key),
             Overlay::Album => self.handle_album_key(key),
+            Overlay::Update => match key.code {
+                KeyCode::Enter | KeyCode::Char('u') => self.start_update(),
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                    self.update_dismissed = true;
+                    self.overlay = Overlay::None;
+                }
+                _ => {}
+            },
             Overlay::Trim => match key.code {
                 KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
                 KeyCode::Char('a') | KeyCode::Home => self.trim_start_here(),

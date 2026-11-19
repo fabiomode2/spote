@@ -119,6 +119,10 @@ impl App {
                     Hint { key: "1-9", label: "capas" },
                     Hint { key: "e", label: "cerrar" },
                 ],
+                Overlay::Update => vec![
+                    Hint { key: "enter", label: "actualizar" },
+                    Hint { key: "esc", label: "luego" },
+                ],
                 Overlay::Trim => vec![
                     Hint { key: "a", label: "marcar inicio" },
                     Hint { key: "b", label: "marcar fin" },

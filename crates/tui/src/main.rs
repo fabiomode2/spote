@@ -7,6 +7,7 @@ mod social;
 mod spotify_jobs;
 mod theme;
 mod ui;
+mod version;
 mod viz;
 
 use std::path::PathBuf;
@@ -666,6 +667,9 @@ fn run_tui(args: Args) -> Result<()> {
     let mut last = Instant::now();
     let result = event_loop(&mut terminal, &mut app, frame_budget, &mut last);
     let _ = restore_terminal();
+    if app.update_finished == Some(true) {
+        println!("· spote actualizado · vuelve a abrirlo para usar la versión nueva");
+    }
     result
 }
 

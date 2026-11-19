@@ -25,6 +25,7 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::Artist => draw_artist(app, buf, layout, pal),
         Overlay::Album => draw_album_page(app, buf, layout, pal),
         Overlay::Trim => draw_trim(app, buf, layout, pal),
+        Overlay::Update => draw_update(app, buf, layout, pal),
     }
 }
 
@@ -999,6 +1000,57 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
         Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
         "enter reproduce · a encola · d baja · s guarda lista · esc cierra",
         Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+}
+
+
+/// Aviso de versión nueva. Si el usuario acepta, el actualizador corre en
+/// segundo plano; aquí solo se explica qué va a pasar.
+fn draw_update(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let rect = overlay_frame(layout, pal, buf, 66, 11, "actualización");
+    let inner = inset(rect, 3, 2);
+    let local = crate::version::LOCAL_SHA;
+    let latest = app
+        .update_info
+        .as_ref()
+        .map(|info| info.latest.chars().take(12).collect::<String>())
+        .unwrap_or_default();
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        "hay una versión nueva en github",
+        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        format!("instalada  {local}"),
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 3, inner.width, 1),
+        format!("en github  {latest}"),
+        Style::new().fg(color(pal.text)),
+        Alignment::Left,
+    );
+    let message = if app.update_run.is_some() {
+        "actualizando… la app se cerrará al terminar"
+    } else {
+        "enter actualizar  ·  esc luego"
+    };
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 6, inner.width, 1),
+        message,
+        Style::new().fg(color(if app.update_run.is_some() {
+            pal.warn
+        } else {
+            pal.primary
+        })),
         Alignment::Left,
     );
 }

@@ -49,10 +49,18 @@ impl AsrConfig {
         } else {
             cfg.python.clone()
         };
-        // El venv de lyricbar suele ser el único que tiene faster-whisper.
-        if python == "python3" && !cfg.root.is_empty() {
-            let venv = Path::new(&cfg.root).join(".venv/bin/python");
-            if venv.is_file() {
+        // El instalador crea un venv propio con faster-whisper; si no,
+        // reutiliza el de lyricbar. También se puede forzar por entorno.
+        if python == "python3" {
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            if let Some(path) = std::env::var_os("SPOTE_ASR_PYTHON") {
+                candidates.push(PathBuf::from(path));
+            }
+            candidates.push(crate::config::data_dir().join("venv/bin/python"));
+            if !cfg.root.is_empty() {
+                candidates.push(Path::new(&cfg.root).join(".venv/bin/python"));
+            }
+            if let Some(venv) = candidates.into_iter().find(|path| path.is_file()) {
                 python = venv.to_string_lossy().into_owned();
             }
         }

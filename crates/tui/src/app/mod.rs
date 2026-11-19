@@ -171,6 +171,8 @@ pub enum Overlay {
     Album,
     /// Editor de recorte de intro/outro.
     Trim,
+    /// Hay una versión nueva en GitHub.
+    Update,
 }
 
 /// Campos del formulario de lista nueva. `field` marca dónde está el cursor.
@@ -738,6 +740,13 @@ pub struct App {
     pub search_start: usize,
     pub search: SearchState,
     pub pending_play: Option<String>,
+    /// Comprobación de versión en segundo plano.
+    pub update_check: Option<std::sync::mpsc::Receiver<Option<crate::version::UpdateInfo>>>,
+    pub update_info: Option<crate::version::UpdateInfo>,
+    /// Actualizador en marcha: `true` si terminó bien.
+    pub update_run: Option<std::sync::mpsc::Receiver<bool>>,
+    pub update_dismissed: bool,
+    pub update_finished: Option<bool>,
 
     pub lyrics: Option<LyricsDoc>,
     pub lyrics_status: String,
@@ -933,6 +942,11 @@ impl App {
             search_start: 0,
             search: SearchState::default(),
             pending_play: None,
+            update_check: crate::version::spawn_check(),
+            update_info: None,
+            update_run: None,
+            update_dismissed: false,
+            update_finished: None,
             lyrics: None,
             lyrics_status: String::new(),
             lyrics_key: String::new(),
@@ -1340,6 +1354,29 @@ impl App {
         self.lib.upsert_track(track).ok();
         self.downloader
             .download(&track.key, DownloadSource::Url(url), self.cfg.media_dir());
+    }
+
+    /// Lanza el actualizador del repo en segundo plano. La TUI sigue viva
+    /// hasta que termina; entonces se cierra para dejar paso a la versión
+    /// nueva.
+    fn start_update(&mut self) {
+        if self.update_run.is_some() {
+            return;
+        }
+        match crate::version::spawn_update() {
+            Some(rx) => {
+                self.update_run = Some(rx);
+                self.overlay = Overlay::None;
+                self.set_status("actualizando spote… se cerrará al terminar");
+            }
+            None => {
+                self.overlay = Overlay::None;
+                self.toast(
+                    "no encuentro scripts/install.sh; actualiza a mano con git pull",
+                    ToastKind::Error,
+                );
+            }
+        }
     }
 
     pub fn toggle_play(&mut self) {
@@ -1965,6 +2002,39 @@ impl App {
                 .unwrap_or(0);
             let next = modes[(current + 1) % modes.len()];
             self.set_art_mode(next);
+        }
+        if let Some(rx) = &self.update_check {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.update_check = None;
+                    if let Some(info) = result {
+                        self.update_info = Some(info);
+                        if !self.update_dismissed && self.overlay == Overlay::None {
+                            self.overlay = Overlay::Update;
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_check = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if let Some(rx) = &self.update_run {
+            match rx.try_recv() {
+                Ok(ok) => {
+                    self.update_run = None;
+                    self.update_finished = Some(ok);
+                    if ok {
+                        self.should_quit = true;
+                    } else {
+                        self.toast(
+                            "la actualización falló; mira ~/.cache/spote/update.log",
+                            ToastKind::Error,
+                        );
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_run = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
         }
         if let Some(doc) = &self.lyrics {
             if let Some(index) = doc.index_at(self.display_position_ms()) {
