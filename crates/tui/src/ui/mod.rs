@@ -387,18 +387,24 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-fn put(buf: &mut Buffer, x: u16, y: u16, symbol: &str, fg: Color, bg: Option<Color>) {
+/// Escribe `text` repartido por celdas desde `(x, y)`.
+///
+/// Antes la cadena entera acababa como símbolo de una sola celda: el terminal
+/// la pintaba desbordando a la derecha mientras ratatui solo apuntaba una
+/// celda, así que al acortarse un texto el diff no limpiaba los caracteres
+/// sobrantes y se quedaban en pantalla. `set_stringn` coloca cada grafema en su
+/// celda, respeta el ancho de los caracteres anchos y recorta al borde.
+fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, fg: Color, bg: Option<Color>) {
     let area = *buf.area();
-    if x >= area.x + area.width || y >= area.y + area.height {
+    if x < area.x || y < area.y || x >= area.x + area.width || y >= area.y + area.height {
         return;
     }
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        cell.set_symbol(symbol);
-        cell.set_fg(fg);
-        if let Some(bg) = bg {
-            cell.set_bg(bg);
-        }
+    let mut style = Style::new().fg(fg);
+    if let Some(bg) = bg {
+        style = style.bg(bg);
     }
+    let max_width = (area.x + area.width - x) as usize;
+    buf.set_stringn(x, y, text, max_width, style);
 }
 
 fn put_bg(buf: &mut Buffer, x: u16, y: u16, bg: Rgb) {
@@ -775,5 +781,21 @@ mod tests {
         assert_eq!(bar_width(100, 100), 80);
         assert_eq!(bar_width(30, 55), 16);
         assert_eq!(bar_width(10, 100), 10);
+    }
+
+    #[test]
+    fn put_spreads_text_across_cells() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 1));
+        put(&mut buf, 2, 0, "hola", Color::Red, None);
+        let symbols: Vec<&str> = (2..7).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(symbols, ["h", "o", "l", "a", " "]);
+    }
+
+    #[test]
+    fn put_clips_text_at_buffer_edge() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        put(&mut buf, 2, 0, "hola", Color::Red, None);
+        assert_eq!(buf[(2, 0)].symbol(), "h");
+        assert_eq!(buf[(3, 0)].symbol(), "o");
     }
 }
