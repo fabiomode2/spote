@@ -527,7 +527,14 @@ fn draw_active_line(
             }
         }
     } else {
-        let span = line.end_ms.saturating_sub(line.start_ms).max(1);
+        // Sin palabras por sílaba, se llena también con un pelín de margen:
+        // si el último carácter se enciende justo al cambiar de línea, no se
+        // llega a ver nunca.
+        let span = line
+            .end_ms
+            .saturating_sub(150)
+            .saturating_sub(line.start_ms)
+            .max(1);
         let progress =
             (position.saturating_sub(line.start_ms) as f32 / span as f32).clamp(0.0, 1.0);
         let chars: Vec<char> = line.text.chars().collect();

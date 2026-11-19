@@ -1608,9 +1608,21 @@ impl App {
             // tiempos malos; se muestra mientras se vuelve a afinar.
             let stale_alignment =
                 row.aligned && row.align_version < spote_core::library::LYRICS_ALIGN_VERSION;
+            // Un LRC «sincronizado» también puede venir roto: varias líneas a
+            // menos de 400 ms es una ráfaga imposible y merece ASR.
+            let broken_sync = row.synced
+                && !row.aligned
+                && doc
+                    .lines
+                    .windows(2)
+                    .filter(|pair| {
+                        pair[1].start_ms.saturating_sub(pair[0].start_ms) < 400
+                    })
+                    .count()
+                    >= 2;
             self.lyrics_offset_ms = doc.offset_ms;
             self.lyrics = Some(doc);
-            self.lyrics_status = if stale_alignment {
+            self.lyrics_status = if stale_alignment || broken_sync {
                 "afinando de nuevo…".to_string()
             } else if row.aligned {
                 "asr".to_string()
@@ -1622,15 +1634,18 @@ impl App {
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-            if ((!row.synced && !row.aligned) || stale_alignment)
+            if ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
                 && audio.is_some()
                 && !self.lyrics_retry.contains(&track.key)
             {
                 self.lyrics_retry.insert(track.key.clone());
                 self.lyrics_loading = true;
                 self.lyrics_status = "afinando con el audio…".into();
-                self.lyrics_worker
-                    .request(track.clone(), audio, stale_alignment);
+                self.lyrics_worker.request(
+                    track.clone(),
+                    audio,
+                    stale_alignment || broken_sync,
+                );
             } else {
                 return;
             }
@@ -1825,17 +1840,33 @@ impl App {
                 cumulative += weight;
             }
             starts.sort_unstable();
-            // Anclas: la frase empieza con la primera palabra y termina con la
-            // última; nunca al revés.
+            // Anclas: la frase empieza con la primera palabra. La última no
+            // se pega a `line.end_ms`: si empieza justo cuando salta la línea,
+            // nunca llega a encenderse. Se le deja un margen de 150 ms para
+            // que el karaoke la llene antes del cambio.
             if let Some(first) = starts.first_mut() {
                 *first = line.start_ms;
             }
+            let tail_end = line
+                .end_ms
+                .saturating_sub(150)
+                .max(line.start_ms + 1);
+            // Deja al menos 250 ms para que la última palabra se encienda.
+            let last_start_limit = tail_end.saturating_sub(250).max(line.start_ms);
             if let Some(last) = starts.last_mut() {
-                *last = line.end_ms;
+                *last = (*last).min(last_start_limit);
             }
+            starts.sort_unstable();
             for (i, word) in line.words.iter_mut().enumerate() {
-                word.start_ms = starts[i];
-                word.end_ms = starts.get(i + 1).copied().unwrap_or(line.end_ms);
+                word.start_ms = starts[i].min(last_start_limit);
+                word.end_ms = starts
+                    .get(i + 1)
+                    .copied()
+                    .unwrap_or(tail_end)
+                    .max(word.start_ms + 1);
+            }
+            if let Some(last) = line.words.last_mut() {
+                last.end_ms = tail_end.max(last.start_ms + 1);
             }
         }
     }
@@ -2383,8 +2414,16 @@ impl App {
         };
         if doc.offset_ms != 0
             || doc.aligned
-            || doc.source == spote_core::lyrics::LyricsSource::Local
+            || matches!(
+                doc.source,
+                spote_core::lyrics::LyricsSource::Estimated
+                    | spote_core::lyrics::LyricsSource::Plain
+                    | spote_core::lyrics::LyricsSource::Local
+            )
         {
+            // Una letra estimada no tiene una rejilla fiable: desplazarla
+            // «un poco» solo empeora la sensación de desfase. Para eso está
+            // el ASR; el offset automático es para LRC sincronizados.
             return;
         }
         let Some(offset) = doc.estimate_offset_from_map(&map) else {
@@ -2437,6 +2476,13 @@ impl App {
                             } else {
                                 doc.source.label().to_string()
                             };
+                            // Si esta vez no se pudo afinar, se permite otro
+                            // intento en la siguiente reproducción; antes un
+                            // fallo transitorio bloqueaba la pista toda la
+                            // sesión.
+                            if !doc.aligned && self.lib.local_path(&key).is_some() {
+                                self.lyrics_retry.remove(&key);
+                            }
                             let mut doc = doc;
                             let lrc_offset = doc.offset_ms;
                             self.lyrics_offset_ms = self.lib.lyrics_offset(&key).unwrap_or(0);
@@ -2451,6 +2497,9 @@ impl App {
                             self.refine_lyrics_words();
                         }
                         None => {
+                            if self.lib.local_path(&key).is_some() {
+                                self.lyrics_retry.remove(&key);
+                            }
                             if self.lyrics_key == key && self.lyrics.is_some() {
                                 self.lyrics_status = error
                                     .unwrap_or_else(|| "letra aproximada (sin mejorar)".into());

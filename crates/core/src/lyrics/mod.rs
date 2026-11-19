@@ -665,14 +665,26 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
         } else {
             line.end_ms
         };
-        // Rellena el final de las palabras con el inicio de la siguiente.
+        // Rellena el final de las palabras con el inicio de la siguiente. La
+        // última termina un pelín antes del borde del verso: si acaba justo
+        // cuando salta la línea, en la práctica nunca se ve llena.
         let starts: Vec<u64> = line.words.iter().map(|word| word.start_ms).collect();
+        let count = line.words.len();
+        let tail_end = line
+            .end_ms
+            .saturating_sub(WORD_TAIL_MS)
+            .max(line.start_ms + 1);
         for (i, word) in line.words.iter_mut().enumerate() {
+            let boundary = if i + 1 == count {
+                tail_end.max(word.start_ms + 1)
+            } else {
+                line.end_ms
+            };
             word.end_ms = starts
                 .get(i + 1)
                 .copied()
                 .unwrap_or(default_end)
-                .min(line.end_ms);
+                .min(boundary);
         }
         mark_optional_words(line);
     }
@@ -688,6 +700,9 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
 const INSTRUMENTAL_MARK: &str = "♪";
 /// Silencio a partir del cual se pinta una línea instrumental entre dos versos.
 const GAP_MARK_MS: u64 = 12_000;
+/// Margen al final de cada verso para que la última palabra llegue a llenarse
+/// antes de que la línea activa salte a la siguiente.
+const WORD_TAIL_MS: u64 = 150;
 /// Duración estimada de un verso sin tags de palabra.
 const LINE_ESTIMATE_MIN_MS: u64 = 2_500;
 const LINE_ESTIMATE_MAX_MS: u64 = 8_000;
@@ -1165,6 +1180,21 @@ mod tests {
         assert_eq!(doc.lines[0].words[0].start_ms, 60_000);
         assert_eq!(doc.lines[0].words[1].start_ms, 60_500);
         assert!(doc.lines[0].words[0].start_ms >= doc.lines[0].start_ms);
+    }
+
+    #[test]
+    fn last_word_finishes_before_the_next_line() {
+        let doc = parse_lrc("[00:00.00]one two three\n[00:05.00]four five six");
+        let line = &doc.lines[0];
+        let last = line.words.last().expect("palabras sintetizadas");
+        assert!(
+            last.end_ms < line.end_ms,
+            "última palabra {} termina en {} y la línea en {}",
+            last.text,
+            last.end_ms,
+            line.end_ms
+        );
+        assert!(last.end_ms + WORD_TAIL_MS >= line.end_ms);
     }
 
     #[test]
