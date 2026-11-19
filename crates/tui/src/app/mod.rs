@@ -1422,7 +1422,7 @@ impl App {
             }
             return;
         }
-        self.play_view_step(1, true, true);
+        self.play_view_step(1, true, true, false);
     }
 
     pub fn prev_track(&mut self) {
@@ -1448,23 +1448,64 @@ impl App {
                 .filter(|path| path.exists())
                 .or_else(|| self.lib.local_path(&track.key));
             if path.is_some() {
+                // La pista que dejamos pasa a ser la primera de la cola: al
+                // dar a «siguiente» se vuelve a ella antes de continuar con
+                // lo que ya estaba encolado.
+                self.queue_current_for_back();
                 self.play_local_inner(track, path, false);
                 return;
             }
         }
-        self.play_view_step(-1, false, false);
+        self.play_view_step(-1, false, false, true);
+    }
+
+    /// Mete la pista actual al principio de la cola local. Se usa al
+    /// retroceder para que el camino de vuelta no se pierda: si la cola era
+    /// [B, C] y estabas en A, atrás deja [A, B, C] y «siguiente» vuelve a A.
+    fn queue_current_for_back(&mut self) {
+        let Some(track) = self.now.track.clone() else {
+            return;
+        };
+        let selected_key = self
+            .queue
+            .get(self.queue_selected)
+            .map(|entry| entry.track.key.clone());
+        // Si ya estaba en la cola (aunque más abajo), se mueve al frente para
+        // no acabar con la misma canción dos veces.
+        self.queue.retain(|entry| entry.track.key != track.key);
+        self.queue.insert(
+            0,
+            QueueEntry {
+                track: track.clone(),
+                path: self.now.path.clone(),
+            },
+        );
+        self.queue_selected = if selected_key.as_deref() == Some(track.key.as_str()) {
+            0
+        } else {
+            selected_key
+                .and_then(|key| self.queue.iter().position(|entry| entry.track.key == key))
+                .unwrap_or(0)
+        };
     }
 
     /// Avanza/retrocede en la lista tomando como referencia la pista que
     /// suena, no la fila seleccionada. Si la pista no está en la lista actual,
     /// arranca desde la selección.
-    fn play_view_step(&mut self, delta: i32, wrap: bool, record_history: bool) {
+    fn play_view_step(
+        &mut self,
+        delta: i32,
+        wrap: bool,
+        record_history: bool,
+        queue_current: bool,
+    ) {
         if self.view.is_empty() {
             return;
         }
         let current = self.now.track.as_ref().map(|track| track.key.clone());
         let index = current
-            .and_then(|key| self.view.iter().position(|row| row.track.key == key))
+            .as_ref()
+            .and_then(|key| self.view.iter().position(|row| &row.track.key == key))
             .unwrap_or_else(|| self.selected.min(self.view.len() - 1));
         let len = self.view.len() as i32;
         let next = if wrap {
@@ -1474,6 +1515,9 @@ impl App {
         };
         self.selected = next as usize;
         if let Some(row) = self.view.get(self.selected).cloned() {
+            if queue_current && current.as_deref() != Some(row.track.key.as_str()) {
+                self.queue_current_for_back();
+            }
             self.play_local_inner(row.track, row.path, record_history);
         }
     }
