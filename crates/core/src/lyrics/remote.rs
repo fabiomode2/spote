@@ -91,6 +91,13 @@ pub async fn fetch_track(
             return Ok(Some(doc));
         }
     }
+    // 3) Genius: letra plana. Es el respaldo que hace que spote no dependa de
+    //    un checkout de lyricbar para las canciones que no están en LRCLIB.
+    if Instant::now() < deadline {
+        if let Ok(Some(doc)) = fetch_genius(client, track).await {
+            return Ok(Some(doc));
+        }
+    }
     Ok(None)
 }
 
@@ -680,6 +687,335 @@ struct RemoteLyrics {
     synced_lyrics: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Genius (letra plana)
+// ---------------------------------------------------------------------------
+
+const GENIUS_SEARCH: &str = "https://genius.com/api/search/multi";
+const GENIUS_BASE: &str = "https://genius.com";
+const GENIUS_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+                         (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const GENIUS_ACCEPT_JSON: &str = "application/json";
+const GENIUS_ACCEPT_HTML: &str =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+#[derive(Debug, Deserialize)]
+struct GeniusSearch {
+    #[serde(default)]
+    response: GeniusResponse,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GeniusResponse {
+    #[serde(default)]
+    sections: Vec<GeniusSection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeniusSection {
+    #[serde(default)]
+    hits: Vec<GeniusHit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeniusHit {
+    #[serde(default)]
+    result: Option<GeniusSong>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeniusSong {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    title: String,
+    /// Genius pone aquí todos los artistas: "Guxo, Flako NKO & yoyo.stay".
+    #[serde(default)]
+    artist_names: String,
+    #[serde(default)]
+    path: String,
+    #[serde(rename = "_type", default)]
+    kind: String,
+    #[serde(default)]
+    lyrics_state: String,
+}
+
+/// Busca una canción en Genius, elige la mejor coincidencia y extrae su letra.
+async fn fetch_genius(
+    client: &reqwest::Client,
+    track: &TrackRef,
+) -> Result<Option<LyricsDoc>, LyricsError> {
+    let query = format!("{} {}", track.title.trim(), track.artist.trim());
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(None);
+    }
+    let url = format!(
+        "{GENIUS_SEARCH}?per_page=5&q={}",
+        url_encode(query)
+    );
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, GENIUS_UA)
+        .header(reqwest::header::ACCEPT, GENIUS_ACCEPT_JSON)
+        .send()
+        .await
+        .map_err(map_error)?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body: GeniusSearch = response.json().await.map_err(map_error)?;
+    let Some(song) = best_genius_song(&body, track) else {
+        if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+            eprintln!("[genius] sin candidato en {} secciones", body.response.sections.len());
+        }
+        return Ok(None);
+    };
+    if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+        eprintln!("[genius] candidato {} · {}", song.title, song.path);
+    }
+    let path = if song.path.starts_with("http://") || song.path.starts_with("https://") {
+        song.path.clone()
+    } else if song.path.starts_with('/') {
+        format!("{GENIUS_BASE}{}", song.path)
+    } else {
+        format!("{GENIUS_BASE}/{}", song.path)
+    };
+    let response = client
+        .get(&path)
+        .header(reqwest::header::USER_AGENT, GENIUS_UA)
+        .header(reqwest::header::ACCEPT, GENIUS_ACCEPT_HTML)
+        .send()
+        .await
+        .map_err(map_error)?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let status = response.status();
+    let page = response.text().await.map_err(map_error)?;
+    let text = extract_genius_lyrics(&page);
+    if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+        eprintln!(
+            "[genius] página {} · {} bytes · {} de letra",
+            status,
+            page.len(),
+            text.len()
+        );
+    }
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let raw = RemoteLyrics {
+        id: song.id,
+        track_name: song.title.clone(),
+        artist_name: song.artist_names.clone(),
+        album_name: String::new(),
+        duration: 0.0,
+        plain_lyrics: Some(text),
+        synced_lyrics: None,
+    };
+    Ok(plain_doc(&raw, track))
+}
+
+fn best_genius_song<'a>(search: &'a GeniusSearch, track: &TrackRef) -> Option<&'a GeniusSong> {
+    let mut best: Option<(f64, &GeniusSong)> = None;
+    for section in &search.response.sections {
+        for hit in &section.hits {
+            let Some(song) = hit.result.as_ref() else {
+                continue;
+            };
+            if !song.kind.is_empty() && song.kind != "song" {
+                continue;
+            }
+            if song.title.trim().is_empty() || song.path.trim().is_empty() {
+                continue;
+            }
+            if song.lyrics_state == "unavailable" {
+                continue;
+            }
+            let title_score = title_similarity(&song.title, track);
+            if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+                eprintln!(
+                    "[genius] hit kind={:?} title={:?} artist={:?} path={:?} title_score={title_score:.2}",
+                    song.kind, song.title, song.artist_names, song.path
+                );
+            }
+            if title_score < 0.50 {
+                continue;
+            }
+            let artist_score = if track.artist.trim().is_empty() {
+                0.5
+            } else {
+                artist_similarity(&song.artist_names, &track.artist)
+            };
+            // Mismo título de otro artista no vale para nada.
+            if !track.artist.trim().is_empty() && artist_score < 0.20 {
+                continue;
+            }
+            let score = title_score * 0.72 + artist_score * 0.28;
+            if best.as_ref().is_none_or(|(best, _)| score > *best) {
+                best = Some((score, song));
+            }
+        }
+    }
+    best.map(|(_, song)| song)
+}
+
+/// Extrae la letra de los `div[data-lyrics-container="true"]` de Genius.
+///
+/// Sin dependencias de HTML: se recorre el marcado buscando el div, se anidan
+/// las etiquetas y se convierte `<br>`/bloques en saltos de línea. Los bloques
+/// `data-exclude-from-selection` ("You might also like" y similares) se
+/// descartan antes para no colarlos como verso.
+fn extract_genius_lyrics(page: &str) -> String {
+    let page = strip_excluded_blocks(page);
+    let mut lines: Vec<String> = Vec::new();
+    for marker in ["data-lyrics-container=\"true\"", "data-lyrics-container='true'"] {
+        let mut cursor = 0;
+        while let Some(found) = page[cursor..].find(marker) {
+            let at = cursor + found;
+            let Some(open) = page[..at].rfind('<') else { break };
+            if !page[open..].to_ascii_lowercase().starts_with("<div") {
+                cursor = at + marker.len();
+                continue;
+            }
+            let Some(close) = page[at..].find('>') else { break };
+            let body_start = at + close + 1;
+            let Some(end) = matching_div_end(&page, body_start) else {
+                break;
+            };
+            for line in html_to_text(&page[body_start..end]).lines() {
+                let line = line.trim();
+                if line.is_empty() || is_section_header(line) {
+                    continue;
+                }
+                lines.push(line.to_string());
+            }
+            cursor = end + 6;
+        }
+        if !lines.is_empty() {
+            break;
+        }
+    }
+    lines.join("\n")
+}
+
+fn is_section_header(line: &str) -> bool {
+    line.len() >= 2
+        && line.starts_with('[')
+        && line.ends_with(']')
+        && !line[1..line.len() - 1].contains('[')
+}
+
+fn strip_excluded_blocks(html: &str) -> String {
+    let mut page = html.to_string();
+    loop {
+        let Some(at) = page.find("data-exclude-from-selection") else {
+            return page;
+        };
+        let Some(open) = page[..at].rfind('<') else { return page };
+        let Some(close) = page[open..].find('>') else { return page };
+        let body_start = open + close + 1;
+        let Some(end) = matching_div_end(&page, body_start) else {
+            return page;
+        };
+        page.replace_range(open..end + 6, "");
+    }
+}
+
+/// Índice del `</div>` que cierra un div cuyo contenido empieza en `start`.
+fn matching_div_end(html: &str, start: usize) -> Option<usize> {
+    let mut depth = 1i32;
+    let mut cursor = start;
+    while cursor < html.len() {
+        let lt = html[cursor..].find('<')? + cursor;
+        let gt = html[lt..].find('>')? + lt + 1;
+        let tag = html[lt..gt].to_ascii_lowercase();
+        if tag.starts_with("</div") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(lt);
+            }
+        } else if tag.starts_with("<div") {
+            depth += 1;
+        }
+        cursor = gt;
+    }
+    None
+}
+
+/// Convierte el interior de un contenedor de letra a texto: saltos en `<br>` y
+/// cierres de bloque, etiquetas fuera, entidades decodificadas.
+fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let Some(gt) = rest[lt..].find('>') else {
+            out.push_str(&rest[lt..]);
+            return decode_entities(&out);
+        };
+        let tag = rest[lt + 1..lt + gt].trim().to_ascii_lowercase();
+        let is_break = tag.starts_with("br")
+            || tag.starts_with("/p")
+            || tag.starts_with("/div")
+            || tag.starts_with("/li")
+            || tag.starts_with("p")
+            || tag.starts_with("li");
+        if is_break {
+            out.push('\n');
+        }
+        rest = &rest[lt + gt + 1..];
+    }
+    out.push_str(rest);
+    decode_entities(&out)
+}
+
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let Some(semi) = rest.find(';') else {
+            out.push_str(rest);
+            return out;
+        };
+        if semi > 10 {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        }
+        let entity = &rest[1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "nbsp" => Some(' '),
+            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                u32::from_str_radix(&entity[2..], 16).ok().and_then(char::from_u32)
+            }
+            _ if entity.starts_with('#') => {
+                entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        match decoded {
+            Some(char) => out.push(char),
+            None => {
+                out.push('&');
+                out.push_str(entity);
+                out.push(';');
+            }
+        }
+        rest = &rest[semi + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,6 +1273,45 @@ mod tests {
             &track(),
         );
         assert!((clean - noisy).abs() < 1e-9, "{clean} != {noisy}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn genius_live() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap();
+        let track = TrackRef {
+            key: "x".into(),
+            title: "Kariñosa".into(),
+            artist: "Guxo".into(),
+            duration_ms: 176_062,
+            ..TrackRef::default()
+        };
+        let doc = fetch_genius(&client, &track).await.unwrap();
+        eprintln!(
+            "{:?}",
+            doc.map(|doc| (
+                doc.source.label(),
+                doc.lines.len(),
+                doc.lines.iter().take(4).map(|line| line.text.clone()).collect::<Vec<_>>()
+            ))
+        );
+    }
+
+    #[test]
+    fn extracts_genius_lyrics_and_drops_excluded_blocks() {
+        let page = r#"<div class="Lyrics__Container" data-lyrics-container="true">[Verse 1]<br/>Hola &amp; adiós<br/>Otra línea<div data-exclude-from-selection="true">You might also like</div></div>"#;
+        let text = extract_genius_lyrics(page);
+        assert_eq!(text, "Hola & adiós\nOtra línea");
+    }
+
+    #[test]
+    fn genius_entities_and_inline_tags() {
+        let page = r#"<div data-lyrics-container="true">Te <i>quiero</i> &#39;mucho&#39;<br/>y &quot;más&quot;</div>"#;
+        let text = extract_genius_lyrics(page);
+        assert_eq!(text, "Te quiero 'mucho'\ny \"más\"");
     }
 
     #[test]

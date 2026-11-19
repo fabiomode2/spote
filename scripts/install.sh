@@ -138,7 +138,7 @@ if [[ -n "$LYRICBAR" ]]; then
     warn "$DATA_DIR/lyricbar ya existe y no es un enlace; se respeta"
   fi
 else
-  warn "sin lyricbar: solo LRCLIB interno (para Genius/captions usa --lyricbar)"
+  warn "sin lyricbar: LRCLIB + Genius internos (captions de YouTube con --lyricbar)"
 fi
 
 if [[ "$ASR" == 1 || -n "$LYRICBAR" ]]; then
@@ -172,7 +172,7 @@ esac
 
 say "listo · lanza: spote"
 if [[ -n "$LYRICBAR" ]]; then
-  say "letras: LRCLIB + Genius/captions (lyricbar) + ASR"
+  say "letras: LRCLIB + Genius internos + captions (lyricbar) + ASR"
 elif [[ "$ASR" == 1 ]]; then
-  say "letras: LRCLIB + ASR (sin Genius/captions)"
+  say "letras: LRCLIB + Genius internos + ASR (sin captions de YouTube)"
 fi

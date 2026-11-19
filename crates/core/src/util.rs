@@ -30,6 +30,12 @@ pub fn normalize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut depth = 0usize;
     for ch in text.chars() {
+        // Genius devuelve a veces los acentos descompuestos (n + tilde
+        // combinante). Si no se descartan, "Karin\u{303}osa" no casa con
+        // "Kariñosa": el título se convierte en "karin osa".
+        if ('\u{0300}'..='\u{036f}').contains(&ch) {
+            continue;
+        }
         match ch {
             '(' | '[' => depth += 1,
             ')' | ']' => depth = depth.saturating_sub(1),
@@ -306,6 +312,11 @@ mod tests {
         assert_eq!(format_ms(0), "0:00");
         assert_eq!(format_ms(83_000), "1:23");
         assert_eq!(format_ms(3_723_000), "1:02:03");
+    }
+
+    #[test]
+    fn normalizes_decomposed_accents() {
+        assert_eq!(normalize("Karin\u{303}osa"), normalize("Kariñosa"));
     }
 
     #[test]
