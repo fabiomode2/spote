@@ -5,7 +5,10 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SPOTE_GIT_SHA");
+    // El sha cambia al hacer commit aunque los fuentes no cambien.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/refs/heads/main");
+    println!("cargo:rerun-if-changed=../../.git/packed-refs");
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let repo = std::fs::canonicalize(&repo).unwrap_or(repo);
     println!("cargo:rustc-env=SPOTE_REPO_DIR={}", repo.display());
