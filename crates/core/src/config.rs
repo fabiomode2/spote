@@ -41,6 +41,15 @@ pub struct LyricsCfg {
     pub script: String,
     /// Checkout de lyricbar. Vacío = usar `LYRICBAR_ROOT` o desactivar el puente.
     pub root: String,
+    /// Afina las líneas estimadas contra el audio local con faster-whisper.
+    /// La alineación es de spote; solo se delega la transcripción.
+    pub asr: bool,
+    /// Transcriptor auxiliar (ventanas → palabras). Relativo al repo.
+    pub asr_script: String,
+    pub asr_model: String,
+    pub asr_device: String,
+    /// `auto` deja que el modelo detecte el idioma.
+    pub asr_language: String,
 }
 
 impl Default for LyricsCfg {
@@ -50,6 +59,11 @@ impl Default for LyricsCfg {
             python: "python3".to_string(),
             script: "scripts/lyricbar_bridge.py".to_string(),
             root: String::new(),
+            asr: true,
+            asr_script: "scripts/asr_words.py".to_string(),
+            asr_model: "small".to_string(),
+            asr_device: "auto".to_string(),
+            asr_language: "auto".to_string(),
         }
     }
 }

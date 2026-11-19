@@ -30,8 +30,9 @@ El camino de una canción:
    lyricbar) o del proveedor interno. Con audio local, faster-whisper alinea
    las líneas estimadas leyendo la canción por pasadas: la completa y, si el
    modelo se deja el final o una estrofa, solo esa zona con 15 s de contexto;
-   de las lecturas se queda la que mejor encaja. `shift+clic` recalibra una
-   línea a mano.
+   de las lecturas se queda la que mejor encaja. La alineación (fonética,
+   anclas y reparto) es de spote; `scripts/asr_words.py` solo transcribe
+   ventanas con faster-whisper. `shift+clic` recalibra una línea a mano.
 
 Config, librería y caché viven en XDG (`~/.config/spote`,
 `~/.local/share/spote`, `~/.cache/spote`). `SPOTE_HOME` los reubica todos.
@@ -101,6 +102,11 @@ ambient = "cover"      # off | void | aurora | neural | glitch | lyrics | cover
 `SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET` activan el token de aplicación
 cuando el anónimo está bloqueado. `LYRICBAR_ROOT` (o `[lyrics] root`) apunta al
 checkout de lyricbar; sin él, el puente se apaga y sigue el proveedor interno.
+
+El ASR se controla desde `[lyrics]`: `asr` (por defecto `true`), `asr_model`
+(`small`), `asr_device` (`auto`) y `asr_language` (`auto`). Necesita
+`faster-whisper` en el intérprete configurado (`python`) y `ffmpeg`; si falta
+algo, la letra estimada se muestra igual y no se reintenta en bucle.
 
 <p>
   <img src="docs/screenshots/art-focus.png" width="49%" alt="portada a pantalla completa">

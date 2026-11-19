@@ -6,6 +6,8 @@
 
 use spote_protocol::TrackRef;
 
+mod align;
+mod asr;
 mod bridge;
 mod remote;
 mod text;
@@ -331,6 +333,7 @@ pub enum LyricsError {
 pub struct LyricsService {
     client: reqwest::Client,
     bridge: Option<bridge::BridgeConfig>,
+    asr: Option<asr::AsrConfig>,
 }
 
 impl LyricsService {
@@ -343,6 +346,7 @@ impl LyricsService {
         Self {
             client,
             bridge: None,
+            asr: None,
         }
     }
 
@@ -355,10 +359,12 @@ impl LyricsService {
 
     /// Construye el servicio desde la configuración (respeta `lyrics.bridge`).
     pub fn from_config(cfg: &crate::config::LyricsCfg) -> Self {
-        match bridge::BridgeConfig::resolve(cfg) {
+        let mut service = match bridge::BridgeConfig::resolve(cfg) {
             Some(bridge) => Self::with_bridge(bridge),
             None => Self::new(),
-        }
+        };
+        service.asr = asr::AsrConfig::resolve(cfg);
+        service
     }
 
     /// `true` si hay puente a lyricbar activo.
@@ -372,18 +378,64 @@ impl LyricsService {
         self.fetch_with_audio(track, None, false).await
     }
 
-    /// Igual que [`fetch`](Self::fetch), pero deja que el puente alinee la
-    /// letra contra el audio local con ASR. Es lo que arregla los LRC
-    /// estimados de Genius y las canciones con intro larga.
+    /// Igual que [`fetch`](Self::fetch), pero afina la letra contra el audio
+    /// local: lee el audio con ASR y alinea la letra conocida en Rust.
     pub async fn fetch_with_audio(
         &self,
         track: &TrackRef,
         audio: Option<&std::path::Path>,
         force_align: bool,
     ) -> Result<Option<LyricsDoc>, LyricsError> {
+        let doc = self.resolve_text(track).await?;
+        let Some(mut doc) = doc else {
+            return Ok(None);
+        };
+        let (Some(audio), Some(config)) = (audio, self.asr.as_ref()) else {
+            return Ok(Some(doc));
+        };
+        if !needs_alignment(&doc, force_align) {
+            return Ok(Some(doc));
+        }
+        let lines: Vec<LyricLine> = doc
+            .lines
+            .iter()
+            .filter(|line| {
+                let text = line.text.trim();
+                !text.is_empty() && !text.trim_matches('♪').trim().is_empty()
+            })
+            .cloned()
+            .collect();
+        if lines.len() < 2 {
+            return Ok(Some(doc));
+        }
+        let duration_s = track.duration_ms as f64 / 1000.0;
+        match asr::align_track(config, audio, duration_s, &lines) {
+            Some((aligned, confidence)) => {
+                tracing::info!(
+                    target: "spote::lyrics",
+                    "letra alineada con ASR: {} líneas, confianza {:.2}",
+                    aligned.len(),
+                    confidence
+                );
+                doc.lines = aligned;
+                doc.aligned = true;
+                doc.synced = true;
+            }
+            None => {
+                tracing::debug!(
+                    target: "spote::lyrics",
+                    "ASR sin una alineación fiable; se mantiene la letra estimada"
+                );
+            }
+        }
+        Ok(Some(doc))
+    }
+
+    /// Resuelve el texto (LRCLIB, Genius, captions o interno) sin tocar audio.
+    async fn resolve_text(&self, track: &TrackRef) -> Result<Option<LyricsDoc>, LyricsError> {
         if let Some(bridge) = &self.bridge {
-            match bridge::fetch(bridge, track, audio, force_align) {
-                // Letra con marcas reales (o ya alineada por ASR): gana.
+            match bridge::fetch(bridge, track) {
+                // Letra con marcas reales: gana.
                 Ok(Some(doc)) if doc.synced || doc.aligned => return Ok(Some(doc)),
                 // Letra plana de Genius: se enseña, pero si el proveedor
                 // interno tiene una versión sincronizada es mejor esa.
@@ -404,6 +456,32 @@ impl LyricsService {
     pub fn from_local_lrc(text: &str) -> LyricsDoc {
         parse_lrc(text)
     }
+}
+
+/// ¿Merece la pena re-alinear? Un LRC sincronizado de LRCLIB suele ser mejor
+/// que el ASR; solo se toca si viene de una versión vieja (`force_align`) o si
+/// trae ráfagas imposibles (varias líneas a menos de 400 ms).
+fn needs_alignment(doc: &LyricsDoc, force_align: bool) -> bool {
+    if force_align {
+        return true;
+    }
+    if doc.aligned {
+        return false;
+    }
+    if !doc.synced || matches!(doc.source, LyricsSource::Estimated | LyricsSource::Plain) {
+        return true;
+    }
+    let mut previous: Option<u64> = None;
+    let mut tight = 0usize;
+    for line in &doc.lines {
+        if let Some(previous) = previous {
+            if line.start_ms.saturating_sub(previous) < 400 {
+                tight += 1;
+            }
+        }
+        previous = Some(line.start_ms);
+    }
+    tight >= 2
 }
 
 impl Default for LyricsService {

@@ -64,8 +64,8 @@ impl BridgeConfig {
     }
 }
 
-/// Busca el script del puente en los sitios razonables.
-fn resolve_script(configured: &str) -> Option<PathBuf> {
+/// Busca un script auxiliar en los sitios razonables.
+pub(crate) fn resolve_script(configured: &str) -> Option<PathBuf> {
     let candidate = PathBuf::from(configured);
     if candidate.is_file() {
         return Some(candidate);
@@ -116,22 +116,13 @@ struct BridgeLine {
 }
 
 /// Pide la letra a lyricbar. Bloquea; se llama desde el hilo de letras.
-pub fn fetch(
-    bridge: &BridgeConfig,
-    track: &TrackRef,
-    audio: Option<&std::path::Path>,
-    force_align: bool,
-) -> Result<Option<LyricsDoc>, LyricsError> {
+pub fn fetch(bridge: &BridgeConfig, track: &TrackRef) -> Result<Option<LyricsDoc>, LyricsError> {
     let payload = serde_json::json!({
         "title": track.title,
         "artists": [track.artist],
         "album": track.album,
         "duration_ms": track.duration_ms,
         "root": bridge.root.to_string_lossy(),
-        "audio_path": audio.map(|path| path.to_string_lossy().into_owned()),
-        // Re-alinear aunque el proveedor ya traiga un LRC sincronizado: la
-        // fila guardada viene de una versión vieja del alineador.
-        "force_align": force_align,
     });
 
     let mut child = Command::new(&bridge.python)
@@ -311,7 +302,7 @@ mod tests {
         };
         let mut track = TrackRef::new("test:si-me-matas", "Si me matas", "9louro");
         track.duration_ms = 203_000;
-        let doc = fetch(&config, &track, None, false)
+        let doc = fetch(&config, &track)
             .expect("llamada al puente")
             .expect("el puente encontró la letra en Genius");
         assert!(!doc.lines.is_empty());
@@ -412,6 +403,7 @@ mod tests {
             python: "python3".into(),
             script: "/no/existe/lyricbar_bridge.py".into(),
             root: "/no/existe/lyricbar".into(),
+            ..crate::config::LyricsCfg::default()
         };
         assert!(BridgeConfig::resolve(&cfg).is_none());
     }
