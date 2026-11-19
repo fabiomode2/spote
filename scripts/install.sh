@@ -29,7 +29,7 @@ usage() {
 uso: scripts/install.sh [opciones]
 
   --update              git pull --ff-only antes de compilar
-  --lyricbar <ruta>     checkout de lyricbar (Genius y captions)
+  --lyricbar <ruta>     captions de YouTube desde un checkout local (opcional)
   --no-asr              no instala faster-whisper
   --bin-dir <ruta>      destino de los binarios (defecto: ~/.local/bin)
   --venv <ruta>         venv de Python (defecto: $DATA_DIR/venv)
@@ -137,8 +137,6 @@ if [[ -n "$LYRICBAR" ]]; then
   else
     warn "$DATA_DIR/lyricbar ya existe y no es un enlace; se respeta"
   fi
-else
-  warn "sin lyricbar: LRCLIB + Genius internos (captions de YouTube con --lyricbar)"
 fi
 
 if [[ "$ASR" == 1 || -n "$LYRICBAR" ]]; then

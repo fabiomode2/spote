@@ -18,11 +18,6 @@ Hacen falta Rust 1.82+, `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
 deja los binarios en `~/.local/bin`, crea el venv con `faster-whisper` y copia
 los scripts. Las letras no necesitan nada más: LRCLIB, Genius y ASR van dentro.
 
-Para captions de YouTube, que son lo único que queda fuera:
-
-```bash
-./scripts/install.sh --lyricbar ~/Code/lyricbar
-```
 
 Para actualizar: `./scripts/update.sh`, o desde el aviso de versión que sale en
 la propia TUI.
