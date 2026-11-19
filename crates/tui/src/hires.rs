@@ -11,11 +11,24 @@ use ratatui::layout::Rect;
 use crate::app::{App, Fullscreen, Overlay};
 use spote_core::artwork::ArtMode;
 
+#[derive(Debug)]
+struct ThumbImage {
+    id: u32,
+    image_key: String,
+    rect: Rect,
+    fingerprint: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct HiResState {
     image_id: u32,
     sent_key: String,
     sent_rect: Option<Rect>,
+    /// Una imagen por miniatura visible. Se indexa por la clave de
+    /// colocación (pista + posición) para que la misma portada pueda salir
+    /// dos veces en pantalla sin compartir id.
+    thumbs: std::collections::HashMap<String, ThumbImage>,
+    thumb_seq: u32,
 }
 
 impl HiResState {
@@ -26,6 +39,10 @@ impl HiResState {
             let _ = delete(out, self.image_id);
             self.image_id = 0;
         }
+        for image in self.thumbs.values() {
+            let _ = delete(out, image.id);
+        }
+        self.thumbs.clear();
         self.sent_key.clear();
         self.sent_rect = None;
         let _ = out.flush();
@@ -43,8 +60,7 @@ fn kitty_enabled() -> bool {
 }
 
 fn base64(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -74,7 +90,13 @@ fn delete(out: &mut impl Write, id: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn transmit(out: &mut impl Write, id: u32, png: &[u8], size: (u32, u32), rect: Rect) -> std::io::Result<()> {
+fn transmit(
+    out: &mut impl Write,
+    id: u32,
+    png: &[u8],
+    size: (u32, u32),
+    rect: Rect,
+) -> std::io::Result<()> {
     let encoded = base64(png);
     let cols = rect.width.max(1);
     let rows = rect.height.max(1);
@@ -133,27 +155,89 @@ pub fn render(out: &mut impl Write, app: &App, state: &mut HiResState) {
         (None, None) => true,
         _ => false,
     };
-    if same {
-        return;
+    if !same {
+        if state.image_id != 0 {
+            let _ = delete(out, state.image_id);
+            state.image_id = 0;
+            state.sent_rect = None;
+            state.sent_key.clear();
+        }
+        if let Some((rect, png, size)) = wanted {
+            state.image_id = state.image_id.wrapping_add(1).max(1);
+            // IDs únicos por proceso: el timestamp evita reutilizar uno de otra sesión.
+            let id = std::process::id().wrapping_shl(8) ^ state.image_id;
+            state.image_id = id;
+            if transmit(out, id, png, size, rect).is_ok() {
+                state.sent_rect = Some(rect);
+                state.sent_key = app.art_png_key.clone();
+            }
+        }
+    }
+    render_thumbs(out, app, state);
+    let _ = out.flush();
+}
+
+/// Fingerprint barato para saber si la portada de una miniatura cambió.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes.iter().step_by(7).take(512).chain(bytes.last()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Coloca las miniaturas como imágenes reales (Kitty). El half-block que
+/// dibuja ratatui queda debajo como respaldo para terminales sin soporte.
+fn render_thumbs(out: &mut impl Write, app: &App, state: &mut HiResState) {
+    use std::collections::HashMap;
+
+    let show = app.overlay == Overlay::None && app.fullscreen != Fullscreen::Viz && !app.zen;
+    let mut visible: HashMap<String, (&str, Rect, u64, &Vec<u8>, (u32, u32))> = HashMap::new();
+    if show {
+        for (place_key, image_key, rect) in &app.hi_thumbs {
+            if rect.width < 4 || rect.height < 2 {
+                continue;
+            }
+            let Some((png, size)) = app.thumb_pngs.get(image_key) else {
+                continue;
+            };
+            visible.insert(
+                place_key.clone(),
+                (image_key.as_str(), *rect, fingerprint(png), png, *size),
+            );
+        }
     }
 
-    if state.image_id != 0 {
-        let _ = delete(out, state.image_id);
-        state.image_id = 0;
-        state.sent_rect = None;
-        state.sent_key.clear();
+    // Fuera de pantalla o con arte nuevo: se borra antes de recolocar.
+    state.thumbs.retain(|key, image| {
+        let keep = visible
+            .get(key)
+            .is_some_and(|(image_key, rect, print, _, _)| {
+                *image_key == image.image_key && *rect == image.rect && *print == image.fingerprint
+            });
+        if !keep {
+            let _ = delete(out, image.id);
+        }
+        keep
+    });
+
+    for (place_key, (image_key, rect, print, png, size)) in visible {
+        if state.thumbs.contains_key(&place_key) {
+            continue;
+        }
+        state.thumb_seq = state.thumb_seq.wrapping_add(1);
+        let id = std::process::id().wrapping_shl(12) ^ 0x4000_0000 ^ state.thumb_seq;
+        if transmit(out, id, png, size, rect).is_ok() {
+            state.thumbs.insert(
+                place_key,
+                ThumbImage {
+                    id,
+                    image_key: image_key.to_string(),
+                    rect,
+                    fingerprint: print,
+                },
+            );
+        }
     }
-    let Some((rect, png, size)) = wanted else {
-        let _ = out.flush();
-        return;
-    };
-    state.image_id = state.image_id.wrapping_add(1).max(1);
-    // IDs únicos por proceso: el timestamp evita reutilizar uno de otra sesión.
-    let id = (std::process::id() << 8) ^ state.image_id;
-    state.image_id = id;
-    if transmit(out, id, png, size, rect).is_ok() {
-        state.sent_rect = Some(rect);
-        state.sent_key = app.art_png_key.clone();
-    }
-    let _ = out.flush();
 }

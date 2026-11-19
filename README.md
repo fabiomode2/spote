@@ -28,7 +28,10 @@ El camino de una canción:
    visualizador.
 5. Las letras vienen de LRCLIB/Genius/captions (vía un checkout opcional de
    lyricbar) o del proveedor interno. Con audio local, faster-whisper alinea
-   las líneas estimadas; `shift+clic` recalibra una línea a mano.
+   las líneas estimadas leyendo la canción por pasadas: la completa y, si el
+   modelo se deja el final o una estrofa, solo esa zona con 15 s de contexto;
+   de las lecturas se queda la que mejor encaja. `shift+clic` recalibra una
+   línea a mano.
 
 Config, librería y caché viven en XDG (`~/.config/spote`,
 `~/.local/share/spote`, `~/.cache/spote`). `SPOTE_HOME` los reubica todos.
@@ -37,7 +40,10 @@ Config, librería y caché viven en XDG (`~/.config/spote`,
 
 - **Arte**: modos `default` (foto en half-block / imagen Kitty), `half`,
   `pixel`, `braille` y `off`; rotación automática; portada a pantalla completa
-  (`F`); fondos `cover`, `aurora`, `neural`, `glitch` y `lyrics`.
+  (`F`); fondos `cover`, `aurora`, `neural`, `glitch` y `lyrics`. Las
+  miniaturas se rasterizan al tamaño exacto de cada hueco (tarjeta, cabecera
+  de álbum, ficha) en vez de estirar una de 6x3. La portada de "buscar" usa
+  toda la altura disponible.
 - **Letras**: sincronizadas, estimadas o alineadas por ASR; editor de
   intro/outro (`T`); copia y ajuste fino por línea.
 - **Visualizador**: `clean`, `aurora`, `bloom`, `inferno`; zen (`i`) y pantalla

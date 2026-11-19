@@ -50,7 +50,12 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         draw_art(app, buf, art_rect, pal, 1.0);
         frame_art(buf, art_rect, pal);
         if let Some(track) = app.now.track.clone() {
-            let caption = Rect::new(art_rect.x, art_rect.y + art_rect.height + 1, art_rect.width, 1);
+            let caption = Rect::new(
+                art_rect.x,
+                art_rect.y + art_rect.height + 1,
+                art_rect.width,
+                1,
+            );
             text_at(
                 buf,
                 caption,
@@ -85,7 +90,11 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     let source = if lyrics_focus {
         layout.center
     } else if !has_track {
-        let width = layout.content.width.min(64).max(layout.center.width.min(40));
+        let width = layout
+            .content
+            .width
+            .min(64)
+            .max(layout.center.width.min(40));
         Rect::new(
             layout.center.x + layout.center.width.saturating_sub(width) / 2,
             layout.center.y,
@@ -252,7 +261,12 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             Style::new().fg(color(pal.muted)),
         ));
     }
-    line_at(buf, Rect::new(inner.x, y, inner.width, 1), spans, Alignment::Left);
+    line_at(
+        buf,
+        Rect::new(inner.x, y, inner.width, 1),
+        spans,
+        Alignment::Left,
+    );
     // Artista y álbum clicables en la cabecera (como en Spotify).
     if room > 6 {
         let meta_x = inner.x + title_width + 3;
@@ -360,8 +374,11 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
     };
     let text_w = (rect.width * pct / 100).max(24).min(rect.width);
     let x0 = rect.x + (rect.width.saturating_sub(text_w)) / 2;
-    let position = app.display_position_ms();
-    let active = doc.index_at(position);
+    // Un único reloj para todo el dibujo de letras: la posición de canción ya
+    // corregida por el offset. Mezclar `position` para el karaoke con
+    // `index_at` (que suma el offset) hacía cambiar de línea a mitad de frase.
+    let lyric_ms = doc.aligned_ms(app.display_position_ms());
+    let active = doc.index_at_target(lyric_ms);
     let scroll = app.lyrics_scroll.value;
     let center = rect.y as f32 + rect.height as f32 / 2.0;
     let half = (rect.height as f32 / (line_h as f32 * 2.0)).max(1.0);
@@ -386,7 +403,7 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
                 mix(pal.bg, pal.surface_alt, 0.92 + app.audio.vocal_pulse * 0.08),
             );
             put(buf, line_rect.x, y as u16, "▎", color(pal.primary), None);
-            draw_active_line(app, buf, line_rect, line, pal);
+            draw_active_line(buf, line_rect, line, lyric_ms, pal);
         } else {
             let base = mix_oklab(pal.bg, pal.muted, fade);
             let style = Style::new().fg(color(base));
@@ -399,13 +416,15 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         }
         // Clic en una frase: salta a ese momento. El muelle de scroll anima el
         // salto; no hay corte seco.
-        app.hit.add(line_rect, Action::SeekLyrics(line.start_ms));
+        // El seek es tiempo de canción; la marca es tiempo de documento.
+        let seek_ms = (line.start_ms as i64 - doc.offset_ms).max(0) as u64;
+        app.hit.add(line_rect, Action::SeekLyrics(seek_ms));
         // El clic derecho también sirve para sincronizar; no abre el menú
         // contextual de la pista desde una línea de letra.
     }
 
     // Progreso de la línea activa, discreto, bajo la letra.
-    if let Some((_, progress)) = doc.active(position) {
+    if let Some((_, progress)) = doc.active_at_target(lyric_ms) {
         let bar_width = (rect.width as f32 * 0.18).max(6.0) as u16;
         if bar_width > 4 && rect.height > 2 {
             let x = rect.x + (rect.width - bar_width) / 2;
@@ -417,11 +436,54 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
                     x + i,
                     y,
                     if i < filled { "━" } else { "─" },
-                    color(if i < filled { pal.primary } else { pal.border_dim }),
+                    color(if i < filled {
+                        pal.primary
+                    } else {
+                        pal.border_dim
+                    }),
                     None,
                 );
             }
         }
+    }
+
+    // `D`: inspeccionar la base temporal. Si el índice cambia con la frase
+    // saliente por debajo del 85 %, avisa: es exactamente el fallo reportado.
+    if app.lyrics_debug {
+        let position = app.display_position_ms();
+        let target = doc.aligned_ms(position);
+        let index = doc.index_at_target(target);
+        let line_progress = doc
+            .active_at_target(target)
+            .map(|(_, progress)| progress)
+            .unwrap_or(0.0);
+        let word_progress = index.map_or(0.0, |i| doc.word_progress_at(position, i));
+        let info = format!(
+            "pos {}ms  off {:+}ms  lyric {}ms  idx {:?}  línea {:.2}  palabra {:.2}",
+            position, doc.offset_ms, target, index, line_progress, word_progress
+        );
+        text_at(
+            buf,
+            Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1),
+            info,
+            Style::new().fg(color(pal.warn)),
+            Alignment::Left,
+        );
+        if let Some((from, previous_word)) = app.lyrics_debug_last {
+            if Some(from) != index && previous_word < 0.85 {
+                text_at(
+                    buf,
+                    Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), 1),
+                    format!(
+                        "⚠ cambio prematuro {from} → {:?} (palabra {:.2})",
+                        index, previous_word
+                    ),
+                    Style::new().fg(color(pal.error)),
+                    Alignment::Left,
+                );
+            }
+        }
+        app.lyrics_debug_last = index.map(|i| (i, word_progress));
     }
 }
 
@@ -429,13 +491,15 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
 /// `line.words` (LRC mejorado o refinado con el mapa de audio), nunca de un
 /// reparto global de la línea: por eso cada palabra se enciende cuando toca.
 fn draw_active_line(
-    app: &App,
     buf: &mut Buffer,
     rect: Rect,
     line: &spote_core::lyrics::LyricLine,
+    lyric_ms: u64,
     pal: &Palette,
 ) {
-    let position = app.display_position_ms();
+    // `lyric_ms` ya tiene el offset aplicado y coincide con la base de
+    // `Word.start_ms` / `Word.end_ms`; no volver a leer el reloj aquí.
+    let position = lyric_ms;
     let prefix = "▸ ";
     let suffix = " ◂";
     let mut cells: Vec<(char, f32, bool, bool)> = Vec::new();
@@ -469,7 +533,12 @@ fn draw_active_line(
         let chars: Vec<char> = line.text.chars().collect();
         let total = chars.len().max(1) as f32;
         for (j, ch) in chars.into_iter().enumerate() {
-            cells.push((ch, ((progress * total) - j as f32).clamp(0.0, 1.0), false, false));
+            cells.push((
+                ch,
+                ((progress * total) - j as f32).clamp(0.0, 1.0),
+                false,
+                false,
+            ));
         }
     }
     for ch in suffix.chars() {

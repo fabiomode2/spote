@@ -94,6 +94,25 @@ pub struct Playlist {
     pub cover_url: Option<String>,
 }
 
+/// Fila de letra cacheada. `source`/`aligned` se restauran para no repetir
+/// el auto-ajuste sobre una letra que ya vino alineada del bridge ASR.
+#[derive(Debug, Clone)]
+pub struct LyricsRow {
+    pub lrc: String,
+    pub synced: bool,
+    pub source: String,
+    pub offset_ms: i64,
+    pub aligned: bool,
+    /// Versión del alineador ASR que produjo estos tiempos. Si es vieja, la
+    /// fila se vuelve a afinar cuando hay audio local: un resultado malo no
+    /// debe quedarse pegado para siempre.
+    pub align_version: i64,
+}
+
+/// Se sube cuando cambia el alineado (scoring, relecturas, reparto). Las filas
+/// guardadas con una versión anterior se re-alinean al reproducirlas.
+pub const LYRICS_ALIGN_VERSION: i64 = 2;
+
 pub struct Library {
     conn: Connection,
     path: PathBuf,
@@ -239,6 +258,33 @@ impl Library {
             "#,
         )?;
         self.migrate_playlists()?;
+        self.migrate_lyrics()?;
+        Ok(())
+    }
+
+    /// `aligned` llega después: una letra ya ajustada con ASR no debe volver a
+    /// pasar por el estimador de offset al recargar desde caché.
+    fn migrate_lyrics(&mut self) -> Result<()> {
+        let mut existing = std::collections::HashSet::new();
+        {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(lyrics)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+        if !existing.contains("aligned") {
+            self.conn.execute(
+                "ALTER TABLE lyrics ADD COLUMN aligned INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !existing.contains("align_version") {
+            self.conn.execute(
+                "ALTER TABLE lyrics ADD COLUMN align_version INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -254,9 +300,18 @@ impl Library {
             }
         }
         for (column, ddl) in [
-            ("description", "ALTER TABLE playlist ADD COLUMN description TEXT NOT NULL DEFAULT ''"),
-            ("cover_key", "ALTER TABLE playlist ADD COLUMN cover_key TEXT"),
-            ("cover_url", "ALTER TABLE playlist ADD COLUMN cover_url TEXT"),
+            (
+                "description",
+                "ALTER TABLE playlist ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "cover_key",
+                "ALTER TABLE playlist ADD COLUMN cover_key TEXT",
+            ),
+            (
+                "cover_url",
+                "ALTER TABLE playlist ADD COLUMN cover_url TEXT",
+            ),
         ] {
             if !existing.contains(column) {
                 self.conn.execute(ddl, [])?;
@@ -352,7 +407,12 @@ impl Library {
             .flatten()
     }
 
-    pub fn set_status(&mut self, track_id: i64, provider: &str, status: SourceStatus) -> Result<()> {
+    pub fn set_status(
+        &mut self,
+        track_id: i64,
+        provider: &str,
+        status: SourceStatus,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE source SET status = ?1 WHERE track_id = ?2 AND provider = ?3",
             params![status.as_str(), track_id, provider],
@@ -361,7 +421,9 @@ impl Library {
     }
 
     pub fn track_by_key(&self, key: &str) -> Result<Option<TrackRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!("{SELECT_TRACK} WHERE t.key = ?1"))?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("{SELECT_TRACK} WHERE t.key = ?1"))?;
         let row = stmt.query_row(params![key], row_to_track).optional()?;
         Ok(row)
     }
@@ -395,7 +457,9 @@ impl Library {
     }
 
     pub fn track_by_id(&self, id: i64) -> Result<Option<TrackRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!("{SELECT_TRACK} WHERE t.id = ?1"))?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("{SELECT_TRACK} WHERE t.id = ?1"))?;
         Ok(stmt.query_row(params![id], row_to_track).optional()?)
     }
 
@@ -494,9 +558,7 @@ impl Library {
 
     /// Pistas de un álbum concreto, en orden de inserción.
     pub fn album_tracks(&self, album: &str, artist: &str) -> Result<Vec<TrackRow>> {
-        let sql = format!(
-            "{SELECT_TRACK} WHERE t.album = ?1 AND t.artist = ?2 ORDER BY t.id"
-        );
+        let sql = format!("{SELECT_TRACK} WHERE t.album = ?1 AND t.artist = ?2 ORDER BY t.id");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params![album, artist], row_to_track)?
@@ -554,7 +616,11 @@ impl Library {
         )?;
         let value: Option<i64> = self
             .conn
-            .query_row("SELECT favorite FROM track WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row(
+                "SELECT favorite FROM track WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?;
         Ok(value.unwrap_or(0) == 1)
     }
@@ -565,7 +631,9 @@ impl Library {
                 return Ok(value);
             }
         }
-        let value = self.conn.query_row("SELECT count(*) FROM track", [], |r| r.get(0))?;
+        let value = self
+            .conn
+            .query_row("SELECT count(*) FROM track", [], |r| r.get(0))?;
         self.count_cache.set(Some((Instant::now(), value)));
         Ok(value)
     }
@@ -588,7 +656,9 @@ impl Library {
     pub fn record_play(&mut self, key: &str, ms_played: u64, completed: bool) -> Result<()> {
         let id: Option<i64> = self
             .conn
-            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
             .optional()?;
         let Some(id) = id else { return Ok(()) };
         self.conn.execute(
@@ -603,36 +673,67 @@ impl Library {
     }
 
     // ------------------------------------------------------------- letras
-    pub fn lyrics(&self, key: &str) -> Result<Option<(String, bool, i64)>> {
+    pub fn lyrics(&self, key: &str) -> Result<Option<LyricsRow>> {
         let row = self
             .conn
             .query_row(
-                "SELECT l.lrc, l.synced, l.offset_ms FROM lyrics l
+                "SELECT l.lrc, l.synced, l.source, l.offset_ms, l.aligned,
+                        l.align_version FROM lyrics l
                  JOIN track t ON t.id = l.track_id WHERE t.key = ?1",
                 params![key],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)?)),
+                |r| {
+                    Ok(LyricsRow {
+                        lrc: r.get(0)?,
+                        synced: r.get::<_, i64>(1)? != 0,
+                        source: r.get(2)?,
+                        offset_ms: r.get(3)?,
+                        aligned: r.get::<_, i64>(4)? != 0,
+                        align_version: r.get(5)?,
+                    })
+                },
             )
             .optional()?;
         Ok(row)
     }
 
-    pub fn save_lyrics(&mut self, key: &str, lrc: &str, synced: bool, source: &str) -> Result<()> {
+    pub fn save_lyrics(
+        &mut self,
+        key: &str,
+        lrc: &str,
+        synced: bool,
+        source: &str,
+        aligned: bool,
+    ) -> Result<()> {
         let Some(id) = self
             .conn
-            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| r.get::<_, i64>(0))
+            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| {
+                r.get::<_, i64>(0)
+            })
             .optional()?
         else {
             return Ok(());
         };
+        let version = if aligned { LYRICS_ALIGN_VERSION } else { 0 };
         self.conn.execute(
             r#"
-            INSERT INTO lyrics(track_id, lrc, synced, source, fetched_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
+            INSERT INTO lyrics(track_id, lrc, synced, source, aligned,
+                               align_version, fetched_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(track_id) DO UPDATE SET
               lrc = excluded.lrc, synced = excluded.synced,
-              source = excluded.source, fetched_at = excluded.fetched_at
+              source = excluded.source, aligned = excluded.aligned,
+              align_version = excluded.align_version,
+              fetched_at = excluded.fetched_at
             "#,
-            params![id, lrc, synced as i64, source, now_ms()],
+            params![
+                id,
+                lrc,
+                synced as i64,
+                source,
+                aligned as i64,
+                version,
+                now_ms()
+            ],
         )?;
         Ok(())
     }
@@ -646,7 +747,7 @@ impl Library {
     }
 
     pub fn lyrics_offset(&self, key: &str) -> Result<i64> {
-        Ok(self.lyrics(key)?.map(|(_, _, offset)| offset).unwrap_or(0))
+        Ok(self.lyrics(key)?.map(|row| row.offset_ms).unwrap_or(0))
     }
 
     // -------------------------------------------------------------- recorte
@@ -658,7 +759,12 @@ impl Library {
                 "SELECT t.start_ms, t.end_ms FROM track_trim t
                  JOIN track k ON k.id = t.track_id WHERE k.key = ?1",
                 params![key],
-                |r| Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get::<_, Option<i64>>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?.max(0) as u64,
+                        r.get::<_, Option<i64>>(1)?,
+                    ))
+                },
             )
             .optional()?;
         Ok(row
@@ -669,7 +775,9 @@ impl Library {
     pub fn set_trim(&mut self, key: &str, start_ms: u64, end_ms: Option<u64>) -> Result<()> {
         let Some(id) = self
             .conn
-            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| r.get::<_, i64>(0))
+            .query_row("SELECT id FROM track WHERE key = ?1", params![key], |r| {
+                r.get::<_, i64>(0)
+            })
             .optional()?
         else {
             return Ok(());
@@ -694,7 +802,11 @@ impl Library {
     pub fn art_path(&self, key: &str) -> Result<Option<PathBuf>> {
         let value: Option<String> = self
             .conn
-            .query_row("SELECT art_path FROM track WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row(
+                "SELECT art_path FROM track WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten();
         Ok(value.map(PathBuf::from))
@@ -703,7 +815,11 @@ impl Library {
     pub fn art_url(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT art_url FROM track WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row(
+                "SELECT art_url FROM track WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten())
     }
@@ -779,18 +895,26 @@ impl Library {
 
     /// Portada de una lista: la guardada, o la primera pista con arte.
     pub fn playlist_cover(&self, playlist_id: i64) -> Option<String> {
-        if let Ok(Some(url)) = self.conn.query_row(
-            "SELECT cover_url FROM playlist WHERE id = ?1 AND cover_url IS NOT NULL",
-            params![playlist_id],
-            |row| row.get::<_, String>(0),
-        ).optional() {
+        if let Ok(Some(url)) = self
+            .conn
+            .query_row(
+                "SELECT cover_url FROM playlist WHERE id = ?1 AND cover_url IS NOT NULL",
+                params![playlist_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        {
             return Some(url);
         }
-        if let Ok(Some(key)) = self.conn.query_row(
-            "SELECT p.cover_key FROM playlist p WHERE p.id = ?1 AND p.cover_key IS NOT NULL",
-            params![playlist_id],
-            |row| row.get::<_, String>(0),
-        ).optional() {
+        if let Ok(Some(key)) = self
+            .conn
+            .query_row(
+                "SELECT p.cover_key FROM playlist p WHERE p.id = ?1 AND p.cover_key IS NOT NULL",
+                params![playlist_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        {
             return Some(key);
         }
         let key: Option<String> = self
@@ -884,7 +1008,11 @@ impl Library {
     // ------------------------------------------------------------ settings
     pub fn setting(&self, key: &str) -> Option<String> {
         self.conn
-            .query_row("SELECT value FROM setting WHERE key = ?1", params![key], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM setting WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
             .optional()
             .ok()
             .flatten()
@@ -962,10 +1090,9 @@ impl Library {
 
     /// Borra canciones sin fichero ni descarga en curso.
     pub fn prune_missing(&mut self) -> Result<usize> {
-        let removed = self.conn.execute(
-            "DELETE FROM source WHERE status = 'missing'",
-            [],
-        )?;
+        let removed = self
+            .conn
+            .execute("DELETE FROM source WHERE status = 'missing'", [])?;
         Ok(removed)
     }
 }
@@ -1081,7 +1208,9 @@ mod tests {
     fn upsert_is_idempotent_and_updates_fields() {
         let mut lib = Library::open_in_memory().unwrap();
         let id1 = lib.upsert_track(&track("sha1:a", "One", "Artist")).unwrap();
-        let id2 = lib.upsert_track(&track("sha1:a", "One (Remaster)", "Artist")).unwrap();
+        let id2 = lib
+            .upsert_track(&track("sha1:a", "One (Remaster)", "Artist"))
+            .unwrap();
         assert_eq!(id1, id2);
         assert_eq!(lib.count().unwrap(), 1);
         assert_eq!(
@@ -1097,7 +1226,8 @@ mod tests {
             .unwrap();
         lib.upsert_track(&track("sha1:b", "505", "Arctic Monkeys"))
             .unwrap();
-        lib.upsert_track(&track("sha1:c", "Nude", "Radiohead")).unwrap();
+        lib.upsert_track(&track("sha1:c", "Nude", "Radiohead"))
+            .unwrap();
         assert_eq!(lib.search("arctic", 10).unwrap().len(), 2);
         assert_eq!(lib.search("505", 10).unwrap().len(), 1);
         assert_eq!(lib.search("radiohead", 10).unwrap().len(), 1);
@@ -1110,8 +1240,15 @@ mod tests {
     fn sources_prefer_ready_path() {
         let mut lib = Library::open_in_memory().unwrap();
         let id = lib.upsert_track(&track("sha1:a", "One", "Artist")).unwrap();
-        lib.set_source(id, "youtube", Some("vid"), None, SourceStatus::Pending, None)
-            .unwrap();
+        lib.set_source(
+            id,
+            "youtube",
+            Some("vid"),
+            None,
+            SourceStatus::Pending,
+            None,
+        )
+        .unwrap();
         lib.set_source(
             id,
             "youtube",
@@ -1152,11 +1289,19 @@ mod tests {
         assert_eq!(lib.favorites().unwrap().len(), 1);
         assert!(!lib.toggle_favorite("sha1:a").unwrap());
         assert_eq!(lib.favorites().unwrap().len(), 0);
-        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib")
+        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib", false)
             .unwrap();
-        let (lrc, synced, _) = lib.lyrics("sha1:a").unwrap().unwrap();
-        assert_eq!(lrc, "[00:01.00]hola");
-        assert!(synced);
+        let row = lib.lyrics("sha1:a").unwrap().unwrap();
+        assert_eq!(row.lrc, "[00:01.00]hola");
+        assert!(row.synced);
+        assert_eq!(row.source, "lrclib");
+        assert!(!row.aligned);
+        assert_eq!(row.align_version, 0);
+        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib", true)
+            .unwrap();
+        let row = lib.lyrics("sha1:a").unwrap().unwrap();
+        assert!(row.aligned);
+        assert_eq!(row.align_version, super::LYRICS_ALIGN_VERSION);
         lib.set_lyrics_offset("sha1:a", 250).unwrap();
         assert_eq!(lib.lyrics_offset("sha1:a").unwrap(), 250);
     }

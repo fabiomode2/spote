@@ -114,20 +114,22 @@ impl App {
         self.album_page_status.clear();
     }
 
-    pub(crate) fn request_album_page_art(&mut self, page: &AlbumPage) {
+    pub(crate) fn request_album_page_art(&mut self, page: &AlbumPage, w: u16, h: u16) {
         let key = format!("albumpage:{}:{}", page.provider, page.id);
-        if self.thumbs.contains_key(&key) || self.thumb_requests.contains(&key) {
+        let slot = (key.clone(), w, h);
+        if self.thumbs.contains_key(&slot) || self.thumb_requests.contains(&slot) {
             return;
         }
-        self.thumb_requests.insert(key.clone());
+        self.thumb_requests.insert(slot);
         self.art_worker.request(crate::fetch::ArtRequest {
             key,
             url: page.cover_url.clone(),
             local: page.cover_path.clone(),
             prefer_url: true,
-            w: 8,
-            h: 4,
-            mode: ArtMode::Half,
+            w,
+            h,
+            mode: ArtMode::Plain,
+            kind: crate::fetch::ArtKind::Thumb,
         });
     }
 
@@ -359,20 +361,22 @@ impl App {
     /// Portada sintética del álbum para pedir la miniatura al worker.
     /// Pide la miniatura del álbum usando la portada local si existe. Evita
     /// depender de la red para álbumes ya ingestados.
-    pub(crate) fn request_album_thumb(&mut self, album: &AlbumRow) {
+    pub(crate) fn request_album_thumb(&mut self, album: &AlbumRow, w: u16, h: u16) {
         let key = format!("album:{}:{}", album.artist, album.album);
-        if self.thumbs.contains_key(&key) || self.thumb_requests.contains(&key) {
+        let slot = (key.clone(), w, h);
+        if self.thumbs.contains_key(&slot) || self.thumb_requests.contains(&slot) {
             return;
         }
-        self.thumb_requests.insert(key.clone());
+        self.thumb_requests.insert(slot);
         self.art_worker.request(crate::fetch::ArtRequest {
             key,
             url: album.art_url.clone(),
             local: album.art_path.clone(),
             prefer_url: true,
-            w: 6,
-            h: 3,
-            mode: ArtMode::Half,
+            w,
+            h,
+            mode: ArtMode::Plain,
+            kind: crate::fetch::ArtKind::Thumb,
         });
     }
 

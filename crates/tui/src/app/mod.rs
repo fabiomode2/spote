@@ -7,8 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 
 use spote_core::artwork::{ArtMode, CoverArt, Palette};
-use spote_core::audio_map::SongMap;
 use spote_core::audio::Spectrum;
+use spote_core::audio_map::SongMap;
 use spote_core::config::{self, Config};
 use spote_core::downloader::{DownloadEvent, DownloadSource, Downloader, SearchItem};
 use spote_core::library::{Library, TrackRow};
@@ -21,8 +21,8 @@ use spote_core::ToolStatus;
 use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackRef};
 
 use crate::fetch::{
-    ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker, SearchWorker,
-    SongMapEvent, SongMapWorker, SpotifyWorker,
+    ArtKind, ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker,
+    SearchWorker, SongMapEvent, SongMapWorker, SpotifyWorker,
 };
 use crate::social::{Social, SocialCmd, SocialEvent};
 use crate::theme::{FpsMeter, PaletteRuntime, Pulse, Spring};
@@ -77,7 +77,13 @@ impl Tab {
     // Álbumes ya no es una pestaña: los álbumes se abren desde la búsqueda,
     // la biblioteca o un artista. Se mantiene el variante interno para el
     // tracklist antiguo, pero no aparece en la navegación.
-    pub const ALL: [Tab; 5] = [Tab::Now, Tab::Search, Tab::Library, Tab::Room, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Now,
+        Tab::Search,
+        Tab::Library,
+        Tab::Room,
+        Tab::Settings,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -146,9 +152,15 @@ pub enum Overlay {
     PlaylistForm,
     /// Importar una playlist o álbum público de Spotify pegando su URL.
     ImportPlaylist,
-    ConfirmDeletePlaylist { id: i64, name: String },
+    ConfirmDeletePlaylist {
+        id: i64,
+        name: String,
+    },
     /// Elegir lista destino para la pista seleccionada.
-    AddToPlaylist { key: String, selected: usize },
+    AddToPlaylist {
+        key: String,
+        selected: usize,
+    },
     /// Editor de diseño de paneles.
     Layout,
     /// Menú contextual de una pista (clic derecho).
@@ -645,10 +657,7 @@ impl ContextMenu {
                 ContextAction::Artist,
                 ContextAction::Status,
             ],
-            ContextOrigin::SearchArtist => vec![
-                ContextAction::Open,
-                ContextAction::Status,
-            ],
+            ContextOrigin::SearchArtist => vec![ContextAction::Open, ContextAction::Status],
             ContextOrigin::ArtistName => vec![ContextAction::Open, ContextAction::Status],
             ContextOrigin::AlbumName => vec![ContextAction::Open, ContextAction::Status],
         }
@@ -729,6 +738,12 @@ pub struct App {
     pub trim_start_ms: u64,
     pub trim_end_ms: Option<u64>,
     pub lyrics_scroll: Spring,
+    /// Índice que marcó el último salto de scroll (para hacer snap, no easing).
+    pub lyrics_scroll_index: Option<usize>,
+    /// Overlay temporal con la base temporal de la letra (tecla `D`).
+    pub lyrics_debug: bool,
+    /// (índice, progreso) del frame anterior, para avisar de cambios prematuros.
+    pub lyrics_debug_last: Option<(usize, f32)>,
 
     pub ambient: Viz,
     pub ambient_art: Option<CoverArt>,
@@ -755,8 +770,17 @@ pub struct App {
     pub art_png_hint: (u16, u16),
     /// Rect que ocupa la portada en pantalla este frame; lo consume `hires`.
     pub art_visible_rect: Option<Rect>,
-    pub thumbs: std::collections::HashMap<String, CoverArt>,
-    pub thumb_requests: std::collections::HashSet<String>,
+    /// Miniaturas por (pista, ancho, alto): una de 6x3 para la tarjeta no
+    /// sirve para la cabecera de 12x7. La clave lleva el tamaño para no
+    /// estirar una miniatura pequeña y que se vea pixelada.
+    pub thumbs: std::collections::HashMap<(String, u16, u16), CoverArt>,
+    pub thumb_requests: std::collections::HashSet<(String, u16, u16)>,
+    /// PNG normalizado por portada para el protocolo de imágenes de Kitty.
+    /// Se manda una vez y se reutiliza en todas las miniaturas de esa pista.
+    pub thumb_pngs: std::collections::HashMap<String, (Vec<u8>, (u32, u32))>,
+    /// Miniaturas visibles este frame: (clave de colocación, clave de arte,
+    /// rect). `hires` las coloca encima del half-block.
+    pub hi_thumbs: Vec<(String, String, Rect)>,
     pub art_request: Option<Instant>,
     pub art_request_key: String,
     pub art_request_size: (u16, u16),
@@ -902,6 +926,9 @@ impl App {
             trim_start_ms: 0,
             trim_end_ms: None,
             lyrics_scroll: Spring::new(0.0),
+            lyrics_scroll_index: None,
+            lyrics_debug: false,
+            lyrics_debug_last: None,
             ambient: Viz::from_preset(&cfg.ui.fx.ambient),
             ambient_art: None,
             ambient_art_key: String::new(),
@@ -917,7 +944,8 @@ impl App {
             art_fade_active: false,
             art_rotate: cfg.ui.art_rotate,
             art_rotate_off: cfg.ui.art_rotate_off,
-            art_next_at: Instant::now() + std::time::Duration::from_secs(cfg.ui.art_rotate_secs.max(5)),
+            art_next_at: Instant::now()
+                + std::time::Duration::from_secs(cfg.ui.art_rotate_secs.max(5)),
             art_variants: std::collections::HashMap::new(),
             art_png: None,
             art_png_key: String::new(),
@@ -926,6 +954,8 @@ impl App {
             art_visible_rect: None,
             thumbs: std::collections::HashMap::new(),
             thumb_requests: std::collections::HashSet::new(),
+            thumb_pngs: std::collections::HashMap::new(),
+            hi_thumbs: Vec::new(),
             art_request: None,
             art_request_key: String::new(),
             art_request_size: (0, 0),
@@ -1054,7 +1084,9 @@ impl App {
                     self.album_selected = self.albums.len().saturating_sub(1);
                 }
                 if let Some(open) = &self.album_open {
-                    self.lib.album_tracks(&open.album, &open.artist).unwrap_or_default()
+                    self.lib
+                        .album_tracks(&open.album, &open.artist)
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 }
@@ -1115,7 +1147,10 @@ impl App {
             return;
         };
         if !path.exists() {
-            self.toast(format!("falta el fichero: {}", path.display()), ToastKind::Error);
+            self.toast(
+                format!("falta el fichero: {}", path.display()),
+                ToastKind::Error,
+            );
             return;
         }
         // Recorte persistente: si el vídeo de YouTube trae intro/outro, se
@@ -1158,8 +1193,8 @@ impl App {
         self.art_request_size = (0, 0);
         self.ambient_art = None;
         self.ambient_art_key.clear();
-        self.art_next_at = Instant::now()
-            + std::time::Duration::from_secs(self.cfg.ui.art_rotate_secs.max(5));
+        self.art_next_at =
+            Instant::now() + std::time::Duration::from_secs(self.cfg.ui.art_rotate_secs.max(5));
         self.load_lyrics(&track);
         self.song_map = None;
         self.song_map_key.clear();
@@ -1201,13 +1236,13 @@ impl App {
         // Las pistas importadas vienen sin hint en el TrackRef: se recupera de
         // la tabla de fuentes para poder descargarlas al encolarlas.
         let hint = track.source_hint.clone().or_else(|| {
-            self.lib.source_hint(&track.key).map(|(provider, id)| {
-                spote_protocol::SourceHint {
+            self.lib
+                .source_hint(&track.key)
+                .map(|(provider, id)| spote_protocol::SourceHint {
                     provider,
                     id,
                     duration_ms: track.duration_ms,
-                }
-            })
+                })
         });
         if let Some(hint) = hint {
             if self.tools.yt_dlp {
@@ -1217,10 +1252,7 @@ impl App {
                 } else {
                     self.downloader.download(
                         &track.key,
-                        DownloadSource::Url(format!(
-                            "https://www.youtube.com/watch?v={}",
-                            hint.id
-                        )),
+                        DownloadSource::Url(format!("https://www.youtube.com/watch?v={}", hint.id)),
                         self.cfg.media_dir(),
                     );
                 }
@@ -1230,11 +1262,8 @@ impl App {
             }
         }
         if let Some(url) = url {
-            self.downloader.download(
-                &track.key,
-                DownloadSource::Url(url),
-                self.cfg.media_dir(),
-            );
+            self.downloader
+                .download(&track.key, DownloadSource::Url(url), self.cfg.media_dir());
             self.queue.push(QueueEntry { track, path: None });
             return;
         }
@@ -1247,7 +1276,10 @@ impl App {
             self.toast("buscando fuente y en cola", ToastKind::Info);
             return;
         }
-        self.toast("no hay fuente descargable para esta pista", ToastKind::Error);
+        self.toast(
+            "no hay fuente descargable para esta pista",
+            ToastKind::Error,
+        );
     }
 
     fn start_resolve(&mut self, track: &TrackRef) {
@@ -1275,10 +1307,7 @@ impl App {
             let playing = !self.now.playing;
             self.now.playing = playing;
             std::thread::spawn(move || {
-                let _ = spote_core::mpris::call(
-                    if playing { "Play" } else { "Pause" },
-                    &(),
-                );
+                let _ = spote_core::mpris::call(if playing { "Play" } else { "Pause" }, &());
             });
             return;
         }
@@ -1371,7 +1400,15 @@ impl App {
     }
 
     pub fn seek_to(&mut self, ms: u64) {
-        let target = ms.min(self.now.duration_ms.max(ms));
+        let target = if self.now.duration_ms > 0 {
+            ms.min(self.now.duration_ms)
+        } else {
+            ms
+        };
+        // Un seek rearma el interpolador en el mismo instante: si no, el frame
+        // siguiente mezcla la posición nueva con el elapsed del seek anterior.
+        self.now.position_seen_ms = target;
+        self.now.position_at = Instant::now();
         if self.follow_spotify {
             // El transporte manda al cliente oficial: SetPosition por MPRIS.
             let before = self.now.position_ms;
@@ -1430,19 +1467,47 @@ impl App {
         // 1. Cache SQLite. Si es una letra aproximada y hay audio local, se
         // muestra mientras se reintenta con ASR: las de Genius repartidas a
         // ojo fueron justo el problema de sincronización.
-        if let Ok(Some((lrc, synced, offset))) = self.lib.lyrics(&track.key) {
-            let mut doc = LyricsDoc::from_lrc(&lrc, synced);
-            doc.offset_ms = offset;
+        if let Ok(Some(row)) = self.lib.lyrics(&track.key) {
+            let mut doc = LyricsDoc::from_lrc(&row.lrc, row.synced);
+            let lrc_offset = doc.offset_ms;
+            // Un offset manual guardado manda; si no hay, conservamos el
+            // `[offset:]` del LRC en vez de perderlo al recargar la caché.
+            doc.offset_ms = if row.offset_ms != 0 {
+                row.offset_ms
+            } else {
+                lrc_offset
+            };
+            doc.aligned = row.aligned;
+            if let Some(source) = spote_core::lyrics::LyricsSource::from_label(&row.source) {
+                doc.source = source;
+            }
+            // Un alineado de una versión anterior del pipeline pudo dejar
+            // tiempos malos; se muestra mientras se vuelve a afinar.
+            let stale_alignment =
+                row.aligned && row.align_version < spote_core::library::LYRICS_ALIGN_VERSION;
+            self.lyrics_offset_ms = doc.offset_ms;
             self.lyrics = Some(doc);
-            self.lyrics_status = if synced { "lrclib" } else { "aprox" }.to_string();
+            self.lyrics_status = if stale_alignment {
+                "afinando de nuevo…".to_string()
+            } else if row.aligned {
+                "asr".to_string()
+            } else if row.synced {
+                "lrclib".to_string()
+            } else {
+                "aprox".to_string()
+            };
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-            if !synced && audio.is_some() && !self.lyrics_retry.contains(&track.key) {
+            if ((!row.synced && !row.aligned) || stale_alignment)
+                && audio.is_some()
+                && !self.lyrics_retry.contains(&track.key)
+            {
                 self.lyrics_retry.insert(track.key.clone());
                 self.lyrics_loading = true;
-                self.lyrics_status = "aproximada · afinando con el audio…".into();
-                self.lyrics_worker.request(track.clone(), audio);
+                self.lyrics_status = "afinando con el audio…".into();
+                self.lyrics_worker
+                    .request(track.clone(), audio, stale_alignment);
             } else {
                 return;
             }
@@ -1464,12 +1529,14 @@ impl App {
         self.lyrics_loading = true;
         self.lyrics_status = "buscando letra…".into();
         let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-        self.lyrics_worker.request(track.clone(), audio);
+        self.lyrics_worker.request(track.clone(), audio, false);
     }
 
     /// Marca el inicio del recorte en la posición actual (sáltate la intro).
     fn trim_start_here(&mut self) {
-        let Some(track) = self.now.track.clone() else { return };
+        let Some(track) = self.now.track.clone() else {
+            return;
+        };
         let start = self.now.position_ms;
         if self.trim_end_ms.is_some_and(|end| end <= start + 500) {
             self.trim_end_ms = None;
@@ -1477,7 +1544,10 @@ impl App {
         self.trim_start_ms = start;
         self.lib.set_trim(&track.key, start, self.trim_end_ms).ok();
         self.toast(
-            format!("intro recortada hasta {}", spote_core::util::format_ms(start)),
+            format!(
+                "intro recortada hasta {}",
+                spote_core::util::format_ms(start)
+            ),
             ToastKind::Info,
         );
         if self.now.playing {
@@ -1487,10 +1557,14 @@ impl App {
 
     /// Marca el final del recorte en la posición actual (sáltate el outro).
     fn trim_end_here(&mut self) {
-        let Some(track) = self.now.track.clone() else { return };
+        let Some(track) = self.now.track.clone() else {
+            return;
+        };
         let end = self.now.position_ms.max(self.trim_start_ms + 500);
         self.trim_end_ms = Some(end);
-        self.lib.set_trim(&track.key, self.trim_start_ms, Some(end)).ok();
+        self.lib
+            .set_trim(&track.key, self.trim_start_ms, Some(end))
+            .ok();
         self.toast(
             format!("outro recortado en {}", spote_core::util::format_ms(end)),
             ToastKind::Info,
@@ -1498,7 +1572,9 @@ impl App {
     }
 
     fn clear_trim(&mut self) {
-        let Some(track) = self.now.track.clone() else { return };
+        let Some(track) = self.now.track.clone() else {
+            return;
+        };
         self.trim_start_ms = 0;
         self.trim_end_ms = None;
         self.lib.clear_trim(&track.key).ok();
@@ -1508,8 +1584,10 @@ impl App {
     /// Shift+clic en una línea de la letra: alinea esa línea con la posición
     /// actual sin cortar la reproducción.
     fn sync_lyrics_to_position(&mut self, line_start_ms: u64) {
-        let Some(track) = self.now.track.clone() else { return };
-        let offset = line_start_ms as i64 - self.now.position_ms as i64;
+        let Some(track) = self.now.track.clone() else {
+            return;
+        };
+        let offset = line_start_ms as i64 - self.display_position_ms() as i64;
         self.lyrics_offset_ms = offset.clamp(-120_000, 120_000);
         if let Some(doc) = &mut self.lyrics {
             doc.offset_ms = self.lyrics_offset_ms;
@@ -1518,7 +1596,10 @@ impl App {
             .set_lyrics_offset(&track.key, self.lyrics_offset_ms)
             .ok();
         self.toast(
-            format!("letra sincronizada a esta línea ({:+} ms)", self.lyrics_offset_ms),
+            format!(
+                "letra sincronizada a esta línea ({:+} ms)",
+                self.lyrics_offset_ms
+            ),
             ToastKind::Ok,
         );
     }
@@ -1544,16 +1625,30 @@ impl App {
     /// canción: las palabras caen donde hay voz/energía real, no repartidas a
     /// ciegas. Solo toca líneas sin tags LRC de palabra (`words_exact`).
     fn refine_lyrics_words(&mut self) {
-        let Some(map) = self.song_map.clone() else { return };
-        let Some(doc) = self.lyrics.as_mut() else { return };
+        let Some(map) = self.song_map.clone() else {
+            return;
+        };
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
+        // ASR ya entregó tiempos de palabra: reescribirlos sería empeorarlos.
+        if doc.aligned {
+            return;
+        }
+        let offset = doc.offset_ms;
         for line in &mut doc.lines {
             if line.words_exact || line.words.len() < 2 || line.end_ms <= line.start_ms {
                 continue;
             }
+            // Los buckets están en tiempo de audio; las líneas, en tiempo de
+            // documento. Sin descontar el offset se elige una ventana ajena y
+            // las palabras se encienden a mitad de frase.
+            let audio_start = (line.start_ms as i64 - offset).max(0) as u64;
+            let audio_end = (line.end_ms as i64 - offset).max(0) as u64;
             let buckets: Vec<_> = map
                 .buckets
                 .iter()
-                .filter(|b| b.at_ms >= line.start_ms && b.at_ms < line.end_ms)
+                .filter(|b| b.at_ms >= audio_start && b.at_ms < audio_end)
                 .collect();
             if buckets.len() < 3 {
                 continue;
@@ -1582,7 +1677,8 @@ impl App {
                 } else {
                     0.0
                 };
-                text_weights.push(vowels as f32 * 1.7 + word.text.chars().count() as f32 * 0.3 + pause);
+                text_weights
+                    .push(vowels as f32 * 1.7 + word.text.chars().count() as f32 * 0.3 + pause);
             }
             let text_total: f32 = text_weights.iter().sum::<f32>().max(0.001);
             let mut cumulative = 0.0f32;
@@ -1590,7 +1686,10 @@ impl App {
             for weight in &text_weights {
                 let target = cumulative / text_total;
                 let mut acc = 0.0;
-                let mut at = line.start_ms;
+                // Si la energía no alcanza el objetivo, colocar la palabra al
+                // final de la ventana, no al principio (antes se apelotonaban
+                // todas en `line.start_ms`).
+                let mut at = audio_end;
                 for (bucket, w) in buckets.iter().zip(&weights) {
                     acc += w / total;
                     if acc >= target {
@@ -1598,10 +1697,19 @@ impl App {
                         break;
                     }
                 }
+                let at = (at as i64 + offset).max(0) as u64;
                 starts.push(at.clamp(line.start_ms, line.end_ms));
                 cumulative += weight;
             }
             starts.sort_unstable();
+            // Anclas: la frase empieza con la primera palabra y termina con la
+            // última; nunca al revés.
+            if let Some(first) = starts.first_mut() {
+                *first = line.start_ms;
+            }
+            if let Some(last) = starts.last_mut() {
+                *last = line.end_ms;
+            }
             for (i, word) in line.words.iter_mut().enumerate() {
                 word.start_ms = starts[i];
                 word.end_ms = starts.get(i + 1).copied().unwrap_or(line.end_ms);
@@ -1636,17 +1744,27 @@ impl App {
             if self.art_rotate_off {
                 modes.push(ArtMode::Off);
             }
-            let current = modes.iter().position(|mode| *mode == self.art_mode).unwrap_or(0);
+            let current = modes
+                .iter()
+                .position(|mode| *mode == self.art_mode)
+                .unwrap_or(0);
             let next = modes[(current + 1) % modes.len()];
             self.set_art_mode(next);
         }
         self.list_scroll.set_target(self.selected as f32);
         self.list_scroll.update(dt);
         if let Some(doc) = &self.lyrics {
-            let index = doc
-                .index_at(self.display_position_ms())
-                .unwrap_or(0) as f32;
-            self.lyrics_scroll.set_target(index);
+            if let Some(index) = doc.index_at(self.display_position_ms()) {
+                if self.lyrics_scroll_index != Some(index) {
+                    self.lyrics_scroll_index = Some(index);
+                    // El resaltado cambia al instante: si el muelle persigue el
+                    // índice, la línea nueva se pintaba mientras la anterior
+                    // seguía en el centro y se percibía como cambio a destiempo.
+                    self.lyrics_scroll.value = index as f32;
+                    self.lyrics_scroll.velocity = 0.0;
+                }
+                self.lyrics_scroll.set_target(index as f32);
+            }
         }
         self.lyrics_scroll.update(dt);
 
@@ -1703,6 +1821,10 @@ impl App {
             match event {
                 PlayerEvent::TimePos(position) => {
                     self.now.position_ms = (position.max(0.0) * 1000.0) as u64;
+                    // Anclar aquí, no detectando el cambio en `tick`: así el
+                    // interpolador no adelanta un frame el playhead de la letra.
+                    self.now.position_seen_ms = self.now.position_ms;
+                    self.now.position_at = Instant::now();
                     if let Some(end) = self.trim_end_ms {
                         if self.now.position_ms >= end.saturating_sub(30) {
                             if let Some(track) = self.now.track.clone() {
@@ -1765,8 +1887,10 @@ impl App {
                 Ok(_) => {
                     // Sin resultados en Spotify/Deezer: yt-dlp de respaldo.
                     if self.tools.yt_dlp {
-                        self.search.message = "sin resultados en el catálogo · probando yt-dlp".into();
-                        self.downloader.search(self.search.last_query_id, self.search.last_query.clone());
+                        self.search.message =
+                            "sin resultados en el catálogo · probando yt-dlp".into();
+                        self.downloader
+                            .search(self.search.last_query_id, self.search.last_query.clone());
                     } else {
                         self.search.loading = false;
                         self.search.message = "sin resultados".into();
@@ -1776,7 +1900,8 @@ impl App {
                     self.search.loading = false;
                     self.search.message = format!("catálogo no disponible: {err}");
                     if self.tools.yt_dlp {
-                        self.downloader.search(self.search.last_query_id, self.search.last_query.clone());
+                        self.downloader
+                            .search(self.search.last_query_id, self.search.last_query.clone());
                     }
                 }
             }
@@ -1804,13 +1929,21 @@ impl App {
                     }
                     self.toast(message, ToastKind::Error);
                 }
-                DownloadEvent::Progress { key, percent, stage } => {
+                DownloadEvent::Progress {
+                    key,
+                    percent,
+                    stage,
+                } => {
                     if self.now.track.as_ref().is_some_and(|t| t.key == key) {
                         self.set_status(format!("{stage} · {percent:.0}%"));
                     }
                     self.track_download(key, stage, percent, false);
                 }
-                DownloadEvent::StageProgress { key, stage, percent } => {
+                DownloadEvent::StageProgress {
+                    key,
+                    stage,
+                    percent,
+                } => {
                     self.track_download(key, stage.label().to_string(), percent, false);
                 }
                 DownloadEvent::Done { key, path } => {
@@ -1821,8 +1954,7 @@ impl App {
                         let cover = path.with_extension(ext);
                         if cover.exists() {
                             self.lib.set_art(&key, Some(&cover), None).ok();
-                            self.thumbs.remove(&key);
-                            self.thumb_requests.remove(&key);
+                            self.drop_thumbs(&key);
                             break;
                         }
                     }
@@ -1845,10 +1977,8 @@ impl App {
                     self.finish_download(&key, false);
                     if self.pending_play.as_deref() == Some(key.as_str()) {
                         self.pending_play = None;
-                        if let Some(entry) = self
-                            .queue
-                            .iter()
-                            .position(|entry| entry.track.key == key)
+                        if let Some(entry) =
+                            self.queue.iter().position(|entry| entry.track.key == key)
                         {
                             let entry = self.queue.remove(entry);
                             self.play_local(entry.track, Some(path.clone()));
@@ -1856,7 +1986,10 @@ impl App {
                             self.play_local(track, Some(path.clone()));
                         }
                     } else {
-                        self.toast(format!("descargada {}", util::short_hash(&key)), ToastKind::Ok);
+                        self.toast(
+                            format!("descargada {}", util::short_hash(&key)),
+                            ToastKind::Ok,
+                        );
                     }
                     self.refresh_view();
                 }
@@ -1884,23 +2017,32 @@ impl App {
     }
 
     fn apply_art(&mut self, mut response: ArtResponse) {
-        if response.key.starts_with("ambient:") {
+        if response.kind == ArtKind::Ambient {
             if let Some(art) = response.art {
                 self.ambient_art = Some(art);
             }
             return;
         }
-        if response.key.starts_with("artist:") {
+        if response.kind == ArtKind::Artist {
             if let Some(art) = response.art {
                 self.artist_art = Some(art);
             }
             return;
         }
-        // Miniaturas de la lista: caché aparte, no tocan el tema ni el arte grande.
-        if response.w <= 8 && response.h <= 4 {
-            if let Some(art) = response.art {
-                self.thumbs.insert(response.key.clone(), art);
+        // Miniaturas: caché aparte, no tocan el tema ni el arte grande.
+        if response.kind == ArtKind::Thumb {
+            if let Some(png) = response.png.take() {
+                let size = response.png_size.unwrap_or((192, 192));
+                self.thumb_pngs.insert(response.key.clone(), (png, size));
             }
+            if let Some(art) = response.art {
+                self.thumb_requests
+                    .remove(&(response.key.clone(), response.w, response.h));
+                self.thumbs
+                    .insert((response.key.clone(), response.w, response.h), art);
+            }
+            // Si falló, la petición sigue marcada: no se reintenta en bucle
+            // cada frame. `drop_thumbs` la limpia cuando cambia la portada.
             if let Some(path) = response.art_path {
                 self.lib.set_art(&response.key, Some(&path), None).ok();
             }
@@ -1945,9 +2087,7 @@ impl App {
             self.art_mode_seen = response.mode;
         }
         if let Some(path) = response.art_path {
-            self.lib
-                .set_art(&response.key, Some(&path), None)
-                .ok();
+            self.lib.set_art(&response.key, Some(&path), None).ok();
         }
         if let Some(error) = response.error {
             if error != "sin portada" {
@@ -2009,6 +2149,7 @@ impl App {
                                     w: 24,
                                     h: 12,
                                     mode: ArtMode::Plain,
+                                    kind: ArtKind::Artist,
                                 });
                             }
                             self.artist = Some(profile);
@@ -2026,8 +2167,7 @@ impl App {
                     result,
                 } => {
                     let current = self.album_page.as_ref().is_some_and(|page| {
-                        page.provider == "search"
-                            && page.title.eq_ignore_ascii_case(&album)
+                        page.provider == "search" && page.title.eq_ignore_ascii_case(&album)
                     });
                     if current {
                         self.album_page_loading = false;
@@ -2064,7 +2204,10 @@ impl App {
                             }
                             Err(err) => {
                                 self.album_page_status = format!("álbum: {err}");
-                                self.toast(format!("no pude cargar el álbum: {err}"), ToastKind::Error);
+                                self.toast(
+                                    format!("no pude cargar el álbum: {err}"),
+                                    ToastKind::Error,
+                                );
                             }
                         }
                     }
@@ -2091,8 +2234,7 @@ impl App {
                                 );
                             }
                         }
-                        self.thumbs.remove(&key);
-                        self.thumb_requests.remove(&key);
+                        self.drop_thumbs(&key);
                         self.art_key.clear();
                         self.refresh_view();
                     } else if manual {
@@ -2110,8 +2252,12 @@ impl App {
         if self.lyrics_offset_ms != 0 || self.lyrics_auto_offset.is_some() {
             return;
         }
-        let Some(map) = self.song_map.clone() else { return };
-        let Some(doc) = self.lyrics.as_mut() else { return };
+        let Some(map) = self.song_map.clone() else {
+            return;
+        };
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
         if doc.offset_ms != 0
             || doc.aligned
             || doc.source == spote_core::lyrics::LyricsSource::Local
@@ -2135,7 +2281,12 @@ impl App {
     fn poll_lyrics(&mut self) {
         while let Some(message) = self.lyrics_worker.try_recv() {
             match message {
-                LyricsMsg::Loaded { key, doc, lrc, error } => {
+                LyricsMsg::Loaded {
+                    key,
+                    doc,
+                    lrc,
+                    error,
+                } => {
                     self.lyrics_loading = false;
                     if self.now.track.as_ref().map(|t| &t.key) != Some(&key) {
                         continue;
@@ -2149,13 +2300,28 @@ impl App {
                                         &text,
                                         doc.synced,
                                         doc.source.label(),
+                                        doc.aligned,
                                     )
                                     .ok();
+                                // La versión ASR ya está alineada: arrastrar el
+                                // offset de la letra aproximada la desalinea.
+                                if doc.aligned {
+                                    self.lib.set_lyrics_offset(&key, 0).ok();
+                                }
                             }
-                            self.lyrics_status = doc.source.label().to_string();
-                            self.lyrics_offset_ms = self.lib.lyrics_offset(&key).unwrap_or(0);
+                            self.lyrics_status = if doc.aligned {
+                                "asr".to_string()
+                            } else {
+                                doc.source.label().to_string()
+                            };
                             let mut doc = doc;
-                            doc.offset_ms = self.lyrics_offset_ms;
+                            let lrc_offset = doc.offset_ms;
+                            self.lyrics_offset_ms = self.lib.lyrics_offset(&key).unwrap_or(0);
+                            doc.offset_ms = if self.lyrics_offset_ms != 0 {
+                                self.lyrics_offset_ms
+                            } else {
+                                lrc_offset
+                            };
                             self.lyrics = Some(doc);
                             self.lyrics_key = key;
                             self.apply_auto_lyrics_offset();
@@ -2220,7 +2386,8 @@ impl App {
                     self.rooms = rooms;
                 }
                 SocialEvent::Room(room) => {
-                    self.room_selected = self.rooms.iter().position(|r| r.id == room.id).unwrap_or(0);
+                    self.room_selected =
+                        self.rooms.iter().position(|r| r.id == room.id).unwrap_or(0);
                     self.room = Some(room);
                 }
                 SocialEvent::State(state) => self.apply_room_state(state),
@@ -2290,7 +2457,10 @@ impl App {
             return;
         }
         self.last_presence = (key, self.now.playing);
-        social.send(SocialCmd::NowPlaying(self.now.track.clone(), self.now.playing));
+        social.send(SocialCmd::NowPlaying(
+            self.now.track.clone(),
+            self.now.playing,
+        ));
     }
 
     fn send_control(&mut self, action: ControlAction, position_ms: Option<u64>) {
@@ -2305,7 +2475,9 @@ impl App {
     }
 
     pub fn join_room(&mut self, index: usize) {
-        let Some(room) = self.rooms.get(index) else { return };
+        let Some(room) = self.rooms.get(index) else {
+            return;
+        };
         let id = room.id.clone();
         let label = self.room_label(&id);
         if let Some(social) = &self.social {
@@ -2421,6 +2593,7 @@ impl App {
                 w: 32,
                 h: 16,
                 mode: ArtMode::Braille,
+                kind: ArtKind::Ambient,
             });
         }
         self.art_request_key = track.key.clone();
@@ -2433,11 +2606,25 @@ impl App {
             w,
             h,
             mode,
+            kind: ArtKind::Main,
         });
     }
 
-    /// Pide una miniatura de 6x3 para las tarjetas de la lista.
-    pub fn request_thumb(&mut self, track: &TrackRef) {
+    /// Pide la miniatura del tamaño exacto que ocupa en pantalla.
+    ///
+    /// Antes se generaba una sola de 6x3 y se estiraba al pintar: en la
+    /// cabecera de un álbum (12 columnas) o en su ficha (18x9) se veía
+    /// pixelada. Ahora se rasteriza a la resolución del hueco y se pide en
+    /// modo `Plain`, sin la viñeta que oscurecía las miniaturas.
+    pub fn request_thumb(&mut self, track: &TrackRef, w: u16, h: u16) {
+        if w < 2 || h < 1 {
+            return;
+        }
+        let slot = (track.key.clone(), w, h);
+        if self.thumbs.contains_key(&slot) || self.thumb_requests.contains(&slot) {
+            return;
+        }
+        self.thumb_requests.insert(slot);
         let local = self
             .lib
             .art_path(&track.key)
@@ -2470,6 +2657,7 @@ impl App {
                 w: 32,
                 h: 16,
                 mode: ArtMode::Braille,
+                kind: ArtKind::Ambient,
             });
         }
         self.art_worker.request(ArtRequest {
@@ -2477,10 +2665,41 @@ impl App {
             url,
             local,
             prefer_url: true,
-            w: 6,
-            h: 3,
-            mode: ArtMode::Half,
+            w,
+            h,
+            mode: ArtMode::Plain,
+            kind: ArtKind::Thumb,
         });
+    }
+
+    /// Mejor miniatura disponible para un hueco: la exacta o una mayor que se
+    /// pueda reducir sin perder detalle.
+    pub fn thumb_for(&self, key: &str, w: u16, h: u16) -> Option<&CoverArt> {
+        if let Some(art) = self.thumbs.get(&(key.to_string(), w, h)) {
+            return Some(art);
+        }
+        self.thumbs
+            .iter()
+            .filter(|((track, tw, th), _)| track == key && *tw >= w && *th >= h)
+            .min_by_key(|((_, tw, th), _)| u32::from(*tw) * u32::from(*th))
+            .map(|(_, art)| art)
+    }
+
+    /// La miniatura más grande cacheada de una pista, sea del tamaño que sea.
+    /// Sirve de puente mientras llega la del tamaño exacto.
+    pub fn thumb_any(&self, key: &str) -> Option<&CoverArt> {
+        self.thumbs
+            .iter()
+            .filter(|((track, _, _), _)| track == key)
+            .max_by_key(|((_, tw, th), _)| u32::from(*tw) * u32::from(*th))
+            .map(|(_, art)| art)
+    }
+
+    /// Tira todas las miniaturas de una pista (cambió la portada).
+    pub fn drop_thumbs(&mut self, key: &str) {
+        self.thumbs.retain(|(track, _, _), _| track != key);
+        self.thumb_requests.retain(|(track, _, _)| track != key);
+        self.thumb_pngs.remove(key);
     }
 
     /// El layout llama aquí cada frame con el hueco disponible para el arte.
@@ -2532,16 +2751,20 @@ impl App {
                         self.toggle_favorite_key(&key);
                     }
                 }
-                Some(_) => self.toast("las favoritas son pistas, no artistas/álbumes", ToastKind::Warn),
+                Some(_) => self.toast(
+                    "las favoritas son pistas, no artistas/álbumes",
+                    ToastKind::Warn,
+                ),
                 None => self.toast("busca algo y selecciona una fila", ToastKind::Warn),
             },
             Tab::Library | Tab::Albums => match self.selected_row().cloned() {
                 Some(row) => self.toggle_favorite_key(&row.track.key),
                 None => self.toast("no hay ninguna pista seleccionada", ToastKind::Warn),
             },
-            Tab::Room | Tab::Settings => {
-                self.toast("favorita: selecciona una pista en buscar o librería", ToastKind::Warn)
-            }
+            Tab::Room | Tab::Settings => self.toast(
+                "favorita: selecciona una pista en buscar o librería",
+                ToastKind::Warn,
+            ),
         }
     }
 
@@ -2642,8 +2865,8 @@ impl App {
     /// Mueve la entrada seleccionada de la cola local.
     pub fn move_queue(&mut self, delta: i32) {
         if !self.room_queue.is_empty() {
-            self.queue_selected = (self.queue_selected as i32 + delta)
-                .clamp(0, self.queue_len() as i32 - 1) as usize;
+            self.queue_selected =
+                (self.queue_selected as i32 + delta).clamp(0, self.queue_len() as i32 - 1) as usize;
             self.toast("la cola de la sala la ordena el servidor", ToastKind::Info);
             return;
         }
@@ -2700,7 +2923,6 @@ impl App {
         (index < self.search.results.len()).then_some(SearchEntry::Track(index))
     }
 
-
     fn activate_search_selection(&mut self) {
         let index = self.search.selected;
         match self.search_entry(index) {
@@ -2740,7 +2962,8 @@ impl App {
         self.search.selected = 0;
         // Metadatos primero (Spotify/Deezer); la descarga se resuelve después
         // con esos datos, no con el texto libre en yt-dlp.
-        self.search_worker.search(self.search.last_query_id, query.clone());
+        self.search_worker
+            .search(self.search.last_query_id, query.clone());
         if !self.tools.yt_dlp {
             self.search.message = "buscando… (sin yt-dlp no se podrá descargar)".into();
         }
@@ -2807,7 +3030,10 @@ impl App {
         }
         // xclip/wl-copy: best effort, nunca bloquea ni peta.
         use std::io::Write;
-        for (bin, args) in [("wl-copy", vec![]), ("xclip", vec!["-selection", "clipboard"])] {
+        for (bin, args) in [
+            ("wl-copy", vec![]),
+            ("xclip", vec!["-selection", "clipboard"]),
+        ] {
             if let Ok(mut child) = std::process::Command::new(bin)
                 .args(args)
                 .stdin(std::process::Stdio::piped())
@@ -2845,9 +3071,12 @@ impl App {
         if let Some(ratio) = self.drag_ratio {
             return (self.now.duration_ms as f32 * ratio) as u64;
         }
-        if self.now.playing && self.now.position_at.elapsed().as_millis() < 500 {
+        if self.now.playing {
             let elapsed = self.now.position_at.elapsed().as_millis() as u64;
-            (self.now.position_ms + elapsed).min(self.now.duration_ms.max(1))
+            // Tope sin retroceso: antes, al pasar 500 ms, el valor caía de
+            // `position_ms + 500` a `position_ms` (diente de sierra visible
+            // en el karaoke cuando mpv tarda en informar).
+            (self.now.position_ms + elapsed.min(500)).min(self.now.duration_ms.max(1))
         } else {
             self.now.position_ms
         }
@@ -2890,7 +3119,6 @@ fn search_item_from_spotify(track: spote_core::spotify_api::SpotifyTrack) -> Sea
         isrc: track.isrc,
     }
 }
-
 
 #[cfg(test)]
 mod tests {

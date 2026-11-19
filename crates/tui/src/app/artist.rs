@@ -137,7 +137,9 @@ impl App {
         // canciones de otro filtro y la biblioteca parecía aleatoria.
         self.refresh_view();
         self.thumbs
-            .retain(|key, _| self.view.iter().any(|row| &row.track.key == key));
+            .retain(|(key, _, _), _| self.view.iter().any(|row| &row.track.key == key));
+        self.thumb_requests
+            .retain(|(key, _, _)| self.view.iter().any(|row| &row.track.key == key));
     }
 
     /// Pide a Spotify los metadatos/portada de una pista concreta.

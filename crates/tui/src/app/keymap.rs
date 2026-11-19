@@ -133,6 +133,7 @@ impl App {
                 Hint { key: "↑↓", label: "volumen" },
                 Hint { key: "clic", label: "salta a la frase" },
                 Hint { key: "alt/der", label: "sincronizar letra" },
+                Hint { key: "D", label: "debug letra" },
                 Hint { key: "esc", label: "volver" },
             ];
         }
@@ -145,6 +146,7 @@ impl App {
                     Hint { key: "a", label: "cola" },
                     Hint { key: "c", label: "portada" },
                     Hint { key: "C", label: "letra" },
+                    Hint { key: "D", label: "debug letra" },
                     Hint { key: "M", label: "arte" },
                     Hint { key: "T", label: "recorte" },
                     Hint { key: "E", label: "diseño" },

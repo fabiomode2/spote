@@ -44,7 +44,12 @@ impl Layout {
         };
         if area.width < 20 || area.height < 8 {
             out.top = Rect::new(area.x, area.y, area.width, 1);
-            out.main = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+            out.main = Rect::new(
+                area.x,
+                area.y + 1,
+                area.width,
+                area.height.saturating_sub(1),
+            );
             out.center = out.main;
             out.block = out.main;
             out.hint = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
@@ -82,11 +87,7 @@ impl Layout {
             area.width,
             viz_h,
         );
-        let main_h = out
-            .viz
-            .y
-            .saturating_sub(area.y + top_h)
-            .max(1);
+        let main_h = out.viz.y.saturating_sub(area.y + top_h).max(1);
         let main = Rect::new(area.x, area.y + top_h, area.width, main_h);
         out.main = main;
 
@@ -184,8 +185,8 @@ impl Layout {
             let queue_visible = cfg.queue;
             let info_visible = cfg.info;
             if queue_visible && info_visible {
-                let queue_h = (side.height as f32 * (cfg.queue_share.clamp(20, 80) as f32 / 100.0))
-                    as u16;
+                let queue_h =
+                    (side.height as f32 * (cfg.queue_share.clamp(20, 80) as f32 / 100.0)) as u16;
                 out.queue = Rect::new(side.x, side.y, side.width, queue_h);
                 out.info = Rect::new(
                     side.x,
@@ -203,7 +204,11 @@ impl Layout {
         // Asas de arrastre en el borde interior de cada dock.
         out.nav_split = (nav_w > 0).then(|| {
             Rect::new(
-                if nav_left { out.nav.x + nav_w - 1 } else { out.nav.x },
+                if nav_left {
+                    out.nav.x + nav_w - 1
+                } else {
+                    out.nav.x
+                },
                 out.nav.y,
                 1,
                 out.nav.height,
@@ -211,7 +216,11 @@ impl Layout {
         });
         out.side_split = (side_w > 0).then(|| {
             Rect::new(
-                if side_left { out.side.x + side_w - 1 } else { out.side.x },
+                if side_left {
+                    out.side.x + side_w - 1
+                } else {
+                    out.side.x
+                },
                 out.side.y,
                 1,
                 out.side.height,
@@ -228,11 +237,24 @@ impl Layout {
             return out;
         }
         if out.center.width >= 82 && inner_h >= 12 {
-            let max_art_w = (out.center.width.saturating_sub(32))
-                .min((out.center.width as u32 * cfg.art_size.clamp(40, 100) as u32 / 100) as u16);
-            let mut art_w = (inner_h * 2).min(max_art_w.max(24));
+            // La altura del bloque manda: con celdas 1:2, una portada
+            // cuadrada mide el doble de columnas que de filas. El límite por
+            // pestaña (`art_ratio`) y `art_size` se aplican **antes** de
+            // colocar la portada; antes se recortaba después y quedaba
+            // pequeña y descolgada del dock, con un hueco muerto al lado.
+            let height_w = inner_h * 2;
+            let ratio_w = (out.center.width as u32 * art_ratio.clamp(1, 10) as u32 / 10) as u16;
+            let size_w =
+                (out.center.width as u32 * cfg.art_size.clamp(40, 100) as u32 / 100) as u16;
+            let max_art_w = out
+                .center
+                .width
+                .saturating_sub(24)
+                .min(ratio_w.max(8))
+                .min(size_w.max(24));
+            let mut art_w = height_w.min(max_art_w.max(24));
             let mut art_h = (art_w / 2).min(inner_h);
-            art_w = (art_h * 2).min(out.center.width.saturating_sub(20));
+            art_w = (art_h * 2).min(out.center.width.saturating_sub(24));
             art_h = (art_w / 2).max(2);
             let art_left = side_pref == "left";
             let art_x = if art_left {
@@ -243,14 +265,21 @@ impl Layout {
             out.art = Rect::new(art_x, out.center.y + 1, art_w, art_h);
             let text_w = out.center.width.saturating_sub(art_w + 3);
             out.content = if art_left {
-                Rect::new(out.center.x + art_w + 2, out.center.y, text_w, out.center.height)
+                Rect::new(
+                    out.center.x + art_w + 2,
+                    out.center.y,
+                    text_w,
+                    out.center.height,
+                )
             } else {
                 Rect::new(out.center.x + 1, out.center.y, text_w, out.center.height)
             };
         } else if out.center.width >= 46 && out.center.height >= 14 {
             // Estrecho: miniatura arriba y el texto ocupa todo el alto. Se
             // mantiene la proporción aunque el terminal sea vertical.
-            let art_w = (out.center.width / 3).clamp(16, 30);
+            let mut art_w = (out.center.width / 3).clamp(16, 30);
+            let ratio_w = (out.center.width as u32 * art_ratio.clamp(1, 10) as u32 / 10) as u16;
+            art_w = art_w.min(ratio_w.max(8));
             let art_h = (art_w / 2).min(out.center.height.saturating_sub(8)).max(2);
             let art_x = if side_pref == "left" {
                 out.center.x + 1
@@ -262,19 +291,8 @@ impl Layout {
         } else {
             out.content = out.center;
         }
-
-        // El ancho de la portada también respeta el ajuste en modo estrecho.
-        if out.art.width > 0 {
-            let max_w = (out.center.width as u32 * art_ratio as u32 / 10) as u16;
-            if out.art.width > max_w {
-                let w = max_w.max(8);
-                out.art.width = w;
-                out.art.height = (w / 2).max(2);
-            }
-        }
         out
     }
-
 }
 
 #[cfg(test)]
@@ -287,7 +305,14 @@ mod tests {
 
     #[test]
     fn never_overlaps_or_leaves_center_empty() {
-        for (w, h) in [(240, 70), (200, 56), (160, 48), (120, 36), (80, 24), (30, 10)] {
+        for (w, h) in [
+            (240, 70),
+            (200, 56),
+            (160, 48),
+            (120, 36),
+            (80, 24),
+            (30, 10),
+        ] {
             let layout = Layout::compute(Rect::new(0, 0, w, h), &cfg(), true, Fullscreen::None, 6);
             assert!(layout.center.width > 0, "{w}x{h}");
             assert!(layout.center.right() <= w, "{w}x{h}");
@@ -306,6 +331,27 @@ mod tests {
             let ratio = layout.art.width as f32 / layout.art.height as f32;
             assert!(ratio >= 1.5 && ratio <= 2.5, "ratio {ratio}");
         }
+    }
+
+    #[test]
+    fn search_art_fills_the_block_and_stays_flush() {
+        let layout = Layout::compute(Rect::new(0, 0, 200, 56), &cfg(), true, Fullscreen::None, 10);
+        assert!(layout.art.width > 0);
+        // La altura es el límite: celdas 1:2 => ancho = 2 * alto.
+        assert_eq!(layout.art.height, layout.center.height - 2);
+        assert!((layout.art.width as i32 - layout.art.height as i32 * 2).abs() <= 2);
+        // Pegada al dock derecho, no flotando en medio del hueco reservado.
+        assert_eq!(layout.art.right() + 1, layout.center.right());
+        assert!(layout.content.right() <= layout.art.x);
+        assert!(layout.content.width >= 24);
+    }
+
+    #[test]
+    fn art_ratio_caps_width_before_positioning() {
+        let wide = Layout::compute(Rect::new(0, 0, 220, 70), &cfg(), true, Fullscreen::None, 6);
+        assert!(wide.art.width <= wide.center.width * 6 / 10 + 2);
+        assert_eq!(wide.art.right() + 1, wide.center.right());
+        assert!(wide.content.width >= 24);
     }
 
     #[test]
@@ -353,13 +399,7 @@ mod tests {
 
     #[test]
     fn fullscreen_removes_viz_strip() {
-        let layout = Layout::compute(
-            Rect::new(0, 0, 160, 50),
-            &cfg(),
-            true,
-            Fullscreen::Viz,
-            6,
-        );
+        let layout = Layout::compute(Rect::new(0, 0, 160, 50), &cfg(), true, Fullscreen::Viz, 6);
         assert_eq!(layout.viz.height, 0);
     }
 }

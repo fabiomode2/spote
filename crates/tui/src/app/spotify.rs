@@ -15,9 +15,11 @@ impl App {
         }
         self.now.playing = false;
         self.spectrum.decode_system();
-        self.toast("siguiendo Spotify (transporte y audio del cliente oficial)", ToastKind::Info);
+        self.toast(
+            "siguiendo Spotify (transporte y audio del cliente oficial)",
+            ToastKind::Info,
+        );
     }
-
 
     pub fn disable_spotify(&mut self) {
         self.follow_spotify = false;
@@ -40,17 +42,19 @@ impl App {
                 self.play_local(row.track, Some(path));
             }
         }
-        self.toast("modo Spotify desactivado · vuelve el modo local", ToastKind::Info);
+        self.toast(
+            "modo Spotify desactivado · vuelve el modo local",
+            ToastKind::Info,
+        );
     }
-
 
     pub(super) fn apply_spotify(&mut self, state: SpotifyState) {
         if let Some(mut track) = state.track.clone() {
             // Si la pista está descargada, usa SU clave (y su portada local):
             // MPRIS da otro id y si no, la letra/arte no encuentran nada.
-            if let Ok(Some(row)) = self
-                .lib
-                .find_by_meta(&track.artist, &track.title, track.duration_ms)
+            if let Ok(Some(row)) =
+                self.lib
+                    .find_by_meta(&track.artist, &track.title, track.duration_ms)
             {
                 track.key = row.track.key.clone();
                 if track.album.is_none() {
@@ -69,6 +73,8 @@ impl App {
             let drift = state.position_ms as i64 - self.now.position_ms as i64;
             if changed || drift.abs() > 1500 || drift < -700 {
                 self.now.position_ms = state.position_ms;
+                self.now.position_seen_ms = state.position_ms;
+                self.now.position_at = Instant::now();
             }
             self.now.playing = state.playing;
             self.now.path = None;
@@ -137,7 +143,6 @@ impl App {
         }
     }
 
-
     pub fn toggle_spotify(&mut self) {
         if self.follow_spotify {
             self.disable_spotify();
@@ -145,5 +150,4 @@ impl App {
             self.enable_spotify();
         }
     }
-
 }

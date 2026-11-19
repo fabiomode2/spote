@@ -860,7 +860,7 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
     let cover_w = 18u16.min(inner.width / 3);
     let cover_h = 9u16.min(inner.height.saturating_sub(2));
     let cover = Rect::new(inner.x, inner.y, cover_w, cover_h);
-    app.request_album_page_art(&page);
+    app.request_album_page_art(&page, cover.width, cover.height);
     let thumb_track = spote_protocol::TrackRef {
         key: format!("albumpage:{}:{}", page.provider, page.id),
         title: page.title.clone(),

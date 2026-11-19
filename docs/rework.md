@@ -79,14 +79,22 @@
   puente a lyricbar puede alinear la letra contra el audio local con
   faster-whisper (`aligned=true`) cuando el LRC viene estimado o de Genius.
   Las letras aproximadas cacheadas se reintentan una vez por sesión si hay
-  audio local. `alt/ctrl/shift+clic` y el clic derecho sincronizan una línea.
+  audio local. El ASR lee por pasadas: la canción completa y, si quedan
+  líneas sin anclar (outro, instrumental), solo esa zona con 15 s de contexto;
+  gana la alineación con mejor confianza. Un LRC ya sincronizado de LRCLIB no
+  se sustituye salvo que traiga ráfagas imposibles. `alt/ctrl/shift+clic` y el
+  clic derecho sincronizan una línea.
 - **Recorte**: chip `✂` en «ahora» y editor `T` con botones para marcar
   inicio/fin/quitar; marcas `┃` visibles en la barra de progreso.
 - **Arte**: `half` es un modo real (media celda con paleta, sin Kitty) y entra
   en la rotación; `art_rotate_off` decide si `off` participa. `F` usa la
   portada full-res dentro del área sobre el transporte; `V` ya no pinta la
   portada detrás del visualizador (era el pixelado). El PNG se invalida al
-  cambiar de tamaño.
+  cambiar de tamaño. Las miniaturas se rasterizan al tamaño exacto de cada
+  hueco (tarjeta 6x3, cabecera 12x7, ficha 18x9) y en Kitty se colocan como
+  imagen real de 192 px, así que dejan de verse estiradas. La portada de
+  «buscar» usa toda la altura del bloque (antes un tope del 30 % del ancho la
+  dejaba pequeña y con hueco muerto al lado).
 - **Efectos**: pulsos más largos, brillo de bordes más continuo, luz de fondo
   ligada al bajo y `clean` recupera barras suaves + marea.
 - **Transporte**: el playhead interpola entre eventos del reproductor y los

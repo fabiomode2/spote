@@ -72,7 +72,7 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         }
         let thumb = Rect::new(card.x + 1, y, 6, card_h);
         app.ensure_album_art(&album);
-        app.request_album_thumb(&album);
+        app.request_album_thumb(&album, 6, card_h);
         let track = App::album_thumb_track(&album);
         draw_thumb(app, buf, thumb, &track, pal);
         let text_x = thumb.x + thumb.width + 2;
@@ -142,7 +142,7 @@ fn draw_album_detail(
     let inner = inset(rect, 2, 2);
     let header_h = 7u16.min(inner.height.saturating_sub(3));
     let thumb = Rect::new(inner.x, inner.y, 12.min(inner.width / 3), header_h);
-    app.request_album_thumb(album);
+    app.request_album_thumb(album, thumb.width, thumb.height);
     let track = App::album_thumb_track(album);
     draw_thumb(app, buf, thumb, &track, pal);
     let text_x = thumb.x + thumb.width + 2;

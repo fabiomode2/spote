@@ -181,6 +181,18 @@ impl App {
                     CenterFocus::Lyrics
                 };
             }
+            KeyCode::Char('D') => {
+                self.lyrics_debug = !self.lyrics_debug;
+                self.lyrics_debug_last = None;
+                self.toast(
+                    if self.lyrics_debug {
+                        "debug de letra: on"
+                    } else {
+                        "debug de letra: off"
+                    },
+                    ToastKind::Info,
+                );
+            }
             KeyCode::Right => {
                 if self.tab == Tab::Settings {
                     self.adjust_setting(self.settings_selected, 1);
@@ -246,7 +258,8 @@ impl App {
             }
             KeyCode::Char('a') if !upper => match self.tab {
                 Tab::Search => {
-                    if let Some(SearchEntry::Track(index)) = self.search_entry(self.search.selected) {
+                    if let Some(SearchEntry::Track(index)) = self.search_entry(self.search.selected)
+                    {
                         if let Some(item) = self.search.results.get(index).cloned() {
                             self.queue_track(item.to_track(), None);
                         }
@@ -289,8 +302,7 @@ impl App {
             KeyCode::Char('i') => self.set_zen(!self.zen),
             KeyCode::Char('T') if self.tab == Tab::Now => self.overlay = Overlay::Trim,
             KeyCode::Char('t')
-                if self.tab == Tab::Now
-                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
+                if self.tab == Tab::Now && key.modifiers.contains(KeyModifiers::SHIFT) =>
             {
                 self.overlay = Overlay::Trim
             }
@@ -354,5 +366,4 @@ impl App {
             _ => {}
         }
     }
-
 }

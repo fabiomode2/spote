@@ -23,8 +23,15 @@ const HOP: usize = 512;
 const FRAMES_PER_BUCKET: usize = 11;
 /// Muestras que cubre un bucket.
 const SAMPLES_PER_BUCKET: usize = HOP * FRAMES_PER_BUCKET;
-/// Separación entre buckets en milisegundos (truncada, para indexar).
+/// Separación entre buckets en milisegundos (aproximada; los buckets reales
+/// se etiquetan con `bucket_at_ms`, sin truncar).
 pub const BUCKET_MS: u64 = SAMPLES_PER_BUCKET as u64 * 1000 / RATE as u64;
+
+/// Milisegundos exactos en que empieza el bucket `index`. `BUCKET_MS` trunca
+/// 255.46 ms a 255: usar `i * BUCKET_MS` acumula ~430 ms de desfase en 4 min.
+pub fn bucket_at_ms(index: usize) -> u64 {
+    (index as u64 * SAMPLES_PER_BUCKET as u64 * 1000) / RATE as u64
+}
 
 // Umbrales del detector de secciones, todos relativos a la energía media.
 const MIN_SECTION_BUCKETS: usize = 8; // ~2 s: lo más corto se funde
@@ -118,7 +125,7 @@ impl SongMap {
         let duration_ms = if duration_ms == 0 {
             buckets
                 .last()
-                .map(|b| b.at_ms + BUCKET_MS)
+                .map(|_| bucket_at_ms(buckets.len()))
                 .unwrap_or_default()
         } else {
             duration_ms
@@ -295,7 +302,7 @@ impl Collector {
     }
 
     fn close(&mut self) {
-        let at_ms = self.buckets.len() as u64 * BUCKET_MS;
+        let at_ms = bucket_at_ms(self.buckets.len());
         self.buckets
             .push(SongBucket::from_frame(at_ms, &self.last, self.beat));
         self.frames = 0;
@@ -513,6 +520,19 @@ mod tests {
 
     fn kinds(map: &SongMap) -> Vec<SongSectionKind> {
         map.sections.iter().map(|s| s.kind).collect()
+    }
+
+    #[test]
+    fn bucket_timestamps_do_not_accumulate_truncation() {
+        // El bucket real dura 5632/22050 s ≈ 255.46 ms. Etiquetar con
+        // `i * BUCKET_MS` (255) adelantaba ~430 ms al final de una canción.
+        let index = 900usize;
+        let drift = bucket_at_ms(index) - index as u64 * BUCKET_MS;
+        assert!(drift >= 350, "drift={drift}");
+        assert_eq!(
+            bucket_at_ms(index),
+            index as u64 * SAMPLES_PER_BUCKET as u64 * 1000 / RATE as u64
+        );
     }
 
     #[test]

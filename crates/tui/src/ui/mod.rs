@@ -16,28 +16,29 @@ use crate::viz::Blend;
 
 mod albums;
 mod art;
+mod chrome;
 mod layout;
-mod now;
 mod lists;
+mod now;
+mod overlays;
 mod settings;
 mod side;
-mod chrome;
-mod overlays;
-pub use layout::Layout;
 use albums::*;
 use art::*;
-use now::*;
+use chrome::*;
+pub use layout::Layout;
 use lists::*;
+use now::*;
+use overlays::*;
 use settings::*;
 use side::*;
-use chrome::*;
-use overlays::*;
 
 const PLAY: &str = "⏵";
 const PAUSE: &str = "⏸";
 
 pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     app.art_visible_rect = None;
+    app.hi_thumbs.clear();
     if app.overlay != app.overlay_seen {
         app.overlay_seen = app.overlay.clone();
         app.needs_redraw = true;
@@ -53,11 +54,20 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     } else {
         match app.tab {
             Tab::Now => 6,
-            Tab::Library | Tab::Search | Tab::Room => 3,
+            // Buscar enseña la portada como protagonista: puede ocupar todo
+            // el alto disponible. La lista conserva su columna a la izquierda.
+            Tab::Search => 10,
+            Tab::Library | Tab::Room => 3,
             Tab::Albums | Tab::Settings => 0,
         }
     };
-    let layout = Layout::compute(area, &app.cfg.ui.layout, app.show_viz, app.fullscreen, art_ratio);
+    let layout = Layout::compute(
+        area,
+        &app.cfg.ui.layout,
+        app.show_viz,
+        app.fullscreen,
+        art_ratio,
+    );
     app.last_main = layout.main;
     app.hit.clear();
     let pal = *app.palette.current();
@@ -247,8 +257,11 @@ fn draw_ambient_lyrics_tint(app: &App, buf: &mut Buffer, area: Rect, opacity: f3
     let text = app
         .lyrics
         .as_ref()
-        .and_then(|doc| doc.index_at(app.now.position_ms))
-        .and_then(|index| app.lyrics.as_ref().and_then(|doc| doc.lines.get(index)))
+        .and_then(|doc| {
+            let target = doc.aligned_ms(app.display_position_ms());
+            doc.index_at_target(target)
+                .and_then(|index| doc.lines.get(index))
+        })
         .map(|line| line.text.clone())
         .filter(|text| !text.trim().is_empty())
         .or_else(|| {
@@ -260,7 +273,7 @@ fn draw_ambient_lyrics_tint(app: &App, buf: &mut Buffer, area: Rect, opacity: f3
     let Some(text) = text else { return };
     let alpha = (opacity * 1.4).clamp(0.04, 0.22);
     let tint = mix_oklab(palette_bg(app), app.palette.current().secondary, 0.55);
-    let drift = (app.now.position_ms / 90) as i32;
+    let drift = (app.display_position_ms() / 90) as i32;
     let area_buf = *buf.area();
     let width = area_buf.width as usize;
     for band in 0..3u16 {
@@ -282,8 +295,7 @@ fn draw_ambient_lyrics_tint(app: &App, buf: &mut Buffer, area: Rect, opacity: f3
                 if px < area.x as i32 || px >= (area.x + area.width) as i32 {
                     continue;
                 }
-                let start = (y - area_buf.y) as usize * width
-                    + (px as u16 - area_buf.x) as usize;
+                let start = (y - area_buf.y) as usize * width + (px as u16 - area_buf.x) as usize;
                 if let Some(cell) = buf.content.get_mut(start) {
                     let under = match cell.bg {
                         Color::Rgb(r, g, b) => (r, g, b),
@@ -352,7 +364,11 @@ fn content_rect(app: &App, layout: &Layout) -> Rect {
     if app.now.track.is_some() {
         return layout.content;
     }
-    let width = layout.content.width.min(64).max(layout.center.width.min(40));
+    let width = layout
+        .content
+        .width
+        .min(64)
+        .max(layout.center.width.min(40));
     Rect::new(
         layout.center.x + layout.center.width.saturating_sub(width) / 2,
         layout.content.y,
@@ -534,7 +550,9 @@ fn ambient_tint(app: &App, buf: &mut Buffer, rect: Rect, strength: f32) {
             let x = clip.x + offset as u16;
             let sx = ((x - area.x) as u32 * layer.w as u32 / area.width.max(1) as u32)
                 .min(layer.w.saturating_sub(1) as u32) as i32;
-            let Some(src) = layer.get(sx, sy) else { continue };
+            let Some(src) = layer.get(sx, sy) else {
+                continue;
+            };
             if src.alpha <= 0.01 {
                 continue;
             }
@@ -551,20 +569,43 @@ fn ambient_tint(app: &App, buf: &mut Buffer, rect: Rect, strength: f32) {
     }
 }
 
-fn panel(app: Option<&App>, buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, alpha: f32, title: Option<&str>, pulse: f32) {
+fn panel(
+    app: Option<&App>,
+    buf: &mut Buffer,
+    rect: Rect,
+    pal: &Palette,
+    active: bool,
+    alpha: f32,
+    title: Option<&str>,
+    pulse: f32,
+) {
     if rect.width < 3 || rect.height < 2 {
         return;
     }
     let fill_color = mix(pal.bg, pal.surface, alpha.clamp(0.0, 1.0));
     // alpha 0 = panel transparente: se usa sobre el arte para no taparlo.
     let opaque = alpha > 0.001;
-    let bg = if opaque { Some(color(fill_color)) } else { None };
+    let bg = if opaque {
+        Some(color(fill_color))
+    } else {
+        None
+    };
     if opaque {
-        fill_soft(buf, rect, fill_color, if soft_background(pal) { 0.92 } else { 1.0 }, pal.bg);
+        fill_soft(
+            buf,
+            rect,
+            fill_color,
+            if soft_background(pal) { 0.92 } else { 1.0 },
+            pal.bg,
+        );
         if let Some(app) = app {
             let mode = app.cfg.ui.fx.ambient.as_str();
             if !matches!(mode, "off" | "cover" | "lyrics") {
-                let strength = if app.cfg.ui.fx.glitch_panels { 0.08 } else { 0.02 };
+                let strength = if app.cfg.ui.fx.glitch_panels {
+                    0.08
+                } else {
+                    0.02
+                };
                 ambient_tint(app, buf, rect, strength);
             }
         }
@@ -592,11 +633,7 @@ fn panel(app: Option<&App>, buf: &mut Buffer, rect: Rect, pal: &Palette, active:
         pal.primary
     };
     let song = app.map(|app| app.song_intensity).unwrap_or(0.0);
-    let hit = kick
-        .max(snare * 0.85)
-        .max(hat * 0.55)
-        .max(vocal * 0.7)
-        * (0.55 + song * 0.75);
+    let hit = kick.max(snare * 0.85).max(hat * 0.55).max(vocal * 0.7) * (0.55 + song * 0.75);
     let base_border = if active {
         mix_oklab(pal.border, pal.primary, 0.55)
     } else if alpha >= 0.6 {
@@ -622,12 +659,7 @@ fn panel(app: Option<&App>, buf: &mut Buffer, rect: Rect, pal: &Palette, active:
         put(buf, x0, y, "│", color(border), bg);
         put(buf, x1, y, "│", color(border), bg);
     }
-    for (x, y, glyph) in [
-        (x0, y0, "╭"),
-        (x1, y0, "╮"),
-        (x0, y1, "╰"),
-        (x1, y1, "╯"),
-    ] {
+    for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")] {
         put(buf, x, y, glyph, color(border), bg);
     }
     if let Some(title) = title {
@@ -660,7 +692,11 @@ fn chip(buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, hover: bool) 
     let s = Style::new()
         .fg(color(fg))
         .bg(color(bg))
-        .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() });
+        .add_modifier(if active {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
     let _ = s;
 }
 
@@ -695,12 +731,7 @@ fn draw_toasts(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
             continue;
         }
         let x = layout.full.x + layout.full.width.saturating_sub(width + 2);
-        let rect = Rect::new(
-            x + ((1.0 - slide) * 6.0) as u16,
-            y,
-            width,
-            1,
-        );
+        let rect = Rect::new(x + ((1.0 - slide) * 6.0) as u16, y, width, 1);
         let accent = match toast.kind {
             ToastKind::Info => pal.primary,
             ToastKind::Ok => pal.ok,
@@ -745,5 +776,4 @@ mod tests {
         assert_eq!(bar_width(30, 55), 16);
         assert_eq!(bar_width(10, 100), 10);
     }
-
 }

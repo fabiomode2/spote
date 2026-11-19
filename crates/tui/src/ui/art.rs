@@ -20,7 +20,11 @@ pub(super) fn draw_art_placeholder(app: &App, buf: &mut Buffer, rect: Rect, pal:
     let cy = rect.y + rect.height / 2;
     let cx = rect.x + rect.width / 2;
     let mut glyph = [0u8; 4];
-    let symbol: &str = initial.to_uppercase().next().unwrap_or(initial).encode_utf8(&mut glyph);
+    let symbol: &str = initial
+        .to_uppercase()
+        .next()
+        .unwrap_or(initial)
+        .encode_utf8(&mut glyph);
     put(
         buf,
         cx.saturating_sub(1),
@@ -46,12 +50,7 @@ pub(super) fn frame_art(buf: &mut Buffer, rect: Rect, pal: &Palette) {
         put(buf, x0, y, "│", color(pal.border), None);
         put(buf, x1, y, "│", color(pal.border), None);
     }
-    for (x, y, glyph) in [
-        (x0, y0, "╭"),
-        (x1, y0, "╮"),
-        (x0, y1, "╰"),
-        (x1, y1, "╯"),
-    ] {
+    for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")] {
         put(buf, x, y, glyph, color(pal.border), None);
     }
 }
@@ -164,9 +163,14 @@ pub(super) fn draw_art(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
     let factor: u32 = if chunky { 2 } else { 1 };
     for y in 0..rect.height {
         for x in 0..rect.width {
-            let sx = ((x as u32 / factor) * art.w as u32 / (rect.width / factor as u16).max(1) as u32) as u16;
-            let sy = ((y as u32 / factor) * art.h as u32 / (rect.height / factor as u16).max(1) as u32) as u16;
-            let Some(cell) = art.cell(sx.min(art.w.saturating_sub(1)), sy.min(art.h.saturating_sub(1))) else {
+            let sx = ((x as u32 / factor) * art.w as u32
+                / (rect.width / factor as u16).max(1) as u32) as u16;
+            let sy = ((y as u32 / factor) * art.h as u32
+                / (rect.height / factor as u16).max(1) as u32) as u16;
+            let Some(cell) = art.cell(
+                sx.min(art.w.saturating_sub(1)),
+                sy.min(art.h.saturating_sub(1)),
+            ) else {
                 continue;
             };
             let mut ch = cell.ch;
@@ -177,9 +181,10 @@ pub(super) fn draw_art(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
                     / (rect.width / factor as u16).max(1) as u32) as u16;
                 let psy = ((y as u32 / factor) * previous.h as u32
                     / (rect.height / factor as u16).max(1) as u32) as u16;
-                if let Some(old) = previous
-                    .cell(psx.min(previous.w.saturating_sub(1)), psy.min(previous.h.saturating_sub(1)))
-                {
+                if let Some(old) = previous.cell(
+                    psx.min(previous.w.saturating_sub(1)),
+                    psy.min(previous.h.saturating_sub(1)),
+                ) {
                     // Disolución ordenada: el umbral de Bayer hace que el cambio
                     // se vea como una transición, no como un parpadeo.
                     const BAYER: [[f32; 4]; 4] = [
@@ -233,38 +238,52 @@ pub(super) fn draw_art(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
     }
 }
 
-pub(super) fn draw_thumb(app: &mut App, buf: &mut Buffer, rect: Rect, track: &spote_protocol::TrackRef, pal: &Palette) {
+pub(super) fn draw_thumb(
+    app: &mut App,
+    buf: &mut Buffer,
+    rect: Rect,
+    track: &spote_protocol::TrackRef,
+    pal: &Palette,
+) {
     if rect.width < 4 || rect.height < 2 {
         return;
     }
-    if let Some(art) = app.thumbs.get(&track.key) {
-        let mode = app.thumb_mode;
-        if mode == ThumbMode::Off {
-            // Sin miniatura: un bloque con la inicial, como el placeholder.
-            fill(buf, rect, mix(pal.surface, pal.bg_deep, 0.4));
-            let ch = track
-                .artist
-                .chars()
-                .next()
-                .unwrap_or('♪')
-                .to_uppercase()
-                .next()
-                .unwrap_or('♪');
-            put(
-                buf,
-                rect.x + rect.width / 2,
-                rect.y + rect.height / 2,
-                &ch.to_string(),
-                color(pal.dim),
-                None,
-            );
-            return;
-        }
+    let mode = app.thumb_mode;
+    if mode == ThumbMode::Off {
+        // Sin miniatura: un bloque con la inicial, como el placeholder.
+        fill(buf, rect, mix(pal.surface, pal.bg_deep, 0.4));
+        let ch = track
+            .artist
+            .chars()
+            .next()
+            .unwrap_or('♪')
+            .to_uppercase()
+            .next()
+            .unwrap_or('♪');
+        put(
+            buf,
+            rect.x + rect.width / 2,
+            rect.y + rect.height / 2,
+            &ch.to_string(),
+            color(pal.dim),
+            None,
+        );
+        return;
+    }
+
+    // La miniatura exacta manda; si aún no llegó, se estira la mayor que
+    // haya mientras se pide a la resolución del hueco.
+    let exact = app.thumb_for(&track.key, rect.width, rect.height);
+    let sufficient = exact.is_some();
+    let art = exact.or_else(|| app.thumb_any(&track.key));
+    if let Some(art) = art {
         for y in 0..rect.height {
             for x in 0..rect.width {
                 let sx = (x as u32 * art.w as u32 / rect.width.max(1) as u32) as u16;
                 let sy = (y as u32 * art.h as u32 / rect.height.max(1) as u32) as u16;
-                let Some(cell) = art.cell(sx, sy) else { continue };
+                let Some(cell) = art.cell(sx, sy) else {
+                    continue;
+                };
                 let (fg, bg) = if mode == ThumbMode::Plain {
                     (cell.fg, cell.bg.unwrap_or(pal.bg_deep))
                 } else {
@@ -290,7 +309,9 @@ pub(super) fn draw_thumb(app: &mut App, buf: &mut Buffer, rect: Rect, track: &sp
     } else {
         // Placeholder de color estable por artista mientras llega el arte.
         let seed = spote_core::util::short_hash(&track.artist);
-        let base = pal.ramp_at(0.45 + (u32::from_str_radix(&seed[..2], 16).unwrap_or(0) as f32 / 255.0) * 0.3);
+        let base = pal.ramp_at(
+            0.45 + (u32::from_str_radix(&seed[..2], 16).unwrap_or(0) as f32 / 255.0) * 0.3,
+        );
         for y in 0..rect.height {
             for x in 0..rect.width {
                 put_bg(buf, rect.x + x, rect.y + y, base);
@@ -314,14 +335,24 @@ pub(super) fn draw_thumb(app: &mut App, buf: &mut Buffer, rect: Rect, track: &sp
             color(pal.text),
             None,
         );
-        // Pide la miniatura una sola vez por pista.
-        if !app.thumb_requests.contains(&track.key) {
-            app.thumb_requests.insert(track.key.clone());
-            app.request_thumb(track);
-        }
+    }
+
+    // En Kitty la miniatura se coloca como imagen real; el half-block queda
+    // de respaldo debajo. La clave incluye la posición para distinguir la
+    // misma pista repetida en pantalla.
+    app.hi_thumbs.push((
+        format!("{}@{}:{}", track.key, rect.x, rect.y),
+        track.key.clone(),
+        rect,
+    ));
+
+    // Las portadas de álbum las pide su vista, que conoce la URL aunque la
+    // pista no esté en la librería. El resto se pide aquí, una vez por hueco.
+    let album = track.key.starts_with("album:") || track.key.starts_with("albumpage:");
+    if !sufficient && !album {
+        app.request_thumb(track, rect.width, rect.height);
     }
 }
-
 
 /// Pinta un `CoverArt` ya cacheado (perfil de artista, cabeceras...).
 pub(super) fn draw_cached_art(
@@ -338,7 +369,10 @@ pub(super) fn draw_cached_art(
         for x in 0..rect.width {
             let sx = (x as u32 * art.w as u32 / rect.width.max(1) as u32) as u16;
             let sy = (y as u32 * art.h as u32 / rect.height.max(1) as u32) as u16;
-            let Some(cell) = art.cell(sx.min(art.w.saturating_sub(1)), sy.min(art.h.saturating_sub(1))) else {
+            let Some(cell) = art.cell(
+                sx.min(art.w.saturating_sub(1)),
+                sy.min(art.h.saturating_sub(1)),
+            ) else {
                 continue;
             };
             let (fg, bg) = if plain {
@@ -346,12 +380,21 @@ pub(super) fn draw_cached_art(
             } else {
                 (
                     pal.ramp_at(luma(cell.fg)),
-                    cell.bg.map(|bg| pal.ramp_at(luma(bg))).unwrap_or(pal.bg_deep),
+                    cell.bg
+                        .map(|bg| pal.ramp_at(luma(bg)))
+                        .unwrap_or(pal.bg_deep),
                 )
             };
             let mut glyph = [0u8; 4];
             let symbol: &str = cell.ch.encode_utf8(&mut glyph);
-            put(buf, rect.x + x, rect.y + y, symbol, color(fg), Some(color(bg)));
+            put(
+                buf,
+                rect.x + x,
+                rect.y + y,
+                symbol,
+                color(fg),
+                Some(color(bg)),
+            );
         }
     }
 }

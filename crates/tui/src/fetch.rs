@@ -29,8 +29,7 @@ impl SearchWorker {
             .name("spote-search".into())
             .spawn(move || {
                 while let Ok((id, query)) = request_rx.recv() {
-                    let result = spotify_api::search_all(&query, 10)
-                        .map_err(|err| err.to_string());
+                    let result = spotify_api::search_all(&query, 10).map_err(|err| err.to_string());
                     if response_tx.send((id, result)).is_err() {
                         return;
                     }
@@ -47,12 +46,7 @@ impl SearchWorker {
         let _ = self.requests.send((id, query));
     }
 
-    pub fn try_recv(
-        &self,
-    ) -> Option<(
-        u64,
-        Result<spote_core::spotify_api::SearchAll, String>,
-    )> {
+    pub fn try_recv(&self) -> Option<(u64, Result<spote_core::spotify_api::SearchAll, String>)> {
         self.responses.try_recv().ok()
     }
 }
@@ -60,6 +54,16 @@ impl SearchWorker {
 // ---------------------------------------------------------------------------
 // Portada
 // ---------------------------------------------------------------------------
+
+/// Para qué se pide el arte. La clasificación va explícita y no por tamaño:
+/// una miniatura de álbum puede ser 18x9 y no debe pisar la portada grande.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtKind {
+    Main,
+    Thumb,
+    Ambient,
+    Artist,
+}
 
 #[derive(Debug, Clone)]
 pub struct ArtRequest {
@@ -72,6 +76,7 @@ pub struct ArtRequest {
     pub w: u16,
     pub h: u16,
     pub mode: ArtMode,
+    pub kind: ArtKind,
 }
 
 #[derive(Debug)]
@@ -86,6 +91,7 @@ pub struct ArtResponse {
     pub w: u16,
     pub h: u16,
     pub mode: ArtMode,
+    pub kind: ArtKind,
     pub error: Option<String>,
 }
 
@@ -137,7 +143,7 @@ impl ArtWorker {
     }
 
     pub fn request(&self, request: ArtRequest) {
-        if request.w <= 8 && request.h <= 4 {
+        if request.kind == ArtKind::Thumb {
             let _ = self.thumbs.send(request);
         } else {
             let _ = self.big.send(request);
@@ -163,6 +169,7 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
         w: request.w,
         h: request.h,
         mode: request.mode,
+        kind: request.kind,
         error: None,
     };
 
@@ -172,7 +179,11 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
         .and_then(|path| std::fs::read(path).ok())
         .and_then(|bytes| decode_image(&bytes).ok());
 
-    let mut image = if request.prefer_url { None } else { local_image.clone() };
+    let mut image = if request.prefer_url {
+        None
+    } else {
+        local_image.clone()
+    };
 
     if image.is_none() {
         if let Some(url) = request.url.as_deref() {
@@ -187,7 +198,8 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
                 if let Some(client) = client {
                     match download(client, url) {
                         Ok(bytes) => {
-                            let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("/tmp")));
+                            let _ =
+                                std::fs::create_dir_all(path.parent().unwrap_or(Path::new("/tmp")));
                             let _ = std::fs::write(&path, &bytes);
                             image = decode_image(&bytes).ok();
                             response.art_path = Some(path.clone());
@@ -217,29 +229,51 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
         return response;
     };
 
-    response.palette = Some(Palette::from_image(&image));
+    // La paleta del tema solo la necesita la portada grande; calcularla por
+    // cada miniatura era trabajo tirado en el hilo de arte.
+    if request.kind != ArtKind::Thumb {
+        response.palette = Some(Palette::from_image(&image));
+    }
+    let palette = match response.palette {
+        Some(palette) => palette,
+        // Las miniaturas se piden en `Plain`: no necesitan la paleta.
+        None if request.mode == ArtMode::Plain => Palette::default(),
+        None => Palette::from_image(&image),
+    };
     if request.mode != ArtMode::Off && request.w > 2 && request.h > 1 {
         response.art = Some(render_cover(
             &image,
             request.w,
             request.h,
             request.mode,
-            response.palette.as_ref().unwrap(),
+            &palette,
             0.0,
         ));
     }
     // La imagen original solo interesa para la portada grande en Kitty. Se
     // convierte a PNG una vez por cambio, no por frame.
-    if request.mode == ArtMode::Plain
+    // Miniaturas para Kitty: se manda una versión normalizada (la terminal la
+    // escala al hueco) y así una tarjeta de 6x3 se ve como la portada real,
+    // no como un bloque de 6x3.
+    if request.kind == ArtKind::Thumb && request.mode == ArtMode::Plain {
+        let thumb = image.resize_to_fill(192, 192, image::imageops::FilterType::Lanczos3);
+        let mut png = Vec::new();
+        if thumb
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .is_ok()
+        {
+            response.png_size = Some((192, 192));
+            response.png = Some(png);
+        }
+    }
+    if request.kind == ArtKind::Main
+        && request.mode == ArtMode::Plain
         && request.w >= 24
         && request.h >= 12
     {
         let mut png = Vec::new();
         if image
-            .write_to(
-                &mut std::io::Cursor::new(&mut png),
-                image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .is_ok()
         {
             response.png_size = Some((image.width(), image.height()));
@@ -287,6 +321,9 @@ pub enum LyricsMsg {
 pub struct LyricsRequest {
     pub track: TrackRef,
     pub audio: Option<PathBuf>,
+    /// La letra cacheada venía de un alineador viejo: re-alinear aunque el
+    /// proveedor ya devuelva un LRC sincronizado.
+    pub force_align: bool,
 }
 
 pub struct LyricsWorker {
@@ -310,9 +347,11 @@ impl LyricsWorker {
                 let service = LyricsService::from_config(&cfg);
                 while let Ok(request) = rx.recv() {
                     let track = request.track;
-                    let result = runtime.block_on(
-                        service.fetch_with_audio(&track, request.audio.as_deref()),
-                    );
+                    let result = runtime.block_on(service.fetch_with_audio(
+                        &track,
+                        request.audio.as_deref(),
+                        request.force_align,
+                    ));
                     let message = match result {
                         Ok(Some(doc)) => LyricsMsg::Loaded {
                             key: track.key.clone(),
@@ -345,8 +384,12 @@ impl LyricsWorker {
         }
     }
 
-    pub fn request(&self, track: TrackRef, audio: Option<PathBuf>) {
-        let _ = self.requests.send(LyricsRequest { track, audio });
+    pub fn request(&self, track: TrackRef, audio: Option<PathBuf>, force_align: bool) {
+        let _ = self.requests.send(LyricsRequest {
+            track,
+            audio,
+            force_align,
+        });
     }
 
     pub fn try_recv(&self) -> Option<LyricsMsg> {
@@ -357,6 +400,11 @@ impl LyricsWorker {
 /// Serializa de vuelta a LRC para cachear y para el `.lrc` junto al audio.
 pub fn doc_to_lrc(doc: &LyricsDoc) -> String {
     let mut out = String::new();
+    // Sin esto, recargar la caché perdía el `[offset:]` del LRC original y
+    // habilitaba el auto-ajuste sobre una letra que ya estaba bien.
+    if doc.offset_ms != 0 {
+        out.push_str(&format!("[offset:{}]\n", doc.offset_ms));
+    }
     for line in &doc.lines {
         let minutes = line.start_ms / 60_000;
         let seconds = (line.start_ms % 60_000) as f32 / 1000.0;
@@ -369,7 +417,10 @@ pub fn doc_to_lrc(doc: &LyricsDoc) -> String {
                 let ws = (word.start_ms % 60_000) as f32 / 1000.0;
                 body.push_str(&format!("<{wm:02}:{ws:05.2}>{}\n", word.text));
             }
-            out.push_str(&format!("[{minutes:02}:{seconds:05.2}] {}\n", body.replace('\n', " ")));
+            out.push_str(&format!(
+                "[{minutes:02}:{seconds:05.2}] {}\n",
+                body.replace('\n', " ")
+            ));
         }
     }
     out
@@ -405,10 +456,7 @@ impl SpotifyWorker {
                 }
             })
             .ok();
-        Self {
-            states: rx,
-            active,
-        }
+        Self { states: rx, active }
     }
 
     pub fn try_recv(&self) -> Option<SpotifyState> {
@@ -442,6 +490,7 @@ mod tests {
             w: 60,
             h: 30,
             mode: ArtMode::Plain,
+            kind: ArtKind::Main,
         });
         let start = std::time::Instant::now();
         let mut response = None;
@@ -453,7 +502,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let response = response.expect("el worker no respondió");
-        assert!(response.png.is_some(), "no generó PNG: {:?}", response.error);
+        assert!(
+            response.png.is_some(),
+            "no generó PNG: {:?}",
+            response.error
+        );
     }
 
     #[test]
@@ -471,6 +524,7 @@ mod tests {
             w: 60,
             h: 20,
             mode: ArtMode::Dither,
+            kind: ArtKind::Main,
         });
         let start = std::time::Instant::now();
         let mut response = None;
@@ -557,18 +611,14 @@ impl MetaWorker {
                             let result = spotify_api::artist(&name).map_err(|err| err.to_string());
                             MetaEvent::Artist { name, result }
                         }
-                        MetaJob::ArtistId {
-                            provider,
-                            id,
-                            name,
-                        } => {
+                        MetaJob::ArtistId { provider, id, name } => {
                             let result = spotify_api::artist_by_id(&provider, &id)
                                 .map_err(|err| err.to_string());
                             MetaEvent::Artist { name, result }
                         }
                         MetaJob::Album { provider, id } => {
-                            let result = spotify_api::album(&provider, &id)
-                                .map_err(|err| err.to_string());
+                            let result =
+                                spotify_api::album(&provider, &id).map_err(|err| err.to_string());
                             MetaEvent::Album {
                                 provider,
                                 id,
@@ -606,11 +656,7 @@ impl MetaWorker {
     }
 
     pub fn artist_by_id(&self, provider: String, id: String, name: String) {
-        let _ = self.jobs.send(MetaJob::ArtistId {
-            provider,
-            id,
-            name,
-        });
+        let _ = self.jobs.send(MetaJob::ArtistId { provider, id, name });
     }
 
     pub fn album(&self, provider: String, id: String) {
