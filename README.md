@@ -1,8 +1,8 @@
 # spote
 
-**Tu música, en la terminal.** La portada tiñe la interfaz, los bordes laten con
-el bombo y las letras van a tiempo. TUI en Rust, `mpv` para sonar, `yt-dlp`
-para bajar y SQLite para la biblioteca.
+Reproductor de música en terminal. La portada del disco tiñe la interfaz y los
+bordes, el playhead y las letras reaccionan al audio. La TUI está en Rust y tira
+de `mpv` para reproducir, `yt-dlp` para bajar y SQLite para la biblioteca.
 
 ![spote](docs/screenshots/now.png)
 
@@ -12,35 +12,37 @@ para bajar y SQLite para la biblioteca.
 git clone https://github.com/fabiomode2/spote && cd spote
 ./scripts/install.sh
 spote
+```
 
-# opcional: captions de YouTube
+Hacen falta Rust 1.82+, `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
+deja los binarios en `~/.local/bin`, crea el venv con `faster-whisper` y copia
+los scripts. Las letras no necesitan nada más: LRCLIB, Genius y ASR van dentro.
+
+Para captions de YouTube, que son lo único que queda fuera:
+
+```bash
 ./scripts/install.sh --lyricbar ~/Code/lyricbar
 ```
 
-Necesitas Rust 1.82+, `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
-deja los binarios en `~/.local/bin`, crea el venv con `faster-whisper` y copia
-los scripts. Las letras van dentro: LRCLIB, Genius y ASR. No hace falta
-lyricbar.
+Para actualizar: `./scripts/update.sh`, o desde el aviso de versión que sale en
+la propia TUI.
 
-Actualizar: `./scripts/update.sh` o desde el aviso de versión de la propia TUI.
+## Qué hace
 
-## Lo que mola
-
-- **Arte vivo** — portada en half-block, dither, braille o imagen real en
-  Kitty; la paleta del tema sale de la carátula y los bordes, el playhead y las
-  letras laten con bombo, caja y voz.
-- **Letras de verdad** — LRCLIB, Genius y ASR local. Lectura completa,
-  relectura de la cola con 15 s de contexto y alineación fonética en Rust. Un
-  LRC sincronizado bueno no se toca; el estimado se afina solo.
-- **Karaoke** — palabra a palabra, frases largas en dos filas y la última
-  palabra se llena antes de cambiar de línea.
-- **Búsqueda sin cuenta** — Spotify y Deezer como catálogo; el audio sale de
-  `yt-dlp`. Importa playlists y álbumes con `I`.
-- **Cola y listas** — encolar, reordenar, descargar, favoritas y playlists
+- **Arte**: portada en half-block, dither, braille o imagen real en Kitty. La
+  paleta del tema sale de la carátula.
+- **Letras**: LRCLIB, Genius y ASR local. Lee la canción completa, relee la cola
+  con 15 s de contexto y alinea la letra en Rust. Un LRC sincronizado bueno no
+  se toca; el estimado se afina solo.
+- **Karaoke**: palabra a palabra, frases largas en dos filas y la última palabra
+  se llena antes de cambiar de línea.
+- **Búsqueda**: Spotify y Deezer como catálogo, sin cuenta. El audio sale de
+  `yt-dlp`. `I` importa playlists y álbumes.
+- **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
   locales. `z` alterna tarjetas con portada y lista compacta.
-- **Salas** — `spoted` añade presencia, chat y cola compartida.
-- **Todo en caliente** — `E` edita el layout (paneles, anchos, dock, tamaños) y
-  se guarda solo en `config.toml`.
+- **Salas**: `spoted` añade presencia, chat y cola compartida.
+- **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
+  `config.toml`.
 
 ## Atajos
 
@@ -54,7 +56,7 @@ Actualizar: `./scripts/update.sh` o desde el aviso de versión de la propia TUI.
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
 | `E` | editor de diseño | `?` | ayuda |
 
-## Cómo suena
+## Cómo funciona
 
 ```
 audio local ──▶ mpv (IPC) ──▶ FFT ──▶ UI reactiva
@@ -78,10 +80,7 @@ asr = true
 asr_model = "small"    # tiny | base | small | medium | large-v3
 ```
 
-`LYRICBAR_ROOT` solo hace falta si quieres captions de YouTube. El resto de
-letras ya van dentro.
-
-## Más
+## Comandos
 
 ```bash
 spote ingest ~/Music                            # indexa audio local
@@ -90,6 +89,8 @@ spote doctor                                    # comprueba dependencias
 spote record [--flac]                           # graba lo que suena
 spoted                                          # backend social en :7070
 ```
+
+## Más
 
 - `idea.md` — producto, arquitectura y decisiones.
 - `docs/arquitectura.md` — módulos, layout y mapa de audio.
