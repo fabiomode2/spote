@@ -51,6 +51,8 @@ pub struct TrackRow {
     pub favorite: bool,
     pub play_count: u32,
     pub art_path: Option<PathBuf>,
+    /// Alta en la biblioteca (ms desde epoch), para la columna «añadida».
+    pub added_at: i64,
 }
 
 impl TrackRow {
@@ -139,6 +141,11 @@ impl Library {
         };
         lib.configure()?;
         lib.migrate()?;
+        // Limpiezas silenciosas de datos viejos. Si fallan, la biblioteca
+        // sigue funcionando igual.
+        lib.merge_duplicates().ok();
+        lib.clear_shared_art().ok();
+        lib.clear_imported_albums().ok();
         Ok(lib)
     }
 
@@ -446,14 +453,204 @@ impl Library {
             "{SELECT_TRACK}
              WHERE lower(t.title) = ?1
                AND lower(t.artist) = ?2
-               AND abs(t.duration_ms - ?3) < 8000
-             ORDER BY abs(t.duration_ms - ?3)
+               AND (?3 = 0 OR t.duration_ms = 0 OR abs(t.duration_ms - ?3) < 8000)
+             ORDER BY (s.status = 'ready') DESC, abs(t.duration_ms - ?3)
              LIMIT 1"
         ))?;
         let row = stmt
             .query_row(params![title, artist, duration_ms as i64], row_to_track)
             .optional()?;
         Ok(row)
+    }
+
+    /// Clave ya existente para la misma canción, aunque venga con otro
+    /// proveedor (ISRC/Spotify) distinto. Evita que importar una lista cree
+    /// una segunda fila de algo que ya está descargado en la biblioteca.
+    pub fn canonical_key(&self, track: &TrackRef) -> String {
+        self.find_by_meta(&track.artist, &track.title, track.duration_ms)
+            .ok()
+            .flatten()
+            .map(|row| row.track.key)
+            .unwrap_or_else(|| track.key.clone())
+    }
+
+    /// Fusiona la misma canción metida dos veces con claves distintas: lo
+    /// normal es una fila local y otra creada al importar una lista con
+    /// ISRC/Spotify. Conserva la que tiene fichero y mueve a ella fuentes,
+    /// listas, letra e historial. No toca parejas sin ningún audio listo.
+    pub fn merge_duplicates(&mut self) -> Result<usize> {
+        let pairs: Vec<(i64, i64, i64, i64)> = {
+            let mut stmt = self.conn.prepare(
+                r#"SELECT a.id, b.id,
+                     (SELECT count(*) FROM source s WHERE s.track_id = a.id AND s.status = 'ready'),
+                     (SELECT count(*) FROM source s WHERE s.track_id = b.id AND s.status = 'ready')
+                   FROM track a
+                   JOIN track b ON a.id < b.id
+                   WHERE lower(trim(a.title)) = lower(trim(b.title))
+                     AND lower(trim(a.artist)) = lower(trim(b.artist))
+                     AND a.duration_ms > 0 AND b.duration_ms > 0
+                     AND abs(a.duration_ms - b.duration_ms) <= 2000
+                     AND (EXISTS (SELECT 1 FROM source s WHERE s.track_id = a.id AND s.status = 'ready')
+                          OR EXISTS (SELECT 1 FROM source s WHERE s.track_id = b.id AND s.status = 'ready'))"#,
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut merged = 0usize;
+        for (a, b, ready_a, ready_b) in pairs {
+            // La que tenga audio manda; si ambas lo tienen, se queda la que
+            // esté en más listas (las entradas repetidas se colapsan solas).
+            let keep = match (ready_a > 0, ready_b > 0) {
+                (true, false) => a,
+                (false, true) => b,
+                (true, true) => {
+                    let lists_a: i64 = self.conn.query_row(
+                        "SELECT count(*) FROM playlist_item WHERE track_id = ?1",
+                        params![a],
+                        |row| row.get(0),
+                    )?;
+                    let lists_b: i64 = self.conn.query_row(
+                        "SELECT count(*) FROM playlist_item WHERE track_id = ?1",
+                        params![b],
+                        |row| row.get(0),
+                    )?;
+                    if lists_b > lists_a { b } else { a }
+                }
+                (false, false) => continue,
+            };
+            let drop = if keep == a { b } else { a };
+            // Cualquiera de las dos pudo fusionarse ya en otra pasada.
+            let alive: i64 = self.conn.query_row(
+                "SELECT count(*) FROM track WHERE id = ?1",
+                params![drop],
+                |row| row.get(0),
+            )?;
+            let keep_alive: i64 = self.conn.query_row(
+                "SELECT count(*) FROM track WHERE id = ?1",
+                params![keep],
+                |row| row.get(0),
+            )?;
+            if alive == 0 || keep_alive == 0 {
+                continue;
+            }
+            self.merge_track(keep, drop)?;
+            merged += 1;
+        }
+        if merged > 0 {
+            self.count_cache.set(None);
+            self.ready_cache.set(None);
+            self.playlists_cache.replace(None);
+        }
+        Ok(merged)
+    }
+
+    /// Quita portadas compartidas por pistas de álbumes distintos. Es el
+    /// rastro de las listas importadas, que antes copiaban la carátula de la
+    /// lista a todas sus canciones. Así cada fila vuelve a buscar la suya.
+    pub fn clear_shared_art(&mut self) -> Result<usize> {
+        let removed = self.conn.execute(
+            r#"UPDATE track SET art_url = NULL
+               WHERE art_url IS NOT NULL
+                 AND EXISTS (
+                   SELECT 1 FROM track other
+                   WHERE other.art_url = track.art_url
+                     AND coalesce(other.album, '') <> coalesce(track.album, '')
+                 )"#,
+            [],
+        )?;
+        Ok(removed)
+    }
+
+    /// Las listas importadas antiguas ponían el nombre de la lista como
+    /// álbum de todas sus pistas (y su carátula como portada). Eso hacía que
+    /// pareciesen un solo álbum. Se limpia para que el backfill busque los
+    /// datos reales de cada tema.
+    pub fn clear_imported_albums(&mut self) -> Result<usize> {
+        self.playlists_cache.replace(None);
+        let lists = self.playlists()?;
+        let mut cleared = 0usize;
+        for list in lists {
+            cleared += self.conn.execute(
+                r#"UPDATE track SET
+                     album = NULL,
+                     art_url = CASE
+                       WHEN ?3 IS NOT NULL AND art_url = ?3 THEN NULL
+                       ELSE art_url
+                     END
+                   WHERE id IN (
+                     SELECT track_id FROM playlist_item WHERE playlist_id = ?1
+                   )
+                     AND lower(trim(coalesce(album, ''))) = lower(trim(?2))
+                     AND EXISTS (
+                       SELECT 1 FROM source s
+                       WHERE s.track_id = track.id
+                         AND s.provider IN ('spotify', 'deezer')
+                         AND s.provider_id IS NOT NULL
+                     )"#,
+                params![list.id, list.name, list.cover_url],
+            )?;
+        }
+        if cleared > 0 {
+            self.count_cache.set(None);
+            self.ready_cache.set(None);
+            self.playlists_cache.replace(None);
+        }
+        Ok(cleared)
+    }
+
+    fn merge_track(&mut self, keep: i64, drop: i64) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO source
+               (track_id, provider, provider_id, url, ext, bitrate, status, path, size)
+             SELECT ?1, provider, provider_id, url, ext, bitrate, status, path, size
+             FROM source WHERE track_id = ?2",
+            params![keep, drop],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO playlist_item (playlist_id, track_id, position)
+             SELECT playlist_id, ?1, position FROM playlist_item WHERE track_id = ?2",
+            params![keep, drop],
+        )?;
+        tx.execute(
+            "UPDATE play_event SET track_id = ?1 WHERE track_id = ?2",
+            params![keep, drop],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO lyrics
+               (track_id, lrc, synced, source, offset_ms, fetched_at, aligned, align_version)
+             SELECT ?1, lrc, synced, source, offset_ms, fetched_at, aligned, align_version
+             FROM lyrics WHERE track_id = ?2",
+            params![keep, drop],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO track_trim (track_id, start_ms, end_ms)
+             SELECT ?1, start_ms, end_ms FROM track_trim WHERE track_id = ?2",
+            params![keep, drop],
+        )?;
+        tx.execute(
+            "UPDATE track SET
+               album = coalesce(album, (SELECT album FROM track WHERE id = ?2)),
+               art_path = coalesce(art_path, (SELECT art_path FROM track WHERE id = ?2)),
+               art_url = coalesce(art_url, (SELECT art_url FROM track WHERE id = ?2)),
+               favorite = max(favorite, (SELECT favorite FROM track WHERE id = ?2)),
+               play_count = play_count + (SELECT play_count FROM track WHERE id = ?2),
+               last_played = nullif(max(
+                 coalesce(last_played, 0),
+                 coalesce((SELECT last_played FROM track WHERE id = ?2), 0)
+               ), 0),
+               added_at = min(added_at, (SELECT added_at FROM track WHERE id = ?2))
+             WHERE id = ?1",
+            params![keep, drop],
+        )?;
+        // Las tablas hijas restantes caen por ON DELETE CASCADE.
+        tx.execute("DELETE FROM track WHERE id = ?1", params![drop])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn track_by_id(&self, id: i64) -> Result<Option<TrackRow>> {
@@ -575,10 +772,12 @@ impl Library {
         Ok(rows)
     }
 
-    /// Orden alfabético, con las descargadas primero.
+    /// De más reciente a más antigua: lo último que entró en la biblioteca
+    /// queda arriba. Antes iba por artista, así que "anterior" y "siguiente"
+    /// aterrizaban siempre en el mismo extremo de la lista.
     pub fn all_tracks(&self, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} ORDER BY (s.status = 'ready') DESC, t.artist COLLATE NOCASE, t.title LIMIT ?1"
+            "{SELECT_TRACK} ORDER BY t.added_at DESC, t.id DESC LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -1099,7 +1298,7 @@ impl Library {
 
 const SELECT_TRACK: &str = r#"
 SELECT t.id, t.key, t.title, t.artist, t.album, t.duration_ms, t.art_url, t.art_path,
-       s.path, s.status, s.provider, t.favorite, t.play_count
+       s.path, s.status, s.provider, t.favorite, t.play_count, t.added_at
 FROM track t
 LEFT JOIN source s ON s.track_id = t.id
   AND s.id = (SELECT id FROM source x WHERE x.track_id = t.id
@@ -1127,6 +1326,7 @@ fn row_to_track(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
         favorite: row.get::<_, i64>(11)? != 0,
         play_count: row.get::<_, i64>(12)?.max(0) as u32,
         art_path: art_path.map(PathBuf::from),
+        added_at: row.get::<_, i64>(13).unwrap_or(0),
     })
 }
 
@@ -1234,6 +1434,110 @@ mod tests {
         // Sin tokens útiles se comporta como "recientes", no como error.
         assert_eq!(lib.search("!!!", 10).unwrap().len(), 3);
         assert_eq!(lib.search("", 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn imported_album_names_and_cover_are_cleaned() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let list = lib
+            .create_playlist_full("Mix", "", None, Some("https://cover/mix.jpg"))
+            .unwrap();
+        let mut imported = track("isrc:uno", "Uno", "Artista");
+        imported.album = Some("Mix".into());
+        imported.art_url = Some("https://cover/mix.jpg".into());
+        let id = lib.upsert_track(&imported).unwrap();
+        lib.set_source(id, "spotify", Some("uno"), None, SourceStatus::Pending, None)
+            .unwrap();
+        lib.add_to_playlist(list, "isrc:uno").unwrap();
+        let mut local = track("sha1:dos", "Dos", "Artista");
+        local.album = Some("Mix".into());
+        lib.upsert_track(&local).unwrap();
+        lib.add_to_playlist(list, "sha1:dos").unwrap();
+
+        assert_eq!(lib.clear_imported_albums().unwrap(), 1);
+        let imported = lib.track_by_key("isrc:uno").unwrap().unwrap();
+        assert!(imported.track.album.is_none());
+        assert!(imported.track.art_url.is_none());
+        let local = lib.track_by_key("sha1:dos").unwrap().unwrap();
+        assert_eq!(local.track.album.as_deref(), Some("Mix"));
+    }
+
+    #[test]
+    fn shared_art_across_albums_is_cleared() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let playlist_cover = Some("https://cover/playlist.jpg".to_string());
+        let mut a = track("sha1:a", "A", "X");
+        a.album = Some("Album A".into());
+        a.art_url = playlist_cover.clone();
+        let mut b = track("sha1:b", "B", "X");
+        b.album = Some("Album B".into());
+        b.art_url = playlist_cover;
+        for item in [&a, &b] {
+            lib.upsert_track(item).unwrap();
+        }
+        // Dos pistas del mismo álbum sí pueden compartir carátula.
+        let album_cover = Some("https://cover/album.jpg".to_string());
+        let mut c = track("sha1:c", "C", "X");
+        c.album = Some("Album C".into());
+        c.art_url = album_cover.clone();
+        let mut d = track("sha1:d", "D", "X");
+        d.album = Some("Album C".into());
+        d.art_url = album_cover;
+        for item in [&c, &d] {
+            lib.upsert_track(item).unwrap();
+        }
+
+        assert_eq!(lib.clear_shared_art().unwrap(), 2);
+        assert!(lib.track_by_key("sha1:a").unwrap().unwrap().track.art_url.is_none());
+        assert!(lib.track_by_key("sha1:b").unwrap().unwrap().track.art_url.is_none());
+        assert_eq!(
+            lib.track_by_key("sha1:c").unwrap().unwrap().track.art_url.as_deref(),
+            Some("https://cover/album.jpg")
+        );
+    }
+
+    #[test]
+    fn merge_duplicates_keeps_downloaded_and_moves_playlist() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let local = lib
+            .upsert_track(&track("sha1:local", "El Hueso", "Ralphie Choo"))
+            .unwrap();
+        lib.set_source(
+            local,
+            "local",
+            None,
+            Some(Path::new("/tmp/el-hueso.opus")),
+            SourceStatus::Ready,
+            None,
+        )
+        .unwrap();
+        let imported = lib
+            .upsert_track(&track("isrc:abc", "El Hueso", "Ralphie Choo"))
+            .unwrap();
+        lib.set_source(
+            imported,
+            "spotify",
+            Some("abc"),
+            None,
+            SourceStatus::Pending,
+            None,
+        )
+        .unwrap();
+        let list = lib.create_playlist("Lista").unwrap();
+        lib.add_to_playlist(list, "isrc:abc").unwrap();
+
+        assert_eq!(lib.merge_duplicates().unwrap(), 1);
+        assert!(lib.track_by_key("isrc:abc").unwrap().is_none());
+        assert!(lib.track_by_key("sha1:local").unwrap().is_some());
+        let rows = lib.playlist_tracks(list).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].track.key, "sha1:local");
+        assert_eq!(rows[0].status, SourceStatus::Ready);
+        assert_eq!(lib.ready_count().unwrap(), 1);
+        assert_eq!(
+            lib.canonical_key(&track("isrc:otro", "El Hueso", "Ralphie Choo")),
+            "sha1:local"
+        );
     }
 
     #[test]

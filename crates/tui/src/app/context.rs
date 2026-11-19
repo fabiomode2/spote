@@ -146,6 +146,25 @@ impl App {
                 self.context = Some(menu);
                 self.apply_context();
             }
+            // Segunda pulsación de Supr dentro del menú: borra el audio y la
+            // fila de la biblioteca sin tener que bajar hasta la opción.
+            KeyCode::Delete => {
+                let actions = menu.actions();
+                let target = [
+                    ContextAction::DeleteFile,
+                    ContextAction::RemoveLibrary,
+                    ContextAction::RemoveQueue,
+                ]
+                .into_iter()
+                .find(|action| actions.contains(action));
+                if let Some(target) = target {
+                    if let Some(index) = actions.iter().position(|action| *action == target) {
+                        menu.selected = index;
+                    }
+                    self.context = Some(menu);
+                    self.apply_context();
+                }
+            }
             _ => {}
         }
     }

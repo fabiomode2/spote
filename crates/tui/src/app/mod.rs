@@ -214,6 +214,7 @@ pub enum Action {
     PlayPause,
     Next,
     Prev,
+    LoopToggle,
     SeekTo(u64),
     SeekLyrics(u64),
     Volume(f32),
@@ -714,6 +715,11 @@ pub struct App {
     pub queue_selected: usize,
     pub queue_drag: Option<usize>,
     pub view: Vec<TrackRow>,
+    /// Bucle del fichero actual (`loop-file=inf` en mpv).
+    pub loop_file: bool,
+    /// Pistas previas de la sesión, para que «anterior» no caiga siempre en
+    /// la primera fila de la biblioteca.
+    pub history: Vec<(TrackRef, Option<PathBuf>)>,
     pub albums: Vec<spote_core::library::AlbumRow>,
     pub album_selected: usize,
     pub album_open: Option<spote_core::library::AlbumRow>,
@@ -905,6 +911,8 @@ impl App {
             queue_selected: 0,
             queue_drag: None,
             view: Vec::new(),
+            loop_file: false,
+            history: Vec::new(),
             albums: Vec::new(),
             album_selected: 0,
             album_open: None,
@@ -1142,6 +1150,15 @@ impl App {
     // --------------------------------------------------------- reproducción
     /// Carga una pista ya resuelta a fichero local.
     pub fn play_local(&mut self, track: TrackRef, path: Option<PathBuf>) {
+        self.play_local_inner(track, path, true);
+    }
+
+    fn play_local_inner(
+        &mut self,
+        track: TrackRef,
+        path: Option<PathBuf>,
+        record_history: bool,
+    ) {
         let Some(path) = path.or_else(|| self.lib.local_path(&track.key)) else {
             self.queue_track(track, None);
             return;
@@ -1152,6 +1169,16 @@ impl App {
                 ToastKind::Error,
             );
             return;
+        }
+        if record_history {
+            if let Some(current) = self.now.track.clone() {
+                if current.key != track.key {
+                    self.history.push((current, self.now.path.clone()));
+                    if self.history.len() > 100 {
+                        self.history.remove(0);
+                    }
+                }
+            }
         }
         // Recorte persistente: si el vídeo de YouTube trae intro/outro, se
         // salta solo sin tocar el fichero (reversible con Backspace).
@@ -1171,6 +1198,7 @@ impl App {
         self.now.volume = self.cfg.player.volume;
         if let Some(player) = &self.player {
             player.set_volume(self.now.volume);
+            player.set_loop(self.loop_file);
             player.load(path.clone(), self.trim_start_ms as f64 / 1000.0);
         } else {
             self.set_status("mpv no disponible: modo visual");
@@ -1342,6 +1370,27 @@ impl App {
         }
     }
 
+    /// Bucle del fichero actual. En mpv basta con `loop-file`; al cambiar de
+    /// pista se vuelve a mandar para que el nuevo fichero herede el modo.
+    pub fn toggle_loop(&mut self) {
+        if self.follow_spotify {
+            self.toast("el bucle no se controla en modo Spotify", ToastKind::Warn);
+            return;
+        }
+        self.loop_file = !self.loop_file;
+        if let Some(player) = &self.player {
+            player.set_loop(self.loop_file);
+        }
+        self.toast(
+            if self.loop_file {
+                "bucle activado"
+            } else {
+                "bucle desactivado"
+            },
+            ToastKind::Info,
+        );
+    }
+
     pub fn next_track(&mut self) {
         if self.follow_spotify {
             self.now.position_ms = 0;
@@ -1356,7 +1405,15 @@ impl App {
         }
         if let Some(entry) = self.queue.first().cloned() {
             self.queue.remove(0);
-            if let Some(path) = entry.path {
+            self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+            // La entrada pudo descargarse mientras estaba en cola: se mira la
+            // biblioteca antes de darla por pendiente (antes se quedaba
+            // «esperando descarga…» para siempre).
+            let path = entry
+                .path
+                .filter(|path| path.exists())
+                .or_else(|| self.lib.local_path(&entry.track.key));
+            if let Some(path) = path {
                 self.play_local(entry.track, Some(path));
             } else {
                 self.now.track = Some(entry.track.clone());
@@ -1365,13 +1422,7 @@ impl App {
             }
             return;
         }
-        if self.view.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1) % self.view.len();
-        if let Some(row) = self.selected_row().cloned() {
-            self.play_local(row.track, row.path);
-        }
+        self.play_view_step(1, true, true);
     }
 
     pub fn prev_track(&mut self) {
@@ -1390,12 +1441,40 @@ impl App {
             self.seek_to(0);
             return;
         }
+        // Historial de sesión: «anterior» devuelve a la pista que sonaba de
+        // verdad, aunque se haya puesto desde una lista, la cola o buscar.
+        while let Some((track, path)) = self.history.pop() {
+            let path = path
+                .filter(|path| path.exists())
+                .or_else(|| self.lib.local_path(&track.key));
+            if path.is_some() {
+                self.play_local_inner(track, path, false);
+                return;
+            }
+        }
+        self.play_view_step(-1, false, false);
+    }
+
+    /// Avanza/retrocede en la lista tomando como referencia la pista que
+    /// suena, no la fila seleccionada. Si la pista no está en la lista actual,
+    /// arranca desde la selección.
+    fn play_view_step(&mut self, delta: i32, wrap: bool, record_history: bool) {
         if self.view.is_empty() {
             return;
         }
-        self.selected = self.selected.saturating_sub(1);
-        if let Some(row) = self.selected_row().cloned() {
-            self.play_local(row.track, row.path);
+        let current = self.now.track.as_ref().map(|track| track.key.clone());
+        let index = current
+            .and_then(|key| self.view.iter().position(|row| row.track.key == key))
+            .unwrap_or_else(|| self.selected.min(self.view.len() - 1));
+        let len = self.view.len() as i32;
+        let next = if wrap {
+            (index as i32 + delta).rem_euclid(len)
+        } else {
+            (index as i32 + delta).clamp(0, len - 1)
+        };
+        self.selected = next as usize;
+        if let Some(row) = self.view.get(self.selected).cloned() {
+            self.play_local_inner(row.track, row.path, record_history);
         }
     }
 
@@ -2624,7 +2703,6 @@ impl App {
         if self.thumbs.contains_key(&slot) || self.thumb_requests.contains(&slot) {
             return;
         }
-        self.thumb_requests.insert(slot);
         let local = self
             .lib
             .art_path(&track.key)
@@ -2641,10 +2719,16 @@ impl App {
             .art_url
             .clone()
             .or_else(|| self.lib.art_url(&track.key).ok().flatten());
-        if local.is_none() && url.is_none() && !track.artist.is_empty() {
-            // Sin portada local ni remota: se busca en Spotify una sola vez.
-            self.request_spotify_metadata_for_key(&track.key);
+        if local.is_none() && url.is_none() {
+            // Sin portada local ni remota: se busca en segundo plano y no se
+            // marca la miniatura como pedida, para reintentar cuando llegue
+            // la URL. Como mucho 3 búsquedas a la vez.
+            if !track.artist.is_empty() && self.metadata_requests.len() < 3 {
+                self.request_spotify_metadata_for_key(&track.key);
+            }
+            return;
         }
+        self.thumb_requests.insert(slot);
         let ambient_mode = self.cfg.ui.fx.ambient == "cover";
         if ambient_mode && self.ambient_art_key != track.key && (local.is_some() || url.is_some()) {
             self.ambient_art_key = track.key.clone();
@@ -2860,6 +2944,30 @@ impl App {
             self.toast("quitada de la cola de la sala", ToastKind::Info);
         }
         self.queue_selected = self.queue_selected.min(self.queue_len().saturating_sub(1));
+    }
+
+    /// Mueve el cursor de la cola (el panel tiene foco).
+    pub fn move_queue_selection(&mut self, delta: i32) {
+        let len = self.queue_len();
+        if len == 0 {
+            return;
+        }
+        self.queue_selected =
+            (self.queue_selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
+    }
+
+    /// Reproduce la entrada marcada en la cola local desde el teclado.
+    pub fn play_queue_selected(&mut self) {
+        if !self.room_queue.is_empty() {
+            self.toast("la cola de la sala la controla el servidor", ToastKind::Info);
+            return;
+        }
+        let index = self.queue_selected.min(self.queue_len().saturating_sub(1));
+        if let Some(entry) = self.queue.get(index).cloned() {
+            self.queue.remove(index);
+            self.queue_selected = self.queue_selected.min(self.queue.len().saturating_sub(1));
+            self.play_local(entry.track, entry.path);
+        }
     }
 
     /// Mueve la entrada seleccionada de la cola local.

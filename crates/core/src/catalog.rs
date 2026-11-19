@@ -51,10 +51,11 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Contrato de la app: `key = spotify:track:<id>` para lo importado, para
-    /// poder re-resolver la fuente sin perder historial ni playlists.
+    /// La portada de la colección solo se hereda en álbumes: ahí todas las
+    /// pistas comparten carátula de verdad. En listas y artistas cada tema
+    /// busca la suya, o acabarían todas con la misma imagen.
     pub fn to_track_refs(&self) -> Vec<TrackRef> {
-        let fallback_art = self.cover.clone();
+        let fallback_art = (self.kind == "album").then(|| self.cover.clone()).flatten();
         self.tracks
             .iter()
             .map(|track| TrackRef {
@@ -64,7 +65,11 @@ impl Catalog {
                 album: self.album.clone(),
                 duration_ms: track.duration_ms,
                 art_url: fallback_art.clone(),
-                source_hint: None,
+                source_hint: Some(spote_protocol::SourceHint {
+                    provider: "spotify".to_string(),
+                    id: track.id.clone(),
+                    duration_ms: track.duration_ms,
+                }),
             })
             .collect()
     }
@@ -492,7 +497,12 @@ mod tests {
 
         let refs = catalog.to_track_refs();
         assert_eq!(refs[0].key, "spotify:track:3zOYmiNOuyDL0ClxJcEJ0T");
-        assert_eq!(refs[0].art_url.as_deref(), Some("https://i.scdn.co/image/abc"));
+        // En una lista, la portada de la colección no es la de cada pista.
+        assert!(refs[0].art_url.is_none());
+        assert_eq!(
+            refs[0].source_hint.as_ref().map(|hint| hint.id.as_str()),
+            Some("3zOYmiNOuyDL0ClxJcEJ0T")
+        );
         assert_eq!(refs[0].title, "Stop The Wedding!");
     }
 
@@ -519,6 +529,8 @@ mod tests {
         let refs = catalog.to_track_refs();
         assert_eq!(refs[0].key, "spotify:track:5iItYl3Q6wCnKVfpK1uNVf");
         assert!(refs[0].album.is_none());
+        // La foto del artista no es la portada de sus canciones.
+        assert!(refs[0].art_url.is_none());
     }
 
     #[test]

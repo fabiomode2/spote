@@ -23,6 +23,15 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     );
     app.hit
         .add(Rect::new(rect.x, rect.y, rect.width, 1), Action::QueueMenu);
+    app.hit.add(
+        Rect::new(
+            rect.x,
+            rect.y + 1,
+            rect.width,
+            rect.height.saturating_sub(1),
+        ),
+        Action::Focus(crate::app::Pane::Side),
+    );
     let mut inner = Rect::new(
         rect.x + 2,
         rect.y + 2,
@@ -275,7 +284,7 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     }
     if hint_row > inner.y {
         let text = if app.room_queue.is_empty() {
-            "x quita · clic derecho más"
+            "↑↓ elige · enter suena · x quita"
         } else {
             "x quita · la sala la ordena el servidor"
         };

@@ -538,7 +538,7 @@ pub(super) fn draw_context(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     text_at(
         buf,
         Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
-        "↑↓ elegir · enter aplicar · esc cerrar",
+        "↑↓ elegir · enter aplicar · supr borrar · esc cerrar",
         Style::new().fg(color(pal.dim)),
         Alignment::Left,
     );

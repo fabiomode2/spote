@@ -39,6 +39,7 @@ enum Cmd {
     SeekRelative(f64),
     Volume(f32),
     Speed(f64),
+    LoopFile(bool),
     Stop,
     Quit,
 }
@@ -161,6 +162,12 @@ impl Player {
         let _ = self.cmd.send(Cmd::Speed(speed.clamp(0.5, 2.0)));
     }
 
+    /// Repite en bucle el fichero actual. mpv mantiene la opción entre cargas,
+    /// así que al cambiar de pista el nuevo fichero hereda el modo.
+    pub fn set_loop(&self, enabled: bool) {
+        let _ = self.cmd.send(Cmd::LoopFile(enabled));
+    }
+
     pub fn stop(&self) {
         let _ = self.cmd.send(Cmd::Stop);
     }
@@ -251,22 +258,36 @@ async fn run(
                     Cmd::Quit => break,
                     Cmd::Load { path, start, append } => {
                         let mode = if append { "append" } else { "replace" };
-                        let command = json!({
-                            "command": ["loadfile", path.to_string_lossy(), mode]
-                        });
-                        if start > 0.1 {
-                            // Se aplica tras cargar; mpv ignora seek antes de tener pista.
+                        if !append {
+                            // Arrancar una pista nueva siempre suena. Sin esto,
+                            // si la anterior quedó en pausa, mpv cargaba el
+                            // fichero pausado y no se oía hasta pulsar play.
                             let _ = write_half
-                                .write_all(format!("{}\n", json!({"command": ["set_property", "start", format!("{start:.3}")]})).as_bytes())
+                                .write_all(
+                                    format!("{}\n", json!({"command": ["set_property", "pause", false]}))
+                                        .as_bytes(),
+                                )
                                 .await;
                         }
-                        command
+                        // Siempre se fija: si no, el recorte de la pista
+                        // anterior (start > 0) se queda pegado y la siguiente
+                        // arranca a mitad o directamente termina.
+                        let _ = write_half
+                            .write_all(format!("{}\n", json!({"command": ["set_property", "start", format!("{:.3}", start.max(0.0))]})).as_bytes())
+                            .await;
+                        json!({
+                            "command": ["loadfile", path.to_string_lossy(), mode]
+                        })
                     }
                     Cmd::Pause(paused) => json!({"command": ["set_property", "pause", paused]}),
                     Cmd::SeekAbsolute(secs) => json!({"command": ["seek", secs, "absolute"]}),
                     Cmd::SeekRelative(delta) => json!({"command": ["seek", delta, "relative"]}),
                     Cmd::Volume(v) => json!({"command": ["set_property", "volume", v * 100.0]}),
                     Cmd::Speed(speed) => json!({"command": ["set_property", "speed", speed]}),
+                    Cmd::LoopFile(enabled) => {
+                        let value = if enabled { "inf" } else { "no" };
+                        json!({"command": ["set_property", "loop-file", value]})
+                    }
                     Cmd::Stop => json!({"command": ["stop"]}),
                 };
                 if write_half

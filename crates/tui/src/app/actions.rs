@@ -245,6 +245,7 @@ impl App {
             Action::PlayPause => self.toggle_play(),
             Action::Next => self.next_track(),
             Action::Prev => self.prev_track(),
+            Action::LoopToggle => self.toggle_loop(),
             Action::SeekTo(ms) => self.seek_to(ms),
             Action::SeekLyrics(ms) => {
                 self.seek_to(ms);
@@ -347,6 +348,7 @@ impl App {
             }
             Action::QueueRow(index) => {
                 self.queue_selected = index.min(self.queue_len().saturating_sub(1));
+                self.focus = Pane::Side;
             }
             Action::QueueRemove(index) => {
                 self.queue_selected = index.min(self.queue_len().saturating_sub(1));

@@ -216,6 +216,8 @@ impl App {
                 }
                 if upper {
                     self.move_queue(-1);
+                } else if self.focus == Pane::Side {
+                    self.move_queue_selection(-1);
                 } else if self.tab == Tab::Now || self.focus == Pane::Transport {
                     self.set_volume(self.now.volume + 0.05);
                 } else if self.tab == Tab::Albums {
@@ -232,6 +234,8 @@ impl App {
                 }
                 if upper {
                     self.move_queue(1);
+                } else if self.focus == Pane::Side {
+                    self.move_queue_selection(1);
                 } else if self.tab == Tab::Now || self.focus == Pane::Transport {
                     self.set_volume(self.now.volume - 0.05);
                 } else if self.tab == Tab::Albums {
@@ -250,6 +254,8 @@ impl App {
                     self.toggle_setting(self.settings_selected);
                 } else if self.tab == Tab::Room {
                     self.join_room(self.room_selected);
+                } else if self.focus == Pane::Side {
+                    self.play_queue_selected();
                 } else if self.tab == Tab::Albums {
                     self.album_enter();
                 } else if let Some(row) = self.selected_row().cloned() {
@@ -299,6 +305,7 @@ impl App {
                 };
                 self.needs_redraw = true;
             }
+            KeyCode::Char('u') if !upper => self.toggle_loop(),
             KeyCode::Char('i') => self.set_zen(!self.zen),
             KeyCode::Char('T') if self.tab == Tab::Now => self.overlay = Overlay::Trim,
             KeyCode::Char('t')

@@ -16,6 +16,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
             vec![
                 ("space", "play / pausa"),
                 ("n / p", "siguiente / anterior"),
+                ("u", "bucle de la pista"),
                 ("← →", "seek ±5 s (shift ±30 s)"),
                 ("↑ ↓", "volumen en ahora; selección en listas"),
                 ("J / K", "mover selección siempre"),
@@ -98,6 +99,7 @@ impl App {
                 Overlay::Context => vec![
                     Hint { key: "↑↓", label: "elegir" },
                     Hint { key: "enter", label: "aplicar" },
+                    Hint { key: "supr", label: "borrar" },
                     Hint { key: "esc", label: "cerrar" },
                 ],
                 Overlay::Layout => vec![
@@ -144,6 +146,7 @@ impl App {
                     Hint { key: "←→", label: "seek" },
                     Hint { key: "↑↓", label: "volumen" },
                     Hint { key: "a", label: "cola" },
+                    Hint { key: "u", label: "bucle" },
                     Hint { key: "c", label: "portada" },
                     Hint { key: "C", label: "letra" },
                     Hint { key: "D", label: "debug letra" },
@@ -164,6 +167,7 @@ impl App {
                 Hint { key: "f", label: "favorita" },
                 Hint { key: "g", label: "artista" },
                 Hint { key: "clic-der", label: "acciones" },
+                Hint { key: "supr", label: "borrar" },
                 Hint { key: "M", label: "arte" },
                 Hint { key: "E", label: "diseño" },
                 Hint { key: "?", label: "ayuda" },

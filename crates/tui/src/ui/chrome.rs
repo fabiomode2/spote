@@ -351,16 +351,18 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
     let pad = u16::from(app.button_pad.clamp(1, 4));
     let (prev_label, play_label, next_label) =
         ("◀◀", if app.now.playing { PAUSE } else { PLAY }, "▶▶");
-    let (prev_w, play_w, next_w) = if big {
-        (7, 9, 9)
+    let loop_label = if app.loop_file { "⟲ on" } else { "⟲" };
+    let (prev_w, play_w, next_w, loop_w) = if big {
+        (7, 9, 9, 7)
     } else {
         (
             prev_label.chars().count() as u16 + pad * 2,
             play_label.chars().count() as u16 + pad * 2,
             next_label.chars().count() as u16 + pad * 2,
+            loop_label.chars().count() as u16 + pad * 2,
         )
     };
-    let total_w = prev_w + play_w + next_w + 2;
+    let total_w = prev_w + play_w + next_w + loop_w + 3;
     let mut x = rect.x + rect.width.saturating_sub(total_w) / 2;
     let play_rect = Rect::new(x + prev_w + 1, controls_y, play_w, controls_h);
     if app.cfg.ui.fx.bloom_play {
@@ -370,13 +372,17 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         (prev_label, prev_w, Action::Prev, false),
         (play_label, play_w, Action::PlayPause, true),
         (next_label, next_w, Action::Next, false),
+        (loop_label, loop_w, Action::LoopToggle, false),
     ] {
         let button = Rect::new(x, controls_y, width, controls_h);
         let hover = app.hover == Some(action.clone());
+        let looping = matches!(action, Action::LoopToggle) && app.loop_file;
         let bg = if hover {
             pal.surface_alt
         } else if primary {
             mix_oklab(pal.surface, pal.primary, 0.25 + pulse * 0.32)
+        } else if looping {
+            mix_oklab(pal.surface, pal.primary, 0.30)
         } else {
             pal.surface
         };
@@ -391,7 +397,21 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
                 }
             }
         }
-        if big {
+        if matches!(action, Action::LoopToggle) {
+            text_at(
+                buf,
+                button,
+                loop_label.to_string(),
+                Style::new()
+                    .fg(color(if looping { pal.primary } else { pal.muted }))
+                    .add_modifier(if looping || !big {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                Alignment::Center,
+            );
+        } else if big {
             let icon = if primary {
                 if app.now.playing { ICON_PAUSE } else { ICON_PLAY }
             } else if matches!(action, Action::Prev) {

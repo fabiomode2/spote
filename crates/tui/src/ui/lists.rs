@@ -173,146 +173,221 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         return;
     }
     let inner = list_area;
-    let rows = inner.height as usize;
+    let row_h = 2u16;
+    let rows = (inner.height / row_h).max(1) as usize;
     let start = (app.list_scroll.value.max(0.0) as usize)
         .saturating_sub(rows / 2)
         .min(app.view.len().saturating_sub(rows.min(app.view.len())));
     let shown = app.view.len().saturating_sub(start).min(rows) as u16;
     let y_offset = if app.vcenter {
-        inner.height.saturating_sub(shown) / 2
+        inner.height.saturating_sub(shown * row_h) / 2
     } else {
         0
     };
-    for (offset, row) in app.view.iter().skip(start).take(rows).enumerate() {
+    let g = list_geometry(inner);
+    // Cabecera de columnas en la fila libre bajo los chips.
+    let header_y = list_area.y.saturating_sub(1);
+    if header_y > 0 && inner.width >= 40 {
+        let h = header_y;
+        put(buf, g.num_x, h, "#", color(pal.dim), None);
+        put(buf, g.text_x, h, "TÍTULO", color(pal.dim), None);
+        if g.album_w > 6 {
+            put(buf, g.album_x, h, "ÁLBUM", color(pal.dim), None);
+        }
+        if g.date_w > 0 {
+            put(buf, g.date_x, h, "AÑADIDA", color(pal.dim), None);
+        }
+        let right = inner.x + inner.width;
+        put(buf, right.saturating_sub(1), h, "⏱", color(pal.dim), None);
+    }
+    // Columnas al estilo de Spotify: número, miniatura, título + artista
+    // debajo, álbum, fecha de alta y duración. El ancho decide qué columnas
+    // caben; nunca se pisan. Se copian las filas visibles porque el dibujo de
+    // miniaturas pide prestado `App` entero.
+    let visible: Vec<spote_core::library::TrackRow> = app
+        .view
+        .iter()
+        .skip(start)
+        .take(rows)
+        .cloned()
+        .collect();
+    for (offset, row) in visible.iter().enumerate() {
         let index = start + offset;
-        let y = inner.y + y_offset + offset as u16;
+        let y = inner.y + y_offset + offset as u16 * row_h;
+        if y + row_h > inner.y + inner.height {
+            break;
+        }
+        let row_rect = Rect::new(inner.x, y, inner.width, row_h);
         let selected = index == app.selected;
-        let row_rect = Rect::new(inner.x, y, inner.width, 1);
         let hover = app.hover == Some(Action::SelectRow(index));
         if selected {
             fill(buf, row_rect, mix(pal.surface, pal.primary, 0.20));
-            put(buf, row_rect.x, y, "▍", color(pal.primary), None);
         } else if hover {
             fill(buf, row_rect, pal.surface_alt);
         }
-        let ready = row.playable();
-        let duration = format_ms(row.track.duration_ms);
-        let duration_w = duration.chars().count() as u16;
+        // La fila se registra primero: los enlaces de artista/álbum van
+        // después y ganan al clic (antes era al revés y no se podían pulsar).
+        app.hit.add(row_rect, Action::SelectRow(index));
         let playing = app
             .now
             .track
             .as_ref()
             .is_some_and(|track| track.key == row.track.key);
-        let marker = if playing {
-            "▶"
-        } else if ready {
-            "·"
+        let ready = row.playable();
+        let duration = format_ms(row.track.duration_ms);
+
+        if playing {
+            put(buf, g.num_x, y, "▶", color(pal.primary), None);
         } else {
-            "↓"
-        };
-        let marker_color = if playing {
-            pal.primary
-        } else if ready {
-            pal.dim
-        } else {
-            pal.warn
-        };
-        put(buf, row_rect.x + 2, y, marker, color(marker_color), None);
-        // Columnas fijas: título, artista y duración nunca se pisan aunque el
-        // título sea larguísimo (el bug de la captura).
-        let right_reserved = duration_w + 3;
-        let content_x = row_rect.x + 4;
-        let content_w = row_rect.width.saturating_sub(6 + right_reserved);
-        let wide = content_w >= 48;
-        let title_w = if wide {
-            (content_w * 50 / 100).max(18)
-        } else {
-            content_w
-        };
-        let artist_x = content_x + title_w + 2;
-        let artist_w = content_w.saturating_sub(title_w + 2);
-        let style = Style::new()
-            .fg(color(if selected { pal.text } else { pal.muted }))
-            .add_modifier(if selected { Modifier::BOLD } else { Modifier::empty() });
+            let number = format!("{:>2}", index + 1);
+            put(buf, g.num_x, y, &number, color(pal.dim), None);
+        }
+        if let Some(thumb_x) = g.thumb_x {
+            draw_thumb(app, buf, Rect::new(thumb_x, y, 4, row_h), &row.track, pal);
+        }
         let mut title = row.track.title.clone();
-        truncate_chars(&mut title, title_w as usize);
-        put(buf, content_x, y, &title, style.fg.unwrap_or(color(pal.text)), None);
-        if wide && artist_w > 4 {
-            let album = row
-                .track
-                .album
-                .as_deref()
-                .filter(|album| !album.is_empty())
-                .map(str::to_string);
-            // Icono de origen (YouTube/SoundCloud/Spotify/local) antes del
-            // artista; así se ve de dónde salió la descarga de un vistazo.
-            let tag = source_tag(row.provider.as_deref());
-            put(buf, artist_x, y, tag, color(pal.secondary), None);
-            let artist_x = artist_x + 2;
-            let artist_w = artist_w.saturating_sub(2);
-            let artist_limit = if album.is_some() {
-                (artist_w / 2).max(6)
-            } else {
-                artist_w
-            } as usize;
-            let mut artist = row.track.artist.clone();
-            truncate_chars(&mut artist, artist_limit);
-            let artist_draw_w = artist.chars().count() as u16;
-            put(buf, artist_x, y, &artist, color(pal.dim), None);
-            if !artist.is_empty() {
-                app.hit.add(
-                    Rect::new(artist_x, y, artist_draw_w.min(artist_w), 1),
-                    Action::OpenArtist(row.track.artist.clone()),
+        truncate_chars(&mut title, g.title_w as usize);
+        let title_color = if playing {
+            pal.primary
+        } else if selected {
+            pal.text
+        } else {
+            pal.muted
+        };
+        put(buf, g.text_x, y, &title, color(title_color), None);
+        let mut artist = row.track.artist.clone();
+        truncate_chars(&mut artist, g.title_w as usize);
+        let artist_draw_w = artist.chars().count() as u16;
+        put(buf, g.text_x, y + 1, &artist, color(pal.dim), None);
+        if !artist.is_empty() {
+            app.hit.add(
+                Rect::new(g.text_x, y + 1, artist_draw_w.min(g.title_w), 1),
+                Action::OpenArtist(row.track.artist.clone()),
+            );
+        }
+        if g.album_w > 6 {
+            if let Some(album) = row.track.album.as_deref().filter(|album| !album.is_empty()) {
+                let mut shown = album.to_string();
+                truncate_chars(&mut shown, g.album_w as usize);
+                put(
+                    buf,
+                    g.album_x,
+                    y,
+                    &shown,
+                    color(if selected { pal.muted } else { pal.dim }),
+                    None,
                 );
-            }
-            if let Some(album) = album {
-                let album_x = artist_x + artist_draw_w + 3;
-                let album_w = (artist_x + artist_w).saturating_sub(album_x);
-                if album_w > 3 {
-                    let mut shown = album.clone();
-                    truncate_chars(&mut shown, album_w as usize);
-                    put(
-                        buf,
-                        album_x,
-                        y,
-                        &format!("· {shown}"),
-                        color(pal.dim),
-                        None,
-                    );
+                let album_draw_w = shown.chars().count() as u16;
+                if album_draw_w > 0 {
                     app.hit.add(
-                        Rect::new(album_x, y, album_w, 1),
-                        Action::OpenAlbum(album, row.track.artist.clone()),
+                        Rect::new(g.album_x, y, album_draw_w.min(g.album_w), 1),
+                        Action::OpenAlbum(album.to_string(), row.track.artist.clone()),
                     );
                 }
             }
         }
+        if g.date_w > 0 {
+            let mut added = added_label(row.added_at);
+            truncate_chars(&mut added, g.date_w as usize);
+            put(buf, g.date_x, y, &added, color(pal.dim), None);
+        }
         // Estado: favorita, descarga o pendiente, antes de la duración.
-        let status_x = row_rect.x + row_rect.width - duration_w - 3;
         if let Some(download) = app.download_for(&row.track.key) {
             let label = format!("↓{:.0}%", download.percent);
             let label_w = label.chars().count() as u16;
             put(
                 buf,
-                status_x.saturating_sub(label_w),
+                g.status_x.saturating_sub(label_w),
                 y,
                 &label,
                 color(pal.warn),
                 None,
             );
         } else if row.favorite {
-            put(buf, status_x, y, "♥", color(pal.error), None);
+            put(buf, g.status_x, y, "♥", color(pal.error), None);
         } else if !ready {
-            put(buf, status_x, y, "↓", color(pal.warn), None);
+            put(buf, g.status_x, y, "↓", color(pal.warn), None);
         }
+        let duration_w = duration.chars().count() as u16;
         put(
             buf,
-            row_rect.x + row_rect.width - duration_w,
+            (inner.x + inner.width).saturating_sub(duration_w),
             y,
             &duration,
             color(pal.dim),
             None,
         );
-        app.hit.add(row_rect, Action::SelectRow(index));
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ListGeometry {
+    num_x: u16,
+    thumb_x: Option<u16>,
+    text_x: u16,
+    title_w: u16,
+    album_x: u16,
+    album_w: u16,
+    date_x: u16,
+    date_w: u16,
+    status_x: u16,
+}
+
+/// Reparte las columnas de la lista. Se reserva un ancho fijo para duración y
+/// estado, así todas las filas alinean aunque una dure 10 minutos.
+fn list_geometry(inner: Rect) -> ListGeometry {
+    let right_edge = inner.x + inner.width;
+    // 5 celdas para «10:00» y 2 de aire antes del icono de estado.
+    let status_x = right_edge.saturating_sub(5).saturating_sub(2);
+    let num_w = 3u16;
+    let thumb_w = if inner.width >= 34 { 5u16 } else { 0 };
+    let text_x = inner.x + num_w + thumb_w;
+    let usable = status_x.saturating_sub(text_x + 2);
+    let gap = 2u16;
+    let (mut title_w, mut album_w, mut date_w) = (usable, 0, 0);
+    if usable >= 40 {
+        date_w = 7;
+        let rest = usable - date_w - gap;
+        album_w = rest * 30 / 100;
+        title_w = rest - album_w - gap;
+    } else if usable >= 34 {
+        album_w = usable * 32 / 100;
+        title_w = usable - album_w - gap;
+    }
+    if title_w < 10 {
+        title_w = usable;
+        album_w = 0;
+        date_w = 0;
+    }
+    let album_x = text_x + title_w + gap;
+    let date_x = album_x + album_w + if album_w > 0 { gap } else { 0 };
+    ListGeometry {
+        num_x: inner.x + 1,
+        thumb_x: (thumb_w > 0).then_some(inner.x + num_w),
+        text_x,
+        title_w,
+        album_x,
+        album_w,
+        date_x,
+        date_w,
+        status_x,
+    }
+}
+
+/// «hace 3 h», «hace 2 d»… para la columna de fecha de alta.
+fn added_label(added_at: i64) -> String {
+    if added_at <= 0 {
+        return String::new();
+    }
+    let secs = (crate::app::now_ms() - added_at).max(0) as u64 / 1000;
+    match secs {
+        0..=59 => "ahora".into(),
+        60..=3_599 => format!("{} min", secs / 60),
+        3_600..=86_399 => format!("{} h", secs / 3_600),
+        86_400..=604_799 => format!("{} d", secs / 86_400),
+        604_800..=2_591_999 => format!("{} sem", secs / 604_800),
+        2_592_000..=31_535_999 => format!("{} mes", secs / 2_592_000),
+        _ => format!("{} a", secs / 31_536_000),
     }
 }
 

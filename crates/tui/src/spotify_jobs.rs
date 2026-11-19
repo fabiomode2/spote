@@ -190,7 +190,11 @@ impl App {
 
     /// Deja las pistas del catálogo en la librería y encola su descarga.
     fn apply_catalog(&mut self, catalog: Catalog) {
-        let refs = catalog.to_track_refs();
+        let mut refs = catalog.to_track_refs();
+        for track in &mut refs {
+            // Misma canción ya descargada con otra clave: se reutiliza.
+            track.key = self.lib.canonical_key(track);
+        }
         let total = refs.len();
 
         // Alta en la librería. Si es un artista, no se crea playlist: sólo temas.
@@ -231,6 +235,7 @@ impl App {
             queued += 1;
         }
 
+        self.lib.clear_imported_albums().ok();
         self.toast(
             &format!("«{}»: {total} pistas, {queued} en cola", catalog.name),
             ToastKind::Ok,
@@ -267,10 +272,15 @@ impl App {
                 duration_ms: item.duration_ms,
                 channel: String::new(),
                 url: String::new(),
-                art_url: item.art_url.clone().or_else(|| cover_url.clone()),
+                // Solo la portada propia del tema. La de la lista se queda en
+                // la cabecera de la lista.
+                art_url: item.art_url.clone(),
                 isrc: item.isrc.clone(),
             };
-            let track = search.to_track();
+            let mut track = search.to_track();
+            // Si la canción ya está en la biblioteca (misma artista/título),
+            // se reutiliza su clave en vez de crear una fila duplicada.
+            track.key = self.lib.canonical_key(&track);
             let Ok(track_id) = self.lib.upsert_track(&track) else {
                 continue;
             };
@@ -288,6 +298,9 @@ impl App {
                 added += 1;
             }
         }
+        // Una reimportación también repara listas viejas que tenían el nombre
+        // de la lista como álbum y su portada en todas las pistas.
+        self.lib.clear_imported_albums().ok();
         self.lib_filter = crate::app::LibFilter::Playlist(playlist_id);
         self.tab = crate::app::Tab::Library;
         self.selected = 0;
@@ -418,7 +431,16 @@ fn epoch_ms() -> i64 {
 /// importar listas y álbumes de Spotify sin depender del token anónimo.
 fn playlist_from_catalog(catalog: spote_core::catalog::Catalog) -> spote_core::spotify_api::PlaylistInfo {
     let cover = catalog.cover.clone();
-    let album_name = catalog.album.clone();
+    let is_album = catalog.kind == "album";
+    // En un álbum todas las pistas comparten ficha y portada. En una lista,
+    // cada tema tiene su propio álbum: poner el nombre de la lista en todas
+    // las filas las convertía en un falso álbum con una sola carátula.
+    let per_track_art = is_album.then(|| cover.clone()).flatten();
+    let per_track_album = if is_album {
+        catalog.album.clone().unwrap_or_else(|| catalog.name.clone())
+    } else {
+        String::new()
+    };
     let tracks: Vec<spote_core::spotify_api::SpotifyTrack> = catalog
         .tracks
         .into_iter()
@@ -427,9 +449,9 @@ fn playlist_from_catalog(catalog: spote_core::catalog::Catalog) -> spote_core::s
             id: track.id,
             title: track.title,
             artists: track.artist,
-            album: album_name.clone().unwrap_or_else(|| catalog.name.clone()),
+            album: per_track_album.clone(),
             duration_ms: track.duration_ms,
-            art_url: cover.clone(),
+            art_url: per_track_art.clone(),
             isrc: None,
         })
         .collect();
