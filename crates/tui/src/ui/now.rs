@@ -383,36 +383,76 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
     let center = rect.y as f32 + rect.height as f32 / 2.0;
     let half = (rect.height as f32 / (line_h as f32 * 2.0)).max(1.0);
 
+    // Las frases largas ocupan hasta dos filas. Se reservan dos columnas a
+    // cada lado para el prefijo/sufijo del karaoke; así el alto de cada línea
+    // es estable y el resto del bloque se coloca contando filas, no índices.
+    let wrap_width = text_w.saturating_sub(4).max(8) as usize;
+    let wrapped: Vec<Vec<String>> = doc
+        .lines
+        .iter()
+        .map(|line| wrap_text(&line.text, wrap_width))
+        .collect();
+    let heights: Vec<u16> = wrapped
+        .iter()
+        .map(|rows| rows.len().max(1) as u16 * line_h)
+        .collect();
+    let active_index = active.unwrap_or_else(|| {
+        (scroll.round().max(0.0) as usize).min(doc.lines.len().saturating_sub(1))
+    });
+    let active_h = heights.get(active_index).copied().unwrap_or(line_h);
+    // El bloque activo se centra alrededor del mismo punto que antes: una
+    // línea normal queda donde estaba y una de dos filas crece hacia arriba.
+    let anchor = center - (active_h as f32 - line_h as f32) / 2.0;
+    let bottom = rect.y as i32 + rect.height as i32;
+
     for (index, line) in doc.lines.iter().enumerate() {
-        let offset = index as f32 - scroll;
-        let distance = offset.abs();
-        if distance > half + 1.5 {
+        let distance = (index as f32 - scroll).abs();
+        if distance > half + 2.0 {
             continue;
         }
-        let y = (center + offset * line_h as f32).round() as i32;
-        if y < rect.y as i32 || y >= (rect.y + rect.height) as i32 {
+        let y = anchor + relative_lyric_top(index, scroll, &heights);
+        let top = y.round() as i32;
+        let height = heights.get(index).copied().unwrap_or(line_h).max(line_h);
+        if top < rect.y as i32 || top >= bottom {
             continue;
         }
         let fade = (1.0 - (distance / (half + 0.8)).powf(1.6)).clamp(0.0, 1.0);
         let is_active = Some(index) == active;
-        let line_rect = Rect::new(x0, y as u16, text_w, line_h);
+        let visible_h = height.min((bottom - top) as u16).max(1);
+        let line_rect = Rect::new(x0, top as u16, text_w, visible_h);
         if is_active {
             fill(
                 buf,
                 line_rect,
                 mix(pal.bg, pal.surface_alt, 0.92 + app.audio.vocal_pulse * 0.08),
             );
-            put(buf, line_rect.x, y as u16, "▎", color(pal.primary), None);
-            draw_active_line(buf, line_rect, line, lyric_ms, pal);
+            for row in 0..(visible_h / line_h).max(1) {
+                put(
+                    buf,
+                    line_rect.x,
+                    line_rect.y + row * line_h,
+                    "▎",
+                    color(pal.primary),
+                    None,
+                );
+            }
+            draw_active_line(buf, line_rect, line, lyric_ms, pal, line_h);
         } else {
             let base = mix_oklab(pal.bg, pal.muted, fade);
             let style = Style::new().fg(color(base));
-            let mut text = line.text.clone();
-            if text.chars().count() > text_w as usize {
-                truncate_chars(&mut text, text_w.saturating_sub(1) as usize);
-                text.push('…');
+            for (row, text) in wrapped[index].iter().enumerate() {
+                let row_y = top + row as i32 * line_h as i32;
+                if row_y < rect.y as i32 || row_y >= bottom {
+                    continue;
+                }
+                text_at(
+                    buf,
+                    Rect::new(x0, row_y as u16, text_w, 1),
+                    text.clone(),
+                    style,
+                    Alignment::Center,
+                );
             }
-            text_at(buf, line_rect, text, style, Alignment::Center);
         }
         // Clic en una frase: salta a ese momento. El muelle de scroll anima el
         // salto; no hay corte seco.
@@ -490,22 +530,23 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
 /// Pinta la línea activa palabra a palabra. Los tiempos salen de
 /// `line.words` (LRC mejorado o refinado con el mapa de audio), nunca de un
 /// reparto global de la línea: por eso cada palabra se enciende cuando toca.
+///
+/// La frase se reparte en hasta dos filas; el estado de encendido viaja con
+/// cada carácter, así que el karaoke sigue siendo correcto al saltar de fila.
 fn draw_active_line(
     buf: &mut Buffer,
     rect: Rect,
     line: &spote_core::lyrics::LyricLine,
     lyric_ms: u64,
     pal: &Palette,
+    line_h: u16,
 ) {
+    type Cell = (char, f32, bool, bool);
     // `lyric_ms` ya tiene el offset aplicado y coincide con la base de
     // `Word.start_ms` / `Word.end_ms`; no volver a leer el reloj aquí.
     let position = lyric_ms;
-    let prefix = "▸ ";
-    let suffix = " ◂";
-    let mut cells: Vec<(char, f32, bool, bool)> = Vec::new();
-    for ch in prefix.chars() {
-        cells.push((ch, 0.0, false, false));
-    }
+    let max_rows = (rect.height / line_h).max(1) as usize;
+    let mut cells: Vec<Cell> = Vec::new();
     if line.words.len() >= 2 {
         for (i, word) in line.words.iter().enumerate() {
             if i > 0 {
@@ -548,36 +589,212 @@ fn draw_active_line(
             ));
         }
     }
-    for ch in suffix.chars() {
-        cells.push((ch, 0.0, false, false));
+
+    let mut rows = wrap_cells(cells, rect.width.saturating_sub(4) as usize, max_rows);
+    let prefix = [('▸', 0.0, false, false), (' ', 0.0, false, false)];
+    if let Some(first) = rows.first_mut() {
+        first.splice(0..0, prefix);
     }
-    let width = cells.len() as u16;
-    if width == 0 || rect.width < 4 {
-        return;
+    let suffix = [(' ', 0.0, false, false), ('◂', 0.0, false, false)];
+    if let Some(last) = rows.last_mut() {
+        last.extend(suffix);
     }
-    let visible = cells.len().min(rect.width.saturating_sub(1) as usize);
-    let start_x = rect.x + (rect.width.saturating_sub(visible as u16)) / 2;
-    for (i, (ch, lit, current, optional)) in cells.into_iter().take(visible).enumerate() {
-        let base = if optional {
-            // Adlib de fondo: se ve, pero no compite con la voz principal.
-            mix_oklab(pal.dim, pal.secondary, 0.22 + lit * 0.18)
-        } else if lit <= 0.001 {
-            mix_oklab(pal.dim, pal.muted, 0.4)
-        } else {
-            mix_oklab(pal.text, pal.primary, 0.28 + lit * 0.45)
-        };
-        let fg = if current && !optional {
-            mix_oklab(base, pal.text, 0.45)
-        } else {
-            base
-        };
-        let mut glyph = [0u8; 4];
-        let symbol: &str = ch.encode_utf8(&mut glyph);
-        put(buf, start_x + i as u16, rect.y, symbol, color(fg), None);
-        if current && !optional && i > 0 {
-            if let Some(cell) = buf.cell_mut((start_x + i as u16, rect.y)) {
-                cell.modifier.insert(Modifier::BOLD);
+
+    for (row_index, row) in rows.into_iter().enumerate() {
+        let y = rect.y + row_index as u16 * line_h;
+        if y >= rect.y + rect.height {
+            break;
+        }
+        let visible = row.len().min(rect.width as usize);
+        let start_x = rect.x + (rect.width.saturating_sub(visible as u16)) / 2;
+        for (i, (ch, lit, current, optional)) in row.into_iter().take(visible).enumerate() {
+            let base = if optional {
+                // Adlib de fondo: se ve, pero no compite con la voz principal.
+                mix_oklab(pal.dim, pal.secondary, 0.22 + lit * 0.18)
+            } else if lit <= 0.001 {
+                mix_oklab(pal.dim, pal.muted, 0.4)
+            } else {
+                mix_oklab(pal.text, pal.primary, 0.28 + lit * 0.45)
+            };
+            let fg = if current && !optional {
+                mix_oklab(base, pal.text, 0.45)
+            } else {
+                base
+            };
+            let mut glyph = [0u8; 4];
+            let symbol: &str = ch.encode_utf8(&mut glyph);
+            put(buf, start_x + i as u16, y, symbol, color(fg), None);
+            if current && !optional && i > 0 {
+                if let Some(cell) = buf.cell_mut((start_x + i as u16, y)) {
+                    cell.modifier.insert(Modifier::BOLD);
+                }
             }
         }
+    }
+}
+
+/// Altura relativa (en celdas) del alto de la línea `index` respecto al alto
+/// de la línea anclada por el muelle de scroll. Contar filas reales es lo que
+/// permite que una frase de dos filas no pise a la siguiente.
+fn relative_lyric_top(index: usize, scroll: f32, heights: &[u16]) -> f32 {
+    if heights.is_empty() {
+        return 0.0;
+    }
+    let scroll = scroll.max(0.0);
+    let base = (scroll.floor() as usize).min(heights.len() - 1);
+    let frac = scroll - scroll.floor();
+    let base_h = heights[base] as f32;
+    let mut y = 0.0;
+    if index >= base {
+        for height in heights.iter().take(index.min(heights.len())).skip(base) {
+            y += *height as f32;
+        }
+        y -= frac * base_h;
+    } else {
+        for height in heights.iter().take(base).skip(index) {
+            y -= *height as f32;
+        }
+        y -= frac * base_h;
+    }
+    y
+}
+
+/// Reparte el texto en como mucho dos filas por palabras. Si una palabra no
+/// cabe se parte; si hay más de dos filas se corta con `…`.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        while word.chars().count() > width {
+            let head: String = word.chars().take(width).collect();
+            word = word.chars().skip(width).collect();
+            if !current.is_empty() {
+                rows.push(std::mem::take(&mut current));
+            }
+            rows.push(head);
+        }
+        if current.is_empty() {
+            current = word;
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(&word);
+        } else {
+            rows.push(std::mem::take(&mut current));
+            current = word;
+        }
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    if rows.len() > 2 {
+        rows.truncate(2);
+        if let Some(last) = rows.last_mut() {
+            let keep = width.saturating_sub(1);
+            *last = last.chars().take(keep).collect();
+            last.push('…');
+        }
+    }
+    rows
+}
+
+/// Igual que [`wrap_text`] pero con las celdas del karaoke, conservando el
+/// estado de encendido de cada carácter.
+fn wrap_cells(cells: Vec<(char, f32, bool, bool)>, width: usize, max_rows: usize) -> Vec<Vec<(char, f32, bool, bool)>> {
+    type Cell = (char, f32, bool, bool);
+    fn flush(
+        rows: &mut Vec<Vec<Cell>>,
+        current: &mut Vec<Cell>,
+        word: Vec<Cell>,
+        width: usize,
+    ) {
+        if word.is_empty() {
+            return;
+        }
+        if !current.is_empty() && current.len() + 1 + word.len() > width {
+            rows.push(std::mem::take(current));
+        }
+        if !current.is_empty() {
+            current.push((' ', 1.0, false, false));
+        }
+        if word.len() > width {
+            let mut rest = word;
+            while rest.len() > width {
+                rows.push(rest.drain(..width).collect());
+            }
+            current.extend(rest);
+        } else {
+            current.extend(word);
+        }
+    }
+
+    let width = width.max(1);
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut current: Vec<Cell> = Vec::new();
+    let mut word: Vec<Cell> = Vec::new();
+    for cell in cells {
+        if cell.0 == ' ' {
+            flush(&mut rows, &mut current, std::mem::take(&mut word), width);
+        } else {
+            word.push(cell);
+        }
+    }
+    flush(&mut rows, &mut current, word, width);
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+        if let Some(last) = rows.last_mut() {
+            if last.len() >= width {
+                last.pop();
+            }
+            last.push(('…', 0.0, false, false));
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_lines_wrap_in_two_rows() {
+        let rows = wrap_text(
+            "Te vo'a compra' una rosa, pero solo te la doy si viene' a verme",
+            24,
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].chars().count() <= 24);
+    }
+
+    #[test]
+    fn short_lines_stay_in_one_row() {
+        let rows = wrap_text("Na-na-na-na-ni", 40);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], "Na-na-na-na-ni");
+    }
+
+    #[test]
+    fn more_than_two_rows_are_ellipsized() {
+        let rows = wrap_text("uno dos tres cuatro cinco seis siete ocho nueve diez", 8);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].ends_with('…'));
+    }
+
+    #[test]
+    fn relative_top_counts_real_rows() {
+        let heights = [1u16, 2, 1];
+        assert_eq!(relative_lyric_top(1, 1.0, &heights), 0.0);
+        assert_eq!(relative_lyric_top(2, 1.0, &heights), 2.0);
+        assert_eq!(relative_lyric_top(0, 1.0, &heights), -1.0);
     }
 }
