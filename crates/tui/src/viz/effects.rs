@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 //! Los efectos. Mecanismos portados de `cli-viz` (spectrum bars, wave, circle,
 //! particles, flame, matrix, starfield, fractal, neural, pulsar, tunnel,
-//! spectro3d), recoloreados con la paleta del álbum.
+//! spectro3d, scope), recoloreados con la paleta del álbum.
+
+use std::collections::VecDeque;
 
 use super::{Effect, Layer, Params, Rng, VizCtx};
-use spote_core::audio::{AudioFrame, BANDS};
+use spote_core::audio::{AudioFrame, BANDS, WAVE};
 use spote_core::artwork::Rgb;
 use spote_core::util::{mix, mix_oklab};
 
@@ -26,6 +28,7 @@ pub fn effect_by_key(key: &str) -> Box<dyn Effect> {
         "pulsar" => Box::new(Pulsar::default()),
         "tunnel" => Box::new(Tunnel::default()),
         "spectro3d" => Box::new(Spectro3d::default()),
+        "scope" => Box::new(Scope::default()),
         _ => Box::new(Bars::default()),
     }
 }
@@ -44,10 +47,11 @@ pub enum EffectKind {
     Pulsar,
     Tunnel,
     Spectro3d,
+    Scope,
 }
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 12] = [
+    pub const ALL: [EffectKind; 13] = [
         EffectKind::Bars,
         EffectKind::Wave,
         EffectKind::Circle,
@@ -60,6 +64,7 @@ impl EffectKind {
         EffectKind::Pulsar,
         EffectKind::Tunnel,
         EffectKind::Spectro3d,
+        EffectKind::Scope,
     ];
 
     pub fn key(self) -> &'static str {
@@ -76,6 +81,7 @@ impl EffectKind {
             Self::Pulsar => "pulsar",
             Self::Tunnel => "tunnel",
             Self::Spectro3d => "spectro3d",
+            Self::Scope => "scope",
         }
     }
 }
@@ -1235,6 +1241,210 @@ impl Effect for Spectro3d {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 13. Osciloscopio CRT
+// ---------------------------------------------------------------------------
+
+/// Puntos a los que se remuestrea la forma de onda (256 → 160).
+const SCOPE_POINTS: usize = 160;
+/// Barridos conservados: el fósforo del CRT se apaga en ~4 pasadas.
+const SCOPE_TRAILS: usize = 4;
+
+pub struct Scope {
+    params: Params,
+    /// Barridos recientes, del más viejo al más nuevo.
+    sweeps: VecDeque<Vec<f32>>,
+    /// Buffer reutilizado para el remuestreo del frame actual.
+    resampled: Vec<f32>,
+    /// Reloj del analizador del último barrido (identifica la generación de audio).
+    last_generation: f32,
+    /// `ctx.time` del último barrido, para el refresco mínimo de ~50 ms.
+    last_sweep: f32,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Self {
+            params: Params::default(),
+            sweeps: VecDeque::with_capacity(SCOPE_TRAILS),
+            resampled: vec![0.0; SCOPE_POINTS],
+            last_generation: f32::NEG_INFINITY,
+            last_sweep: f32::NEG_INFINITY,
+        }
+    }
+}
+
+impl Scope {
+    /// Remuestrea las 256 muestras del analizador al ancho interno del efecto.
+    fn resample(&mut self, audio: &AudioFrame) {
+        let last = (WAVE - 1) as f32;
+        for (i, out) in self.resampled.iter_mut().enumerate() {
+            let t = i as f32 / (SCOPE_POINTS - 1) as f32;
+            let pos = t * last;
+            let a = pos as usize;
+            let b = (a + 1).min(WAVE - 1);
+            let frac = pos - a as f32;
+            *out = audio.waveform[a] * (1.0 - frac) + audio.waveform[b] * frac;
+        }
+    }
+
+    /// Añade el barrido actual reutilizando el buffer más viejo: sin allocs
+    /// por frame una vez que la cola está llena.
+    fn push_sweep(&mut self) {
+        if self.sweeps.len() >= SCOPE_TRAILS {
+            if let Some(mut oldest) = self.sweeps.pop_front() {
+                oldest.clear();
+                oldest.extend_from_slice(&self.resampled);
+                self.sweeps.push_back(oldest);
+                return;
+            }
+        }
+        let mut sweep = Vec::with_capacity(SCOPE_POINTS);
+        sweep.extend_from_slice(&self.resampled);
+        self.sweeps.push_back(sweep);
+    }
+
+    /// Rejilla tenue de osciloscopio: verticales cada w/10 y horizontales cada h/8.
+    fn draw_grid(&self, layer: &mut Layer, ctx: &VizCtx) {
+        if self.params.density < 0.3 {
+            return;
+        }
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let color = ctx.shade(0.18);
+        let step_x = (w / 10).max(2) as usize;
+        let step_y = (h / 8).max(1) as usize;
+        for x in (step_x as i32..w).step_by(step_x) {
+            for y in 0..h {
+                layer.put(x, y, '·', color, 0.16);
+            }
+        }
+        for y in (step_y as i32..h).step_by(step_y) {
+            for x in 0..w {
+                layer.put(x, y, '·', color, 0.16);
+            }
+        }
+    }
+
+    /// Línea base del haz. En silencio se queda más marcada y sin trazas.
+    fn draw_baseline(&self, layer: &mut Layer, ctx: &VizCtx, y: i32, silent: bool) {
+        let color = if silent {
+            ctx.shade(0.45)
+        } else {
+            ctx.shade(0.28)
+        };
+        let alpha = if silent { 0.55 } else { 0.25 };
+        for x in 0..layer.w as i32 {
+            layer.put(x, y, '·', color, alpha);
+        }
+    }
+
+    /// Dibuja un barrido conectando muestras con la celda vertical intermedia.
+    fn draw_sweep(&self, layer: &mut Layer, sweep: &[f32], color: Rgb, alpha: f32) {
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w <= 0 || h <= 0 || sweep.len() < 2 {
+            return;
+        }
+        let mid = h as f32 / 2.0;
+        let amplitude = (h as f32 * 0.42 * self.params.sensitivity.clamp(0.1, 4.0)).max(0.5);
+        let x_of = |i: usize| -> i32 {
+            (i as f32 / (sweep.len() - 1) as f32 * (w - 1) as f32).round() as i32
+        };
+        let y_of = |value: f32| -> i32 {
+            (mid - value.clamp(-1.0, 1.0) * amplitude)
+                .round()
+                .clamp(0.0, (h - 1) as f32) as i32
+        };
+        let mut prev = (x_of(0), y_of(sweep[0]));
+        layer.put(prev.0, prev.1, '•', color, alpha);
+        for i in 1..sweep.len() {
+            let x = x_of(i);
+            let y = y_of(sweep[i]);
+            if x == prev.0 {
+                let (from, to) = if prev.1 <= y {
+                    (prev.1, y)
+                } else {
+                    (y, prev.1)
+                };
+                for yy in from..=to {
+                    layer.put(x, yy, '│', color, alpha);
+                }
+            } else {
+                layer.line(prev.0, prev.1, x, y, '─', color, alpha);
+            }
+            prev = (x, y);
+        }
+    }
+}
+
+impl Effect for Scope {
+    fn key(&self) -> &'static str {
+        "scope"
+    }
+    fn name(&self) -> &'static str {
+        "osciloscopio"
+    }
+    fn params(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn frame(&mut self, layer: &mut Layer, ctx: &VizCtx) {
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        self.draw_grid(layer, ctx);
+        let baseline = h / 2;
+
+        let peak = ctx
+            .audio
+            .waveform
+            .iter()
+            .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
+        let silent = ctx.audio.silent || peak < 1e-4;
+        if silent {
+            // Sin señal no se capturan barridos: solo la línea base quieta.
+            self.draw_baseline(layer, ctx, baseline, true);
+            return;
+        }
+        self.draw_baseline(layer, ctx, baseline, false);
+
+        // Barrido nuevo al cambiar la generación del audio o, como mínimo, cada
+        // ~50 ms. `params.speed` acelera o frena ese refresco.
+        let generation_changed = (ctx.audio.time - self.last_generation).abs() > 1e-4;
+        let interval = 0.05 / self.params.speed.clamp(0.25, 4.0);
+        if generation_changed || ctx.time - self.last_sweep >= interval {
+            self.resample(ctx.audio);
+            self.push_sweep();
+            self.last_generation = ctx.audio.time;
+            self.last_sweep = ctx.time;
+        }
+
+        // `density` decide cuántas estelas se muestran (3 o 4) y si hay rejilla.
+        let visible = if self.params.density >= 0.75 { 4 } else { 3 };
+        let total = self.sweeps.len();
+        let skip = total.saturating_sub(visible);
+        for (index, sweep) in self.sweeps.iter().enumerate().skip(skip) {
+            let newest = index + 1 == total;
+            let recency = if total > 1 {
+                index as f32 / (total - 1) as f32
+            } else {
+                1.0
+            };
+            let color = if newest {
+                // El haz actual tira a la tinta de la portada.
+                mix(ctx.palette.secondary, ctx.palette.text, 0.4)
+            } else {
+                ctx.shade(0.22 + 0.62 * recency)
+            };
+            let alpha = if newest { 0.92 } else { 0.14 + 0.5 * recency };
+            self.draw_sweep(layer, sweep, color, alpha);
+        }
+    }
+}
+
 /// Utilidad para tests: un frame con energía.
 pub fn test_audio(energy: f32) -> AudioFrame {
     let mut audio = AudioFrame::default();
@@ -1320,5 +1530,124 @@ mod tests {
                 preset.name
             );
         }
+    }
+
+    #[test]
+    fn scope_key_maps_to_scope_kind() {
+        let effect = effect_by_key("scope");
+        let kind = EffectKind::ALL
+            .into_iter()
+            .find(|kind| kind.key() == effect.key());
+        assert_eq!(kind, Some(EffectKind::Scope));
+    }
+
+    #[test]
+    fn scope_draws_with_waveform() {
+        let palette = Palette::dark();
+        let audio = test_audio(0.8);
+        let mut scope = Scope::default();
+        let (w, h) = (80u16, 12u16);
+        let mut layer = Layer::new(w, h);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut: crate::viz::shade_lut(&palette),
+            w,
+            h,
+            dt: 1.0 / 60.0,
+            time: 1.0,
+        };
+        scope.frame(&mut layer, &ctx);
+        let drawn = layer.cells.iter().filter(|cell| cell.ch != ' ').count();
+        assert!(drawn > 20, "scope no dibuja (drawn={drawn})");
+    }
+
+    #[test]
+    fn scope_survives_extreme_geometries() {
+        let palette = Palette::dark();
+        let audio = test_audio(0.9);
+        let mut scope = Scope::default();
+        for (w, h, time) in [(20u16, 6u16, 1.0f32), (1, 1, 2.0), (120, 40, 3.0)] {
+            let mut layer = Layer::new(w, h);
+            let ctx = VizCtx {
+                audio: &audio,
+                palette: &palette,
+                lut: crate::viz::shade_lut(&palette),
+                w,
+                h,
+                dt: 1.0 / 60.0,
+                time,
+            };
+            scope.frame(&mut layer, &ctx);
+        }
+    }
+
+    #[test]
+    fn scope_does_not_duplicate_sweeps_for_same_generation() {
+        let palette = Palette::dark();
+        let audio = test_audio(0.7);
+        let mut scope = Scope::default();
+        let mut layer = Layer::new(60, 10);
+        for step in 0..2 {
+            let ctx = VizCtx {
+                audio: &audio,
+                palette: &palette,
+                lut: crate::viz::shade_lut(&palette),
+                w: 60,
+                h: 10,
+                dt: 1.0 / 240.0,
+                time: 5.0 + step as f32 * (1.0 / 240.0),
+            };
+            scope.frame(&mut layer, &ctx);
+        }
+        assert_eq!(
+            scope.sweeps.len(),
+            1,
+            "la misma generación de audio no debe apilar barridos"
+        );
+    }
+
+    #[test]
+    fn scope_keeps_a_bounded_trail() {
+        let palette = Palette::dark();
+        let mut audio = test_audio(0.6);
+        let mut scope = Scope::default();
+        let mut layer = Layer::new(40, 8);
+        for step in 0..32 {
+            audio.time = step as f32 * 0.02;
+            let ctx = VizCtx {
+                audio: &audio,
+                palette: &palette,
+                lut: crate::viz::shade_lut(&palette),
+                w: 40,
+                h: 8,
+                dt: 1.0 / 60.0,
+                time: step as f32 * 0.06,
+            };
+            scope.frame(&mut layer, &ctx);
+        }
+        assert_eq!(scope.sweeps.len(), SCOPE_TRAILS);
+    }
+
+    #[test]
+    fn scope_stays_flat_when_silent() {
+        let palette = Palette::dark();
+        let audio = AudioFrame::default();
+        let mut scope = Scope::default();
+        // Sin rejilla: la única celda dibujada debe ser la línea base.
+        scope.params.density = 0.0;
+        let mut layer = Layer::new(40, 8);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut: crate::viz::shade_lut(&palette),
+            w: 40,
+            h: 8,
+            dt: 1.0 / 60.0,
+            time: 1.0,
+        };
+        scope.frame(&mut layer, &ctx);
+        assert!(scope.sweeps.is_empty(), "el silencio no debe capturar barridos");
+        assert_eq!(layer.ch_at(0, 4), '·', "falta la línea base");
     }
 }

@@ -13,8 +13,10 @@ use spote_core::config::{self, Config};
 use spote_core::downloader::{DownloadEvent, DownloadSource, Downloader, SearchItem};
 use spote_core::library::{Library, TrackRow};
 use spote_core::lyrics::LyricsDoc;
+use spote_core::playback::{self, Advance, RepeatMode, ShuffleState};
 use spote_core::player::{Player, PlayerEvent};
 use spote_core::spotify::SpotifyState;
+use spote_core::stream::{StreamEvent, StreamResolver};
 use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
 use spote_core::util;
 use spote_core::ToolStatus;
@@ -217,6 +219,8 @@ pub enum Action {
     Next,
     Prev,
     LoopToggle,
+    CycleRepeat,
+    ToggleShuffle,
     SeekTo(u64),
     SeekLyrics(u64),
     Volume(f32),
@@ -722,6 +726,15 @@ pub struct App {
     /// Pistas previas de la sesión, para que «anterior» no caiga siempre en
     /// la primera fila de la biblioteca.
     pub history: Vec<(TrackRef, Option<PathBuf>)>,
+    /// Contexto de reproducción (vista, búsqueda, álbum, artista).
+    pub play_context: Vec<QueueEntry>,
+    pub context_index: usize,
+    pub repeat_mode: RepeatMode,
+    pub shuffle_on: bool,
+    pub shuffle_state: Option<ShuffleState>,
+    pub stream_resolver: StreamResolver,
+    pub pending_stream: Option<String>,
+    pub streaming: bool,
     pub albums: Vec<spote_core::library::AlbumRow>,
     pub album_selected: usize,
     pub album_open: Option<spote_core::library::AlbumRow>,
@@ -932,6 +945,18 @@ impl App {
             view: Vec::new(),
             loop_file: false,
             history: Vec::new(),
+            play_context: Vec::new(),
+            context_index: 0,
+            repeat_mode: match cfg.playback.repeat.as_str() {
+                "all" => RepeatMode::All,
+                "one" => RepeatMode::One,
+                _ => RepeatMode::Off,
+            },
+            shuffle_on: cfg.playback.shuffle,
+            shuffle_state: None,
+            stream_resolver: StreamResolver::start(),
+            pending_stream: None,
+            streaming: false,
             albums: Vec::new(),
             album_selected: 0,
             album_open: None,
@@ -1191,7 +1216,13 @@ impl App {
         // si no, al terminar esa descarga interrumpía lo que ya estaba sonando.
         self.pending_play = None;
         let Some(path) = path.or_else(|| self.lib.local_path(&track.key)) else {
-            self.queue_track(track, None);
+            if self.cfg.player.streaming && self.tools.yt_dlp {
+                self.start_stream(track);
+            } else {
+                let key = track.key.clone();
+                self.queue_track(track, None);
+                self.pending_play = Some(key);
+            }
             return;
         };
         if !path.exists() {
@@ -1199,6 +1230,9 @@ impl App {
                 format!("falta el fichero: {}", path.display()),
                 ToastKind::Error,
             );
+            if self.cfg.player.streaming && self.tools.yt_dlp {
+                self.start_stream(track);
+            }
             return;
         }
         if record_history {
@@ -1226,10 +1260,11 @@ impl App {
         self.now.playing = true;
         self.now.loading = false;
         self.now.message.clear();
-        self.now.volume = self.cfg.player.volume;
+        self.pending_stream = None;
+        self.streaming = false;
         if let Some(player) = &self.player {
             player.set_volume(self.now.volume);
-            player.set_loop(self.loop_file);
+            player.set_loop(self.repeat_mode == RepeatMode::One);
             player.load(path.clone(), self.trim_start_ms as f64 / 1000.0);
         } else {
             self.set_status("mpv no disponible: modo visual");
@@ -1265,9 +1300,6 @@ impl App {
                 .decode_file(path, self.trim_start_ms as f64 / 1000.0);
             self.spectrum_at = Instant::now();
         }
-        if let Some(row) = self.lib.track_by_key(&track.key).ok().flatten() {
-            self.lib.record_play(&row.track.key, 0, false).ok();
-        }
         if !self.applying_remote && self.room.is_some() {
             // En una sala manda el servidor: lo que pongas se anuncia a la cola
             // compartida, no se reproduce por tu cuenta.
@@ -1280,6 +1312,133 @@ impl App {
             }
         }
         self.set_status(format!("▶ {}", track.label()));
+    }
+
+    fn start_stream(&mut self, track: TrackRef) {
+        if !self.cfg.player.streaming || !self.tools.yt_dlp {
+            self.queue_track(track, None);
+            return;
+        }
+        let hint = track.source_hint.clone().or_else(|| {
+            self.lib.source_hint(&track.key).map(|(provider, id)| {
+                spote_protocol::SourceHint {
+                    provider,
+                    id,
+                    duration_ms: track.duration_ms,
+                }
+            })
+        });
+        let (trim_start, trim_end) = self.lib.trim(&track.key).unwrap_or((0, None));
+        let duration = track.duration_ms.max(1);
+        self.trim_start_ms = trim_start.min(duration.saturating_sub(500));
+        self.trim_end_ms = trim_end
+            .filter(|end| *end > self.trim_start_ms + 500)
+            .map(|end| end.min(duration));
+        self.now.track = Some(track.clone());
+        self.now.path = None;
+        self.now.position_ms = self.trim_start_ms;
+        self.now.duration_ms = track.duration_ms;
+        self.now.playing = false;
+        self.now.loading = true;
+        self.now.message.clear();
+        self.pending_play = None;
+        self.pending_stream = Some(track.key.clone());
+        self.streaming = true;
+        // La pista anterior no debe seguir sonando mientras se resuelve.
+        if let Some(player) = &self.player {
+            player.stop();
+        }
+        self.lyrics = None;
+        self.lyrics_status.clear();
+        self.lyrics_key.clear();
+        self.lyrics_loading = false;
+        self.lyrics_offset_ms = self.lib.lyrics_offset(&track.key).unwrap_or(0);
+        self.art = None;
+        self.art_prev = None;
+        self.art_variants.clear();
+        self.art_key.clear();
+        self.art_png = None;
+        self.art_png_key.clear();
+        self.art_png_size = None;
+        self.art_png_hint = (0, 0);
+        self.ambient_art = None;
+        self.ambient_art_key.clear();
+        self.song_map = None;
+        self.song_map_key.clear();
+        self.song_section = None;
+        self.spectrum.stop();
+        self.load_lyrics(&track);
+        self.stream_resolver.resolve(
+            track.key.clone(),
+            &track.artist,
+            &track.title,
+            track.duration_ms,
+            hint,
+        );
+        self.set_status(format!("resolviendo stream · {}", track.label()));
+    }
+
+    fn poll_stream(&mut self) {
+        while let Some(event) = self.stream_resolver.try_recv() {
+            match event {
+                StreamEvent::Resolved { key, source } => {
+                    let is_current = self.pending_stream.as_deref() == Some(key.as_str())
+                        || self
+                            .now
+                            .track
+                            .as_ref()
+                            .is_some_and(|track| track.key == key);
+                    if !is_current {
+                        continue;
+                    }
+                    self.pending_stream = None;
+                    self.streaming = true;
+                    self.now.loading = false;
+                    self.now.playing = true;
+                    self.now.path = None;
+                    if let Some(player) = &self.player {
+                        player.load_url(source.url, self.trim_start_ms as f64 / 1000.0);
+                    }
+                    if self.cfg.player.remote_viz == "system" && self.tools.parec {
+                        self.spectrum.decode_system();
+                        self.spectrum_at = Instant::now();
+                    } else {
+                        self.spectrum.stop();
+                    }
+                    if self.cfg.player.stream_cache {
+                        let watch = format!("https://www.youtube.com/watch?v={}", source.id);
+                        self.downloader.download(
+                            &key,
+                            DownloadSource::Url(watch),
+                            self.cfg.media_dir(),
+                        );
+                    }
+                    self.set_status("▶ stream · descargando copia local");
+                }
+                StreamEvent::Failed { key, message } => {
+                    let is_current = self.pending_stream.as_deref() == Some(key.as_str())
+                        || self
+                            .now
+                            .track
+                            .as_ref()
+                            .is_some_and(|track| track.key == key);
+                    if !is_current {
+                        continue;
+                    }
+                    self.pending_stream = None;
+                    self.streaming = false;
+                    self.now.loading = false;
+                    self.now.playing = false;
+                    self.toast(format!("stream no disponible: {message}"), ToastKind::Warn);
+                    if let Some(track) = self.now.track.clone() {
+                        self.start_resolve(&track);
+                        self.pending_play = Some(track.key.clone());
+                        self.now.loading = true;
+                        self.set_status("descargando tras fallar el stream…");
+                    }
+                }
+            }
+        }
     }
 
     /// Encola una pista: si no está descargada, lanza la descarga.
@@ -1404,9 +1563,11 @@ impl App {
             }
             return;
         }
-        if self.now.path.is_none() {
+        if self.now.path.is_none() && !self.streaming {
             // Pista en espera de descarga: no hay nada en mpv que pausar.
-            if self.pending_play.is_some() {
+            if self.pending_stream.is_some() {
+                self.toast("resolviendo stream…", ToastKind::Info);
+            } else if self.pending_play.is_some() {
                 self.toast("esperando descarga…", ToastKind::Info);
             } else if let Some(track) = self.now.track.clone() {
                 self.queue_track(track, None);
@@ -1433,22 +1594,190 @@ impl App {
         }
     }
 
-    /// Bucle del fichero actual. En mpv basta con `loop-file`; al cambiar de
-    /// pista se vuelve a mandar para que el nuevo fichero herede el modo.
+    /// Define el contexto de reproducción (vista, búsqueda, álbum, artista).
+    pub fn set_context(&mut self, entries: Vec<QueueEntry>, index: usize) {
+        if entries.is_empty() {
+            self.play_context.clear();
+            self.context_index = 0;
+            self.shuffle_state = None;
+            return;
+        }
+        let index = index.min(entries.len().saturating_sub(1));
+        self.play_context = entries;
+        self.context_index = index;
+        self.shuffle_state = if self.shuffle_on {
+            let mut state = ShuffleState::new(self.play_context.len(), index);
+            state.enable(self.play_context.len(), index);
+            Some(state)
+        } else {
+            None
+        };
+    }
+
+    fn ensure_shuffle(&mut self, len: usize, current: usize) {
+        let rebuild = self
+            .shuffle_state
+            .as_ref()
+            .map_or(true, |state| state.order_snapshot().len() != len);
+        if rebuild {
+            let mut state = ShuffleState::new(len, current);
+            state.enable(len, current);
+            self.shuffle_state = Some(state);
+        }
+    }
+
+    fn play_context_entry(&mut self, index: usize) {
+        let Some(entry) = self.play_context.get(index).cloned() else {
+            return;
+        };
+        self.context_index = index;
+        self.play_local(entry.track, entry.path);
+    }
+
+    fn apply_advance(&mut self, advance: Advance) {
+        match advance {
+            Advance::To(index) => self.play_context_entry(index),
+            Advance::RepeatCurrent => {
+                self.now.position_ms = self.trim_start_ms;
+                if let Some(player) = &self.player {
+                    player.seek(self.trim_start_ms as f64 / 1000.0);
+                    player.pause(false);
+                }
+                self.now.playing = true;
+            }
+            Advance::Stop => {
+                self.now.playing = false;
+                if let Some(player) = &self.player {
+                    player.pause(true);
+                }
+                self.set_status("fin de la cola");
+            }
+        }
+    }
+
+    /// Avance automático al terminar una pista. La cola explícita manda; si
+    /// está vacía, se aplica el modo repeat/shuffle del contexto.
+    pub fn auto_next(&mut self) {
+        if self.follow_spotify || self.room.is_some() {
+            self.next_track();
+            return;
+        }
+        if !self.queue.is_empty() {
+            self.next_track();
+            return;
+        }
+        if self.repeat_mode == RepeatMode::One {
+            self.apply_advance(Advance::RepeatCurrent);
+            return;
+        }
+        if self.play_context.is_empty() {
+            self.next_track();
+            return;
+        }
+        let len = self.play_context.len();
+        let current = self.context_index.min(len.saturating_sub(1));
+        let advance = if self.shuffle_on {
+            self.ensure_shuffle(len, current);
+            self.shuffle_state
+                .as_mut()
+                .map(|state| state.next(len, self.repeat_mode))
+                .unwrap_or(Advance::Stop)
+        } else {
+            playback::auto_advance(current, len, self.repeat_mode)
+        };
+        self.apply_advance(advance);
+    }
+
+    pub fn cycle_repeat(&mut self) {
+        self.repeat_mode = self.repeat_mode.next();
+        self.cfg.playback.repeat = match self.repeat_mode {
+            RepeatMode::Off => "off",
+            RepeatMode::All => "all",
+            RepeatMode::One => "one",
+        }
+        .to_string();
+        self.loop_file = self.repeat_mode == RepeatMode::One;
+        if let Some(player) = &self.player {
+            player.set_loop(self.loop_file);
+        }
+        self.cfg.save().ok();
+        self.toast(
+            match self.repeat_mode {
+                RepeatMode::Off => "bucle apagado",
+                RepeatMode::All => "bucle: toda la cola",
+                RepeatMode::One => "bucle: una canción",
+            },
+            ToastKind::Info,
+        );
+    }
+
+    pub fn toggle_shuffle(&mut self) {
+        self.shuffle_on = !self.shuffle_on;
+        self.cfg.playback.shuffle = self.shuffle_on;
+        self.cfg.save().ok();
+        if self.shuffle_on {
+            if self.play_context.is_empty() && !self.view.is_empty() {
+                let entries: Vec<QueueEntry> = self
+                    .view
+                    .iter()
+                    .map(|row| QueueEntry {
+                        track: row.track.clone(),
+                        path: row.path.clone().filter(|path| path.exists()),
+                    })
+                    .collect();
+                self.set_context(entries, self.selected);
+            }
+            let len = self.play_context.len().max(self.view.len());
+            let current = if self.play_context.is_empty() {
+                self.selected
+            } else {
+                self.context_index
+            };
+            if len > 0 {
+                let mut state = ShuffleState::new(len, current);
+                state.enable(len, current);
+                self.shuffle_state = Some(state);
+            }
+            self.toast("aleatorio activado", ToastKind::Info);
+        } else {
+            if let Some(state) = self.shuffle_state.as_mut() {
+                if !self.play_context.is_empty() {
+                    self.context_index = state.disable(self.context_index);
+                }
+            }
+            self.shuffle_state = None;
+            self.toast("aleatorio desactivado", ToastKind::Info);
+        }
+    }
+
+    /// Atajo `u`: alterna bucle de una pista. Comparte estado con `o` para
+    /// que `loop-file` y `RepeatMode` no se contradigan.
     pub fn toggle_loop(&mut self) {
         if self.follow_spotify {
             self.toast("el bucle no se controla en modo Spotify", ToastKind::Warn);
             return;
         }
-        self.loop_file = !self.loop_file;
+        self.repeat_mode = if self.repeat_mode == RepeatMode::One {
+            RepeatMode::Off
+        } else {
+            RepeatMode::One
+        };
+        self.loop_file = self.repeat_mode == RepeatMode::One;
+        self.cfg.playback.repeat = match self.repeat_mode {
+            RepeatMode::Off => "off",
+            RepeatMode::All => "all",
+            RepeatMode::One => "one",
+        }
+        .to_string();
+        self.cfg.save().ok();
         if let Some(player) = &self.player {
             player.set_loop(self.loop_file);
         }
         self.toast(
             if self.loop_file {
-                "bucle activado"
+                "bucle: una canción"
             } else {
-                "bucle desactivado"
+                "bucle apagado"
             },
             ToastKind::Info,
         );
@@ -1478,6 +1807,8 @@ impl App {
                 .or_else(|| self.lib.local_path(&entry.track.key));
             if let Some(path) = path {
                 self.play_local(entry.track, Some(path));
+            } else if self.cfg.player.streaming && self.tools.yt_dlp {
+                self.play_local(entry.track, None);
             } else {
                 // Ojo: aquí todavía no hay nada cargado en mpv. Antes se
                 // cambiaba `now.track` y se dejaba el fichero anterior en el
@@ -1518,6 +1849,21 @@ impl App {
             }
             return;
         }
+        if !self.play_context.is_empty() {
+            let len = self.play_context.len();
+            let current = self.context_index.min(len.saturating_sub(1));
+            let advance = if self.shuffle_on {
+                self.ensure_shuffle(len, current);
+                self.shuffle_state
+                    .as_mut()
+                    .map(|state| state.next(len, self.repeat_mode))
+                    .unwrap_or(Advance::Stop)
+            } else {
+                playback::manual_next(current, len, self.repeat_mode)
+            };
+            self.apply_advance(advance);
+            return;
+        }
         self.play_view_step(1, true, true, false);
     }
 
@@ -1535,7 +1881,7 @@ impl App {
         }
         // Solo se rebobina si de verdad hay un fichero cargado. Con una pista
         // esperando descarga, `position_ms` es 0 y no hay nada que seekear.
-        if self.now.path.is_some() && self.now.position_ms > 3_000 {
+        if (self.now.path.is_some() || self.streaming) && self.now.position_ms > 3_000 {
             self.seek_to(0);
             return;
         }
@@ -1551,6 +1897,20 @@ impl App {
                 // lo que ya estaba encolado.
                 self.queue_current_for_back();
                 self.play_local_inner(track, path, false);
+                return;
+            }
+        }
+        if !self.play_context.is_empty() {
+            let len = self.play_context.len();
+            let current = self.context_index.min(len.saturating_sub(1));
+            let index = if self.shuffle_on {
+                self.ensure_shuffle(len, current);
+                self.shuffle_state.as_mut().and_then(|state| state.prev(len))
+            } else {
+                playback::advance_index(current, len, self.repeat_mode, playback::Direction::Prev)
+            };
+            if let Some(index) = index {
+                self.play_context_entry(index);
                 return;
             }
         }
@@ -1654,12 +2014,12 @@ impl App {
             }
             return;
         }
-        if self.now.path.is_none() {
+        if self.now.path.is_none() && !self.streaming {
             // Pista pendiente de descarga: no hay fichero en mpv al que
             // saltar. Evita resucitar por accidente la canción anterior.
             return;
         }
-        self.send_control(ControlAction::Seek, Some(ms));
+        self.send_control(ControlAction::Seek, Some(target));
         self.now.position_ms = target;
         if let Some(player) = &self.player {
             player.seek(target as f64 / 1000.0);
@@ -1680,9 +2040,20 @@ impl App {
 
     pub fn set_volume(&mut self, volume: f32) {
         self.now.volume = volume.clamp(0.0, 1.0);
+        self.cfg.player.volume = self.now.volume;
+        // Durante el arrastre se guarda al soltar; en teclado/rueda, ya.
+        if !self.dragging_volume {
+            self.cfg.save().ok();
+        }
         if let Some(player) = &self.player {
             player.set_volume(self.now.volume);
         }
+    }
+
+    /// Guarda el volumen aunque venga de un arrastre en curso.
+    pub fn persist_volume(&mut self) {
+        self.cfg.player.volume = self.now.volume;
+        self.cfg.save().ok();
     }
 
     // ------------------------------------------------------------- ajustes
@@ -2080,6 +2451,7 @@ impl App {
         self.audio = frame;
 
         self.poll_player();
+        self.poll_stream();
         self.poll_search();
         self.poll_downloads();
         self.poll_spotify_jobs();
@@ -2225,7 +2597,7 @@ impl App {
                                     .record_play(&track.key, self.now.position_ms, true)
                                     .ok();
                             }
-                            self.next_track();
+                            self.auto_next();
                             return;
                         }
                     }
@@ -2243,7 +2615,18 @@ impl App {
                             .record_play(&track.key, self.now.position_ms, true)
                             .ok();
                     }
-                    self.next_track();
+                    self.auto_next();
+                }
+                PlayerEvent::Error(message) => {
+                    self.toast(format!("mpv: {message}"), ToastKind::Error);
+                    if self.streaming {
+                        self.streaming = false;
+                        self.now.loading = false;
+                        if let Some(track) = self.now.track.clone() {
+                            self.start_resolve(&track);
+                            self.pending_play = Some(track.key.clone());
+                        }
+                    }
                 }
                 PlayerEvent::Disconnected => {
                     self.set_status("mpv desconectado");
@@ -3150,7 +3533,12 @@ impl App {
     fn toggle_mute(&mut self) {
         if self.now.volume > 0.0 {
             self.volume_before_mute = self.now.volume;
-            self.set_volume(0.0);
+            // Silenciar no debe guardar 0 en config: al reabrir, el usuario
+            // espera el volumen que tenía, no la app muda.
+            self.now.volume = 0.0;
+            if let Some(player) = &self.player {
+                player.set_volume(0.0);
+            }
         } else {
             let volume = self.volume_before_mute.max(0.2);
             self.set_volume(volume);
@@ -3426,6 +3814,20 @@ impl App {
         let Some(item) = self.search.results.get(track_index).cloned() else {
             return;
         };
+        let entries: Vec<QueueEntry> = self
+            .search
+            .results
+            .iter()
+            .map(|item| {
+                let track = item.to_track();
+                let path = self
+                    .lib
+                    .local_path(&track.key)
+                    .filter(|path| path.exists());
+                QueueEntry { track, path }
+            })
+            .collect();
+        self.set_context(entries, track_index);
         let track = item.to_track();
         if let Ok(id) = self.lib.upsert_track(&track) {
             if let Some(hint) = &track.source_hint {
@@ -3444,24 +3846,7 @@ impl App {
                 self.lib.set_art(&track.key, None, Some(url)).ok();
             }
         }
-        if let Some(path) = self.lib.local_path(&track.key) {
-            self.play_local(track, Some(path));
-            return;
-        }
-        if item.provider == "spotify" || item.provider == "deezer" {
-            self.start_resolve(&track);
-        } else {
-            self.start_download(&track, item.url.clone());
-        }
-        self.pending_play = Some(track.key.clone());
-        self.now.track = Some(track.clone());
-        self.now.loading = true;
-        self.now.duration_ms = track.duration_ms;
-        self.set_status("descargando…");
-        self.lyrics = None;
-        self.lyrics_auto_offset = None;
-        self.lyrics_key.clear();
-        self.load_lyrics(&track);
+        self.play_local(track, None);
     }
 
     fn copy_lyrics(&mut self) {
@@ -3503,6 +3888,15 @@ impl App {
 
     fn play_row(&mut self, index: usize) {
         self.selected = index.min(self.view.len().saturating_sub(1));
+        let entries: Vec<QueueEntry> = self
+            .view
+            .iter()
+            .map(|row| QueueEntry {
+                track: row.track.clone(),
+                path: row.path.clone().filter(|path| path.exists()),
+            })
+            .collect();
+        self.set_context(entries, index);
         if let Some(row) = self.view.get(index).cloned() {
             self.play_local(row.track, row.path);
         }

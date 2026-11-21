@@ -33,7 +33,7 @@ pub enum PlayerEvent {
 
 #[derive(Debug)]
 enum Cmd {
-    Load { path: PathBuf, start: f64, append: bool },
+    Load { target: String, start: f64, append: bool },
     Pause(bool),
     SeekAbsolute(f64),
     SeekRelative(f64),
@@ -46,7 +46,6 @@ enum Cmd {
 
 /// Handle clonable y no-async. Todos los comandos son `try_send`: la UI nunca
 /// se bloquea esperando a mpv.
-#[derive(Clone)]
 pub struct Player {
     cmd: mpsc::UnboundedSender<Cmd>,
     events: broadcast::Sender<PlayerEvent>,
@@ -121,8 +120,18 @@ impl Player {
     }
 
     pub fn load(&self, path: PathBuf, start_secs: f64) {
+        self.load_target(path.to_string_lossy().into_owned(), start_secs);
+    }
+
+    /// Reproduce una URL ya resuelta (por ejemplo, la salida de `yt-dlp -g`).
+    /// mpv no debe re-extraerla: el proceso principal ya la validó.
+    pub fn load_url(&self, url: impl Into<String>, start_secs: f64) {
+        self.load_target(url.into(), start_secs);
+    }
+
+    fn load_target(&self, target: String, start_secs: f64) {
         let _ = self.cmd.send(Cmd::Load {
-            path,
+            target,
             start: start_secs.max(0.0),
             append: false,
         });
@@ -130,7 +139,7 @@ impl Player {
 
     pub fn enqueue(&self, path: PathBuf) {
         let _ = self.cmd.send(Cmd::Load {
-            path,
+            target: path.to_string_lossy().into_owned(),
             start: 0.0,
             append: true,
         });
@@ -162,8 +171,7 @@ impl Player {
         let _ = self.cmd.send(Cmd::Speed(speed.clamp(0.5, 2.0)));
     }
 
-    /// Repite en bucle el fichero actual. mpv mantiene la opción entre cargas,
-    /// así que al cambiar de pista el nuevo fichero hereda el modo.
+    /// Repite en bucle el fichero actual (mpv mantiene la opción entre cargas).
     pub fn set_loop(&self, enabled: bool) {
         let _ = self.cmd.send(Cmd::LoopFile(enabled));
     }
@@ -199,6 +207,14 @@ async fn run(
         .arg("--force-window=no")
         .arg("--vo=null")
         .arg("--keep-open=no")
+        // Las URLs ya vienen resueltas por `yt-dlp -g`; desactivar el hook de
+        // mpv evita que vuelva a extraer una URL de googlevideo y falle con 403.
+        .arg("--ytdl=no")
+        .arg("--cache=yes")
+        .arg("--demuxer-max-bytes=64MiB")
+        .arg("--demuxer-readahead-secs=20")
+        .arg("--network-timeout=15")
+        .arg("--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5")
         .arg(format!("--input-ipc-server={}", socket.display()))
         .arg(format!("--volume={volume_pct:.0}"));
     // Permite forzar salida nula en tests/CI (`SPOTE_AO=null`).
@@ -256,28 +272,34 @@ async fn run(
                 let Some(cmd) = cmd else { break };
                 let payload = match cmd {
                     Cmd::Quit => break,
-                    Cmd::Load { path, start, append } => {
+                    Cmd::Load { target, start, append } => {
                         let mode = if append { "append" } else { "replace" };
                         if !append {
-                            // Arrancar una pista nueva siempre suena. Sin esto,
-                            // si la anterior quedó en pausa, mpv cargaba el
-                            // fichero pausado y no se oía hasta pulsar play.
+                            // Una pista nueva siempre suena; si la anterior
+                            // quedó en pausa, mpv la cargaría pausada.
                             let _ = write_half
                                 .write_all(
-                                    format!("{}\n", json!({"command": ["set_property", "pause", false]}))
-                                        .as_bytes(),
+                                    format!(
+                                        "{}\n",
+                                        json!({"command": ["set_property", "pause", false]})
+                                    )
+                                    .as_bytes(),
                                 )
                                 .await;
                         }
-                        // Siempre se fija: si no, el recorte de la pista
-                        // anterior (start > 0) se queda pegado y la siguiente
-                        // arranca a mitad o directamente termina.
+                        // `start` es una opción persistente de mpv: si no se
+                        // resetea, la pista siguiente arranca en el offset de la
+                        // anterior. Se envía siempre, incluido 0.
                         let _ = write_half
-                            .write_all(format!("{}\n", json!({"command": ["set_property", "start", format!("{:.3}", start.max(0.0))]})).as_bytes())
+                            .write_all(
+                                format!(
+                                    "{}\n",
+                                    json!({"command": ["set_property", "start", format!("{start:.3}")]})
+                                )
+                                .as_bytes(),
+                            )
                             .await;
-                        json!({
-                            "command": ["loadfile", path.to_string_lossy(), mode]
-                        })
+                        json!({"command": ["loadfile", target, mode]})
                     }
                     Cmd::Pause(paused) => json!({"command": ["set_property", "pause", paused]}),
                     Cmd::SeekAbsolute(secs) => json!({"command": ["seek", secs, "absolute"]}),
@@ -342,8 +364,19 @@ fn handle_line(line: &str, events: &broadcast::Sender<PlayerEvent>) {
         }
         "end-file" => {
             let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
-            if reason == "eof" {
-                let _ = events.send(PlayerEvent::Eof);
+            match reason {
+                "eof" => {
+                    let _ = events.send(PlayerEvent::Eof);
+                }
+                "error" => {
+                    let message = value
+                        .get("file_error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("mpv no pudo abrir el fichero")
+                        .to_string();
+                    let _ = events.send(PlayerEvent::Error(message));
+                }
+                _ => {}
             }
         }
         "idle" => {

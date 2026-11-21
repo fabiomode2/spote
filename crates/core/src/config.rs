@@ -10,6 +10,7 @@ pub struct Config {
     pub app: AppCfg,
     pub server: ServerCfg,
     pub player: PlayerCfg,
+    pub playback: PlaybackCfg,
     pub ui: UiCfg,
     pub download: DownloadCfg,
     pub lyrics: LyricsCfg,
@@ -112,6 +113,12 @@ pub struct PlayerCfg {
     pub volume: f32,
     pub prefetch: usize,
     pub mpv_path: String,
+    /// Reproduce una URL resuelta mientras se descarga la pista en segundo plano.
+    pub streaming: bool,
+    /// Guarda en `media/` lo que se está reproduciendo en streaming.
+    pub stream_cache: bool,
+    /// `system` captura el monitor para el visualizador; `off` lo apaga.
+    pub remote_viz: String,
 }
 
 impl Default for PlayerCfg {
@@ -120,6 +127,27 @@ impl Default for PlayerCfg {
             volume: 0.8,
             prefetch: 2,
             mpv_path: "mpv".to_string(),
+            streaming: true,
+            stream_cache: true,
+            remote_viz: "system".to_string(),
+        }
+    }
+}
+
+/// Modos de reproducción persistidos. Son preferencias, no estado de sesión.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaybackCfg {
+    /// `off` | `all` | `one`
+    pub repeat: String,
+    pub shuffle: bool,
+}
+
+impl Default for PlaybackCfg {
+    fn default() -> Self {
+        Self {
+            repeat: "off".to_string(),
+            shuffle: false,
         }
     }
 }
@@ -370,7 +398,10 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(path, text)
+        // Escritura atómica: un corte a mitad no deja la config truncada.
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)
     }
 
     pub fn media_dir(&self) -> PathBuf {

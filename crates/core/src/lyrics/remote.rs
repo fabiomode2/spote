@@ -96,7 +96,16 @@ pub async fn fetch_track(
             }
         }
     }
-    // 3) Genius: letra plana.
+    // 3) lrcmux: agregador compatible con LRCLIB, con más cobertura y a
+    // veces tiempos por palabra. Un fallo aquí no impide probar Genius.
+    if Instant::now() < deadline {
+        if let Ok(Some(doc)) = super::lrcmux::fetch(client, track).await {
+            if let Some(doc) = keep_fallback(&mut fallback, doc) {
+                return Ok(Some(doc));
+            }
+        }
+    }
+    // 4) Genius: letra plana.
     if Instant::now() < deadline {
         if let Ok(Some(doc)) = fetch_genius(client, track).await {
             if let Some(doc) = keep_fallback(&mut fallback, doc) {
@@ -104,7 +113,7 @@ pub async fn fetch_track(
             }
         }
     }
-    // 4) Captions de YouTube: si hay letra conocida, alinean; si no, sirven
+    // 5) Captions de YouTube: si hay letra conocida, alinean; si no, sirven
     //    como letra sincronizada de emergencia.
     if let Some(doc) = super::youtube::fetch(track, fallback.as_ref()).await {
         return Ok(Some(doc));

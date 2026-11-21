@@ -9,7 +9,7 @@ MPRIS, SQLite) vive en un worker.
 | crate | papel |
 | --- | --- |
 | `crates/protocol` | tipos compartidos (`TrackRef`, salas, cola). Sin I/O. |
-| `crates/core` | biblioteca SQLite, descargas, catálogo, letras, MPRIS, arte. |
+| `crates/core` | biblioteca SQLite, descargas, catálogo, letras, MPRIS, arte, resolución de streaming y política de cola. |
 | `crates/server` | `spoted`: presencia, salas y cola ordenada por servidor. |
 | `crates/tui` | binario `spote`: estado de la app y dibujo en el terminal. |
 
@@ -30,11 +30,12 @@ MPRIS, SQLite) vive en un worker.
 | `app/layout_editor.rs` | editor de diseño en caliente (`E`): paneles, docks y tamaños. |
 | `app/keymap.rs` | fuente única de leyendas y ayuda; la barra inferior no miente. |
 
-Cada frame: `tick()` → sondea workers (`poll_downloads`, `poll_art`,
-`poll_lyrics`, `poll_spotify`, `poll_social`, `poll_spotify_jobs`) → `ui::draw`
+Cada frame: `tick()` → sondea workers (`poll_stream`, `poll_downloads`,
+`poll_art`, `poll_lyrics`, `poll_spotify`, `poll_social`, `poll_spotify_jobs`)
+→ `ui::draw`
 lee el estado → el usuario pulsa algo → `on_key`/`on_mouse` → `perform`.
 
-Los workers (`fetch.rs`, `spotify_jobs.rs`, `Downloader`) hablan por canales
+Los workers (`fetch.rs`, `spotify_jobs.rs`, `Downloader`, `stream.rs`) hablan por canales
 `std::sync::mpsc`; nunca se llama a red/disco desde el hilo de dibujo.
 
 ## TUI: `ui/` (dibujo)

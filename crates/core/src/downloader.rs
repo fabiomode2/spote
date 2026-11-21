@@ -597,6 +597,9 @@ fn download(
         .arg(format!("{}.%(ext)s", target.display()))
         .arg("-o")
         .arg(format!("thumbnail:{}.%(ext)s", target.display()))
+        // `--` corta las opciones: una URL que empiece por `-` no puede
+        // convertirse en un flag de yt-dlp.
+        .arg("--")
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

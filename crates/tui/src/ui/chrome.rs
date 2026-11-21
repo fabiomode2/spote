@@ -351,19 +351,38 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
     let pad = u16::from(app.button_pad.clamp(1, 4));
     let (prev_label, play_label, next_label) =
         ("◀◀", if app.now.playing { PAUSE } else { PLAY }, "▶▶");
-    let loop_label = if app.loop_file { "⟲ on" } else { "⟲" };
+    let repeat_label = match app.repeat_mode {
+        spote_core::playback::RepeatMode::Off => "⟲",
+        spote_core::playback::RepeatMode::All => "⟲",
+        spote_core::playback::RepeatMode::One => "⟲1",
+    };
+    let side_w = 5u16;
     let (prev_w, play_w, next_w, loop_w) = if big {
-        (7, 9, 9, 7)
+        (7, 9, 9, side_w)
     } else {
         (
             prev_label.chars().count() as u16 + pad * 2,
             play_label.chars().count() as u16 + pad * 2,
             next_label.chars().count() as u16 + pad * 2,
-            loop_label.chars().count() as u16 + pad * 2,
+            side_w,
         )
     };
-    let total_w = prev_w + play_w + next_w + loop_w + 3;
+    let show_modes = rect.width >= prev_w + play_w + next_w + side_w * 2 + 14;
+    let total_w = prev_w + play_w + next_w + loop_w + 3 + if show_modes { side_w + 1 } else { 0 };
     let mut x = rect.x + rect.width.saturating_sub(total_w) / 2;
+    if show_modes {
+        let shuffle = Rect::new(x, controls_y, side_w, controls_h);
+        draw_mode_button(
+            app,
+            buf,
+            shuffle,
+            Action::ToggleShuffle,
+            "⇄",
+            app.shuffle_on,
+            pal,
+        );
+        x += side_w + 1;
+    }
     let play_rect = Rect::new(x + prev_w + 1, controls_y, play_w, controls_h);
     if app.cfg.ui.fx.bloom_play {
         bloom_glow(buf, play_rect, pal, 0.35 + app.audio.kick_pulse * 0.45);
@@ -372,11 +391,12 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         (prev_label, prev_w, Action::Prev, false),
         (play_label, play_w, Action::PlayPause, true),
         (next_label, next_w, Action::Next, false),
-        (loop_label, loop_w, Action::LoopToggle, false),
+        (repeat_label, loop_w, Action::CycleRepeat, false),
     ] {
         let button = Rect::new(x, controls_y, width, controls_h);
         let hover = app.hover == Some(action.clone());
-        let looping = matches!(action, Action::LoopToggle) && app.loop_file;
+        let looping = matches!(action, Action::CycleRepeat)
+            && !matches!(app.repeat_mode, spote_core::playback::RepeatMode::Off);
         let bg = if hover {
             pal.surface_alt
         } else if primary {
@@ -397,11 +417,11 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
                 }
             }
         }
-        if matches!(action, Action::LoopToggle) {
+        if matches!(action, Action::CycleRepeat) {
             text_at(
                 buf,
                 button,
-                loop_label.to_string(),
+                repeat_label.to_string(),
                 Style::new()
                     .fg(color(if looping { pal.primary } else { pal.muted }))
                     .add_modifier(if looping || !big {
@@ -670,6 +690,37 @@ pub(super) fn bloom_glow(buf: &mut Buffer, rect: Rect, pal: &Palette, amount: f3
             }
         }
     }
+}
+
+/// Botón pequeño de modo (shuffle/repeat) con el mismo lenguaje que el
+/// transporte. El estado activo se marca con el acento de la paleta.
+fn draw_mode_button(
+    app: &mut App,
+    buf: &mut Buffer,
+    rect: Rect,
+    action: Action,
+    label: &str,
+    active: bool,
+    pal: &Palette,
+) {
+    let hover = app.hover == Some(action.clone());
+    let bg = if hover {
+        pal.surface_alt
+    } else if active {
+        mix_oklab(pal.surface, pal.primary, 0.30)
+    } else {
+        pal.surface
+    };
+    fill_soft(buf, rect, bg, 0.95, pal.bg_deep);
+    let fg = if active { pal.primary } else { pal.dim };
+    text_at(
+        buf,
+        rect,
+        label.to_string(),
+        Style::new().fg(color(fg)).add_modifier(Modifier::BOLD),
+        Alignment::Center,
+    );
+    app.hit.add(rect, action);
 }
 
 /// Ancho de la barra según el ajuste, sin comerse los tiempos laterales.

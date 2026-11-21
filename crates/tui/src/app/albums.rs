@@ -174,36 +174,39 @@ impl App {
     }
 
     pub(super) fn play_album_page_track(&mut self) {
-        let Some(track) = self
-            .album_page
-            .as_ref()
-            .and_then(|page| page.tracks.get(page.selected))
-            .cloned()
-        else {
+        let Some(page) = self.album_page.clone() else {
             return;
         };
+        let Some(track) = page.tracks.get(page.selected).cloned() else {
+            return;
+        };
+        let entries: Vec<QueueEntry> = page
+            .tracks
+            .iter()
+            .map(|track| {
+                let path = self
+                    .lib
+                    .local_path(&track.key)
+                    .filter(|path| path.exists());
+                QueueEntry {
+                    track: track.clone(),
+                    path,
+                }
+            })
+            .collect();
+        self.set_context(entries, page.selected);
         self.play_external_track(track);
     }
 
     /// Reproduce una pista que puede no estar descargada. Es el mismo camino
     /// que el top de artistas: si hay fichero local suena ya; si no, se resuelve.
     pub(super) fn play_external_track(&mut self, track: TrackRef) {
-        if let Some(path) = self.lib.local_path(&track.key).filter(|path| path.exists()) {
-            self.play_local(track, Some(path));
-            return;
-        }
         self.lib.upsert_track(&track).ok();
         if let Some(url) = &track.art_url {
             self.lib.set_art(&track.key, None, Some(url)).ok();
         }
-        self.start_resolve(&track);
-        self.pending_play = Some(track.key.clone());
-        self.now.track = Some(track.clone());
-        self.now.loading = true;
-        self.now.duration_ms = track.duration_ms;
-        self.set_status("descargando…");
-        self.lyrics = None;
-        self.load_lyrics(&track);
+        // Si no hay fichero local, `play_local` resuelve un stream o descarga.
+        self.play_local(track, None);
     }
 
     pub(super) fn download_album_page(&mut self) {

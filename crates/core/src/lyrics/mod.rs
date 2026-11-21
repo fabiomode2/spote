@@ -8,6 +8,7 @@ use spote_protocol::TrackRef;
 
 mod align;
 mod asr;
+mod lrcmux;
 mod remote;
 mod text;
 mod youtube;
@@ -39,6 +40,7 @@ pub enum LyricsSource {
     #[default]
     None,
     Lrclib,
+    Lrcmux,
     Captions,
     Plain,
     Estimated,
@@ -50,6 +52,7 @@ impl LyricsSource {
         match self {
             Self::None => "",
             Self::Lrclib => "lrclib",
+            Self::Lrcmux => "lrcmux",
             Self::Captions => "captions",
             Self::Plain => "plain",
             Self::Estimated => "approx",
@@ -62,6 +65,7 @@ impl LyricsSource {
     pub fn from_label(label: &str) -> Option<Self> {
         match label.trim().to_ascii_lowercase().as_str() {
             "lrclib" => Some(Self::Lrclib),
+            "lrcmux" => Some(Self::Lrcmux),
             "captions" => Some(Self::Captions),
             "plain" => Some(Self::Plain),
             "approx" => Some(Self::Estimated),

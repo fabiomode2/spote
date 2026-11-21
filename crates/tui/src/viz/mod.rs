@@ -404,6 +404,13 @@ pub const PRESETS: &[Preset] = &[
             ("tunnel", Blend::Add, 0.55, Mask::Radial(1.3)),
         ],
     },
+    Preset {
+        name: "crt",
+        description: "osciloscopio con estelas",
+        // Entrada nueva al final: no altera los presets existentes ni el
+        // arranque (el preset por defecto sigue siendo `clean`).
+        layers: &[("scope", Blend::Screen, 0.95, Mask::Full)],
+    },
 ];
 
 /// Compositor: N capas, un canvas final.
@@ -454,7 +461,7 @@ impl Viz {
 
     /// Presets que se ciclan con `v` y en ajustes. Los ruidosos (`void`,
     /// `neural`, `glitch`) viven como fondo ambiental, no en la franja.
-    pub const STRIP: [&'static str; 4] = ["clean", "aurora", "bloom", "inferno"];
+    pub const STRIP: [&'static str; 5] = ["clean", "aurora", "bloom", "inferno", "crt"];
 
     fn strip_index(&self) -> usize {
         Self::STRIP

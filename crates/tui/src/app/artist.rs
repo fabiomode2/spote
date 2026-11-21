@@ -124,6 +124,19 @@ impl App {
         let Some(track) = profile.top_tracks.get(self.artist_selected) else {
             return;
         };
+        let entries: Vec<QueueEntry> = profile
+            .top_tracks
+            .iter()
+            .map(|track| {
+                let track = spotify_track_ref(track);
+                let path = self
+                    .lib
+                    .local_path(&track.key)
+                    .filter(|path| path.exists());
+                QueueEntry { track, path }
+            })
+            .collect();
+        self.set_context(entries, self.artist_selected);
         self.overlay = Overlay::None;
         self.play_external_track(spotify_track_ref(track));
     }

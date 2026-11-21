@@ -14,9 +14,11 @@ pub mod harvest;
 pub mod library;
 pub mod lyrics;
 pub mod mpris;
+pub mod playback;
 pub mod player;
 pub mod record;
 pub mod spotify;
+pub mod stream;
 pub mod spotify_api;
 pub mod util;
 

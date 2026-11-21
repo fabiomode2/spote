@@ -16,6 +16,8 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
             vec![
                 ("space", "play / pausa"),
                 ("n / p", "siguiente / anterior"),
+                ("S", "aleatorio on/off"),
+                ("o", "bucle: off / todo / una"),
                 ("u", "bucle de la pista"),
                 ("← →", "seek ±5 s (shift ±30 s)"),
                 ("↑ ↓", "volumen en ahora; selección en listas"),

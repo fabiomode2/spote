@@ -70,6 +70,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.persist_volume();
                     self.should_quit = true;
                     return;
                 }
@@ -93,7 +94,12 @@ impl App {
             || matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.persist_volume();
                 self.should_quit = true
+            }
+            KeyCode::Char('q') if key.modifiers.is_empty() => {
+                self.persist_volume();
+                self.should_quit = true;
             }
             KeyCode::Char(' ') => self.toggle_play(),
             KeyCode::Esc => {
@@ -258,8 +264,10 @@ impl App {
                     self.play_queue_selected();
                 } else if self.tab == Tab::Albums {
                     self.album_enter();
-                } else if let Some(row) = self.selected_row().cloned() {
-                    self.play_local(row.track, row.path);
+                } else if matches!(self.tab, Tab::Library | Tab::Now) {
+                    // `play_row` crea el contexto para que next/prev/repeat
+                    // funcionen también desde listas.
+                    self.play_row(self.selected);
                 }
             }
             KeyCode::Char('a') if !upper => match self.tab {
@@ -351,6 +359,8 @@ impl App {
             }
             KeyCode::Char('n') => self.next_track(),
             KeyCode::Char('p') => self.prev_track(),
+            KeyCode::Char('S') => self.toggle_shuffle(),
+            KeyCode::Char('o') if !upper => self.cycle_repeat(),
             KeyCode::Char('.') => {
                 if self.center_focus == CenterFocus::Lyrics {
                     self.nudge_lyrics_offset(100);

@@ -424,6 +424,8 @@ impl Library {
             "UPDATE source SET status = ?1 WHERE track_id = ?2 AND provider = ?3",
             params![status.as_str(), track_id, provider],
         )?;
+        // El contador de descargadas se cachea 250 ms para pintarlo cada frame.
+        self.ready_cache.set(None);
         Ok(())
     }
 
@@ -844,7 +846,7 @@ impl Library {
             }
         }
         let value = self.conn.query_row(
-            "SELECT count(*) FROM source WHERE status = 'ready'",
+            "SELECT count(DISTINCT track_id) FROM source WHERE status = 'ready'",
             [],
             |r| r.get(0),
         )?;

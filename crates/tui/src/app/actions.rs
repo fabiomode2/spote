@@ -56,7 +56,7 @@ impl App {
                     }
                     Action::SeekTo(_) => {
                         self.dragging_seek = true;
-                        if let Some(rect) = self.hit.rect_for(&Action::SeekTo(0)) {
+                        if let Some(rect) = self.hit.rect_for(&action) {
                             if rect.width > 0 {
                                 let ratio = ((mouse.column.saturating_sub(rect.x)) as f32
                                     / rect.width as f32)
@@ -198,6 +198,9 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.dragging_volume {
+                    self.persist_volume();
+                }
                 self.dragging_seek = false;
                 self.dragging_volume = false;
                 self.resize_drag = None;
@@ -246,6 +249,8 @@ impl App {
             Action::Next => self.next_track(),
             Action::Prev => self.prev_track(),
             Action::LoopToggle => self.toggle_loop(),
+            Action::CycleRepeat => self.cycle_repeat(),
+            Action::ToggleShuffle => self.toggle_shuffle(),
             Action::SeekTo(ms) => self.seek_to(ms),
             Action::SeekLyrics(ms) => {
                 self.seek_to(ms);
@@ -264,7 +269,12 @@ impl App {
             Action::Mute => {
                 if self.now.volume > 0.0 {
                     self.volume_before_mute = self.now.volume;
-                    self.set_volume(0.0);
+                    // Silenciar no guarda 0 en config: al reabrir se conserva
+                    // el volumen real, no el mute temporal.
+                    self.now.volume = 0.0;
+                    if let Some(player) = &self.player {
+                        player.set_volume(0.0);
+                    }
                 } else {
                     let volume = self.volume_before_mute.max(0.2);
                     self.set_volume(volume);
@@ -433,7 +443,10 @@ impl App {
             Action::AlbumPageClose => self.close_album_page(),
             Action::RefreshLibrary => self.refresh_library(),
             Action::NavMenu | Action::QueueMenu => {}
-            Action::Quit => self.should_quit = true,
+            Action::Quit => {
+                self.persist_volume();
+                self.should_quit = true;
+            }
         }
     }
 
