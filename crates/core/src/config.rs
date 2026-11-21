@@ -133,7 +133,14 @@ pub struct UiCfg {
     pub viz: String,
     pub viz_enabled: bool,
     pub theme_fade_ms: u64,
+    /// Límite de frames de la UI (20-60). Por encima de 60 una TUI no gana
+    /// nada: el terminal repinta igual y el coste por frame se multiplica.
     pub fps: u32,
+    /// Ritmo al que se regeneran los canvas de efectos (5-60). Es independiente
+    /// de `fps`: el bucle de la UI sigue corriendo, pero reutiliza el canvas
+    /// anterior hasta que toca el siguiente. Un fondo a pantalla completa a
+    /// 60 Hz es lo que pone la iGPU al 100 %.
+    pub fx_fps: u32,
     pub show_fps: bool,
     /// Modo acompañante del cliente oficial de Spotify (MPRIS).
     pub follow_spotify: bool,
@@ -290,7 +297,8 @@ impl Default for UiCfg {
             viz: "clean".to_string(),
             viz_enabled: true,
             theme_fade_ms: 800,
-            fps: 120,
+            fps: 60,
+            fx_fps: 60,
             show_fps: false,
             follow_spotify: false,
             art_rotate: false,

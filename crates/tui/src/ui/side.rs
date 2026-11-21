@@ -511,8 +511,11 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     }
     let background_on = app.viz_background && app.show_viz;
     if !background_on {
-        let audio = &app.audio;
-        app.viz.render(rect.width, rect.height, audio, pal, app.last_dt);
+        // El canvas se regenera como mucho `fx_fps` veces por segundo; entre
+        // medias se reutiliza el anterior. La franja no cambia de tamaño, así
+        // que el reloj es el único que manda.
+        let hz = app.strip_effects_hz();
+        app.pump_viz(rect.width, rect.height, hz, pal);
         blit_viz(app, buf, rect, 0, 1.0, 0.0, 1);
     } else {
         // El fondo ya renderizó el canvas a pantalla completa: la franja es

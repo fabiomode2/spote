@@ -25,7 +25,7 @@ use crate::fetch::{
     SearchWorker, SongMapEvent, SongMapWorker, SpotifyWorker,
 };
 use crate::social::{Social, SocialCmd, SocialEvent};
-use crate::theme::{FpsMeter, PaletteRuntime, Pulse, Spring};
+use crate::theme::{FpsMeter, FxClock, PaletteRuntime, Pulse, Spring};
 use crate::viz::Viz;
 
 mod actions;
@@ -825,9 +825,11 @@ pub struct App {
     pub viz: Viz,
     pub fps: FpsMeter,
     pub frame_ms: f32,
-    /// Delta real del último tick; los efectos lo usan para no cambiar de
-    /// velocidad cuando el terminal pierde algún frame.
-    pub last_dt: f32,
+    /// Ritmo máximo de los canvas de efectos (Hz).
+    pub fx_fps: f32,
+    /// Relojes independientes por canvas: fondo ambiental y visualizador.
+    pub ambient_fx: FxClock,
+    pub viz_fx: FxClock,
     pub pulse: Pulse,
     pub intro: f32,
     pub hit: HitMap,
@@ -877,6 +879,7 @@ impl App {
         let art_mode = ArtMode::from_str(&cfg.ui.art_mode).unwrap_or_default();
         let viz = Viz::from_preset(&cfg.ui.viz);
         let player_volume = cfg.player.volume;
+        let fx_fps = cfg.ui.fx_fps.clamp(5, 60) as f32;
         let social = if cfg.server.url.is_empty() {
             None
         } else {
@@ -1008,7 +1011,9 @@ impl App {
             viz,
             fps: FpsMeter::new(),
             frame_ms: 0.0,
-            last_dt: 1.0 / 120.0,
+            fx_fps,
+            ambient_fx: FxClock::new(fx_fps * 0.34),
+            viz_fx: FxClock::new(fx_fps),
             pulse: Pulse::default(),
             intro: 0.0,
             hit: HitMap::default(),
@@ -1989,7 +1994,6 @@ impl App {
 
     // ---------------------------------------------------------------- tick
     pub fn tick(&mut self, dt: f32) {
-        self.last_dt = dt;
         if self.now.position_ms != self.now.position_seen_ms {
             self.now.position_seen_ms = self.now.position_ms;
             self.now.position_at = Instant::now();
@@ -2104,6 +2108,94 @@ impl App {
         }
         self.toasts
             .retain(|toast| toast.created.elapsed() < Duration::from_secs(6));
+    }
+
+    /// ¿Hay algo que pueda cambiar en pantalla sin que el usuario toque nada?
+    /// Con `false` el bucle pasa a 10 Hz: sigue dibujando (los efectos en
+    /// pausa van a ese ritmo) pero no repinta 60 veces por segundo en balde.
+    pub fn animating(&self) -> bool {
+        self.now.playing
+            || self.now.loading
+            || self.intro < 1.0
+            || self.art_fade_active
+            || self.palette.animating()
+            || !self.lyrics_scroll.settled()
+            || self.pulse.value > 0.0
+            || (self.art_rotate && self.now.track.is_some())
+            || self.downloads.iter().any(DownloadInfo::active)
+            || self.search.loading
+            || self.album_page_loading
+    }
+
+    /// Ritmo del canvas a pantalla completa (fondo del visualizador, zen).
+    /// Regenerarlo a 60 Hz es lo que satura la GPU integrada: nadie nota el
+    /// glitch a 30 entre paneles translúcidos. En pausa, 10 (como el diseño).
+    pub fn full_effects_hz(&self) -> f32 {
+        let hz = (self.fx_fps * 0.5).clamp(4.0, 30.0);
+        if self.now.playing {
+            hz
+        } else {
+            hz.min(10.0)
+        }
+    }
+
+    /// Ritmo del tinte ambiental (opacidad muy baja, detrás de todo).
+    pub fn ambient_effects_hz(&self) -> f32 {
+        let hz = (self.fx_fps * 0.34).clamp(3.0, 20.0);
+        if self.now.playing {
+            hz
+        } else {
+            hz.min(8.0)
+        }
+    }
+
+    /// Ritmo de la franja: el de `fx_fps` mientras suena; 10 en pausa.
+    pub fn strip_effects_hz(&self) -> f32 {
+        if self.now.playing {
+            self.fx_fps
+        } else {
+            self.fx_fps.min(10.0)
+        }
+    }
+
+    /// Regenera el canvas del visualizador si toca o si cambió el tamaño.
+    /// Devuelve si se regeneró; si no, la capa anterior sigue valiendo.
+    pub fn pump_viz(&mut self, w: u16, h: u16, hz: f32, pal: &Palette) -> bool {
+        if w == 0 || h == 0 {
+            return false;
+        }
+        // Un cambio de layout necesita el canvas ya: no espera al reloj.
+        let size_changed = self.viz.output.w != w || self.viz.output.h != h;
+        self.viz_fx.set_hz(hz);
+        let dt = if size_changed {
+            Some(1.0 / hz.max(1.0))
+        } else {
+            self.viz_fx.due(Instant::now())
+        };
+        if let Some(dt) = dt {
+            self.viz.render(w, h, &self.audio, pal, dt);
+            return true;
+        }
+        false
+    }
+
+    /// Igual que `pump_viz`, para el canvas ambiental (media resolución).
+    pub fn pump_ambient(&mut self, w: u16, h: u16, hz: f32, pal: &Palette) -> bool {
+        if w == 0 || h == 0 {
+            return false;
+        }
+        let size_changed = self.ambient.output.w != w || self.ambient.output.h != h;
+        self.ambient_fx.set_hz(hz);
+        let dt = if size_changed {
+            Some(1.0 / hz.max(1.0))
+        } else {
+            self.ambient_fx.due(Instant::now())
+        };
+        if let Some(dt) = dt {
+            self.ambient.render(w, h, &self.audio, pal, dt);
+            return true;
+        }
+        false
     }
 
     fn poll_player(&mut self) {

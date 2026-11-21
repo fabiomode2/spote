@@ -89,9 +89,10 @@ gana, así que un botón pequeño debe añadirse **después** de su fila.
 
 ## Reglas
 
-- Un frame no bloquea: presupuesto ~8 ms a 120 fps. Nada de `reqwest`, `yt-dlp`
-  o MPRIS en el hilo de dibujo. Los contadores y listas de SQLite que se pintan
-  cada frame pasan por una caché corta en `Library`.
+- Un frame no bloquea: presupuesto ~16 ms a 60 fps (los efectos tienen su
+  propio reloj, más lento). Nada de `reqwest`, `yt-dlp` o MPRIS en el hilo de
+  dibujo. Los contadores y listas de SQLite que se pintan cada frame pasan por
+  una caché corta en `Library`.
 - El texto de usuario se recorta con `truncate_chars`, nunca con
   `String::truncate` (revienta con acentos y emoji).
 - La portada manda: la paleta sale del arte y los colores de la UI se derivan

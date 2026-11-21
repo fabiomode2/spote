@@ -150,7 +150,7 @@ OPCIONES:
   --art <default|pixel|braille|off>
   --viz <preset>                   clean, aurora, bloom, inferno (franja)
   --no-viz                         arranca sin visualizador
-  --fps <n>                        límite de frames (default 120)
+  --fps <n>                        límite de frames de la UI (20-60, default 60)
 
 DATOS:
   db      {}
@@ -617,7 +617,7 @@ fn run_tui(args: Args) -> Result<()> {
         cfg.ui.viz = viz;
     }
     if let Some(fps) = args.fps {
-        cfg.ui.fps = fps.clamp(20, 144);
+        cfg.ui.fps = fps.clamp(20, 60);
     }
     if ArtMode::from_str(&cfg.ui.art_mode).is_none() {
         cfg.ui.art_mode = "plain".into();
@@ -662,7 +662,10 @@ fn run_tui(args: Args) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let fps = cfg.ui.fps.clamp(20, 144) as f32;
+    // Por encima de 60 fps el terminal no muestra nada nuevo y el coste por
+    // frame (buffer completo + salida) se multiplica: una TUI de música no
+    // necesita más.
+    let fps = cfg.ui.fps.clamp(20, 60) as f32;
     let frame_budget = Duration::from_secs_f32(1.0 / fps);
     let mut last = Instant::now();
     let result = event_loop(&mut terminal, &mut app, frame_budget, &mut last);
@@ -672,6 +675,9 @@ fn run_tui(args: Args) -> Result<()> {
     }
     result
 }
+
+/// Ritmo del bucle cuando nada anima (efectos en pausa incluidos).
+const IDLE_POLL: Duration = Duration::from_millis(100);
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
@@ -692,6 +698,7 @@ fn event_loop(
             terminal.clear()?;
             hires.reset(&mut stdout);
         }
+        let animating = app.animating();
         terminal.draw(|frame| {
             let area = frame.area();
             let buffer = frame.buffer_mut();
@@ -702,8 +709,15 @@ fn event_loop(
             return Ok(());
         }
 
-        let remaining = budget.saturating_sub(last.elapsed());
-        if event::poll(remaining)? {
+        // Con animación, al ritmo de `fps`; parado, a 10 Hz (los efectos en
+        // pausa van a ese ritmo). Antes se repintaba a 60-120 Hz siempre,
+        // incluso con la UI congelada.
+        let wait = if animating {
+            budget.saturating_sub(last.elapsed())
+        } else {
+            IDLE_POLL
+        };
+        if event::poll(wait)? {
             loop {
                 match event::read()? {
                     Event::Key(key) => {

@@ -1274,6 +1274,7 @@ mod tests {
             let ctx = VizCtx {
                 audio: &audio,
                 palette: &palette,
+                lut: super::super::shade_lut(&palette),
                 w: 80,
                 h: 12,
                 dt: 1.0 / 60.0,
@@ -1299,6 +1300,7 @@ mod tests {
                 let ctx = VizCtx {
                     audio: &audio,
                     palette: &palette,
+                    lut: super::super::shade_lut(&palette),
                     w,
                     h,
                     dt: 0.016,

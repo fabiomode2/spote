@@ -232,10 +232,27 @@ impl Default for Params {
     }
 }
 
+/// Tamaño de la tabla de colores precalculada. `ramp_at` interpola en OKLab
+/// (cbrt + powf por canal); los efectos lo llaman por celda, así que se
+/// cuantiza a esta tabla una vez por frame. A 96 pasos no se ve el escalón.
+pub const SHADE_STEPS: usize = 96;
+
+/// Rampa de la paleta muestreada para el compositor. La usan el render y los
+/// tests de efectos; `ramp_at` interpola en OKLab y por celda es caro.
+pub fn shade_lut(palette: &Palette) -> [Rgb; SHADE_STEPS] {
+    let mut lut = [palette.bg; SHADE_STEPS];
+    for (index, slot) in lut.iter_mut().enumerate() {
+        *slot = palette.ramp_at(index as f32 / (SHADE_STEPS - 1) as f32);
+    }
+    lut
+}
+
 /// Contexto de un frame: audio, paleta, tamaño y tiempo.
 pub struct VizCtx<'a> {
     pub audio: &'a AudioFrame,
     pub palette: &'a Palette,
+    /// Rampa de la paleta ya muestreada (0..1 → color).
+    pub lut: [Rgb; SHADE_STEPS],
     pub w: u16,
     pub h: u16,
     pub dt: f32,
@@ -252,8 +269,11 @@ impl VizCtx<'_> {
     }
 
     /// Rama de la rampa de la paleta, con `t` 0..1.
+    #[inline]
     pub fn shade(&self, t: f32) -> Rgb {
-        self.palette.ramp_at(t.clamp(0.0, 1.0))
+        let t = t.clamp(0.0, 1.0);
+        let index = (t * (SHADE_STEPS - 1) as f32).round() as usize;
+        self.lut[index.min(SHADE_STEPS - 1)]
     }
 }
 
@@ -276,6 +296,9 @@ pub struct VizLayer {
     pub opacity: f32,
     pub mask: Mask,
     pub enabled: bool,
+    /// La máscara no cambia mientras no cambie el tamaño del canvas; su valor
+    /// por celda se guarda para no recalcular `powf` en cada frame.
+    mask_table: Option<(u16, u16, Vec<f32>)>,
 }
 
 impl VizLayer {
@@ -286,6 +309,28 @@ impl VizLayer {
             opacity,
             mask,
             enabled: true,
+            mask_table: None,
+        }
+    }
+
+    fn mask_alpha(&mut self, w: u16, h: u16) -> &[f32] {
+        let fresh = matches!(
+            &self.mask_table,
+            Some((cw, ch, _)) if *cw == w && *ch == h
+        );
+        if !fresh {
+            let mask = self.mask;
+            let mut table = Vec::with_capacity(w as usize * h as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    table.push(mask.alpha(x, y, w, h));
+                }
+            }
+            self.mask_table = Some((w, h, table));
+        }
+        match &self.mask_table {
+            Some((_, _, table)) => table.as_slice(),
+            None => &[],
         }
     }
 }
@@ -489,9 +534,11 @@ impl Viz {
         if self.paused || w == 0 || h == 0 {
             return;
         }
+        // La rampa solo depende de la paleta (no del tiempo ni del audio).
         let ctx = VizCtx {
             audio,
             palette,
+            lut: shade_lut(palette),
             w,
             h,
             dt,
@@ -503,30 +550,25 @@ impl Viz {
             }
             self.scratch.clear();
             layer.effect.frame(&mut self.scratch, &ctx);
+            let blend = layer.blend;
             let opacity = layer.opacity.clamp(0.0, 1.0);
-            for y in 0..h {
-                for x in 0..w {
-                    let idx = y as usize * w as usize + x as usize;
-                    let Some(src) = self.scratch.cells.get(idx).copied() else {
-                        continue;
-                    };
-                    if src.alpha <= 0.01 || src.ch == ' ' {
-                        continue;
-                    }
-                    let mask = layer.mask.alpha(x, y, w, h);
-                    let amount = src.alpha * opacity * mask;
-                    if amount <= 0.01 {
-                        continue;
-                    }
-                    let Some(dst) = self.output.cells.get_mut(idx) else {
-                        continue;
-                    };
-                    dst.fg = layer.blend.blend(dst.fg, src.fg, amount);
-                    if layer.blend != Blend::Multiply || dst.ch == ' ' {
-                        dst.ch = src.ch;
-                    }
-                    dst.alpha = dst.alpha.max(amount);
+            let mask = layer.mask_alpha(w, h);
+            for (idx, src) in self.scratch.cells.iter().copied().enumerate() {
+                if src.alpha <= 0.01 || src.ch == ' ' {
+                    continue;
                 }
+                let amount = src.alpha * opacity * mask.get(idx).copied().unwrap_or(1.0);
+                if amount <= 0.01 {
+                    continue;
+                }
+                let Some(dst) = self.output.cells.get_mut(idx) else {
+                    continue;
+                };
+                dst.fg = blend.blend(dst.fg, src.fg, amount);
+                if blend != Blend::Multiply || dst.ch == ' ' {
+                    dst.ch = src.ch;
+                }
+                dst.alpha = dst.alpha.max(amount);
             }
         }
     }

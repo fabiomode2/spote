@@ -5,6 +5,7 @@
 //! coloca encima con el tamaño exacto del hueco. No se reenvía cada frame.
 
 use std::io::Write;
+use std::sync::OnceLock;
 
 use ratatui::layout::Rect;
 
@@ -29,6 +30,9 @@ pub struct HiResState {
     /// dos veces en pantalla sin compartir id.
     thumbs: std::collections::HashMap<String, ThumbImage>,
     thumb_seq: u32,
+    /// Fingerprint de cada PNG de miniatura, calculado una vez. Recalcularlo
+    /// en cada frame era recorrer cientos de bytes por miniatura a 60 Hz.
+    thumb_prints: std::collections::HashMap<(String, usize), u64>,
 }
 
 impl HiResState {
@@ -43,20 +47,26 @@ impl HiResState {
             let _ = delete(out, image.id);
         }
         self.thumbs.clear();
+        self.thumb_prints.clear();
         self.sent_key.clear();
         self.sent_rect = None;
         let _ = out.flush();
     }
 }
 
+/// El soporte de imágenes del terminal no cambia en toda la sesión: se
+/// consultaba el entorno en cada frame.
 fn kitty_enabled() -> bool {
-    if std::env::var_os("SPOTE_NO_KITTY").is_some() {
-        return false;
-    }
-    std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var("TERM")
-            .map(|term| term.contains("kitty"))
-            .unwrap_or(false)
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        if std::env::var_os("SPOTE_NO_KITTY").is_some() {
+            return false;
+        }
+        std::env::var_os("KITTY_WINDOW_ID").is_some()
+            || std::env::var("TERM")
+                .map(|term| term.contains("kitty"))
+                .unwrap_or(false)
+    })
 }
 
 fn base64(data: &[u8]) -> String {
@@ -187,50 +197,66 @@ fn fingerprint(bytes: &[u8]) -> u64 {
     hash
 }
 
+impl HiResState {
+    /// El mismo PNG se reutiliza en todas las miniaturas de una pista; su
+    /// fingerprint también.
+    fn print_of(&mut self, image_key: &str, png: &[u8]) -> u64 {
+        let key = (image_key.to_string(), png.len());
+        if let Some(value) = self.thumb_prints.get(&key) {
+            return *value;
+        }
+        let value = fingerprint(png);
+        self.thumb_prints.insert(key, value);
+        value
+    }
+}
+
 /// Coloca las miniaturas como imágenes reales (Kitty). El half-block que
 /// dibuja ratatui queda debajo como respaldo para terminales sin soporte.
 fn render_thumbs(out: &mut impl Write, app: &App, state: &mut HiResState) {
-    use std::collections::HashMap;
-
     let show = app.overlay == Overlay::None && app.fullscreen != Fullscreen::Viz && !app.zen;
-    let mut visible: HashMap<String, (&str, Rect, u64, &Vec<u8>, (u32, u32))> = HashMap::new();
+    // Vec en vez de HashMap: son un puñado de miniaturas y así no se asigna
+    // una tabla nueva en cada frame.
+    let mut visible: Vec<(&str, &str, Rect, u64)> = Vec::with_capacity(app.hi_thumbs.len());
     if show {
         for (place_key, image_key, rect) in &app.hi_thumbs {
             if rect.width < 4 || rect.height < 2 {
                 continue;
             }
-            let Some((png, size)) = app.thumb_pngs.get(image_key) else {
+            let Some((png, _)) = app.thumb_pngs.get(image_key) else {
                 continue;
             };
-            visible.insert(
-                place_key.clone(),
-                (image_key.as_str(), *rect, fingerprint(png), png, *size),
-            );
+            let print = state.print_of(image_key, png);
+            visible.push((place_key.as_str(), image_key.as_str(), *rect, print));
         }
     }
 
     // Fuera de pantalla o con arte nuevo: se borra antes de recolocar.
     state.thumbs.retain(|key, image| {
-        let keep = visible
-            .get(key)
-            .is_some_and(|(image_key, rect, print, _, _)| {
-                *image_key == image.image_key && *rect == image.rect && *print == image.fingerprint
-            });
+        let keep = visible.iter().any(|(place, image_key, rect, print)| {
+            *place == key.as_str()
+                && *image_key == image.image_key
+                && *rect == image.rect
+                && *print == image.fingerprint
+        });
         if !keep {
             let _ = delete(out, image.id);
         }
         keep
     });
 
-    for (place_key, (image_key, rect, print, png, size)) in visible {
-        if state.thumbs.contains_key(&place_key) {
+    for (place_key, image_key, rect, print) in visible {
+        if state.thumbs.contains_key(place_key) {
             continue;
         }
+        let Some((png, size)) = app.thumb_pngs.get(image_key) else {
+            continue;
+        };
         state.thumb_seq = state.thumb_seq.wrapping_add(1);
         let id = std::process::id().wrapping_shl(12) ^ 0x4000_0000 ^ state.thumb_seq;
-        if transmit(out, id, png, size, rect).is_ok() {
+        if transmit(out, id, png, *size, rect).is_ok() {
             state.thumbs.insert(
-                place_key,
+                place_key.to_string(),
                 ThumbImage {
                     id,
                     image_key: image_key.to_string(),

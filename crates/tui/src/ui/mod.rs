@@ -71,6 +71,12 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     app.last_main = layout.main;
     app.hit.clear();
     let pal = *app.palette.current();
+    let zen = app.zen && app.show_viz;
+    // Con el visualizador a pantalla completa, el fondo ambiental queda detrás
+    // de una capa opaca: no se regenera (era el doble de trabajo por frame).
+    let viz_fullscreen = (app.viz_background || zen || app.fullscreen == crate::app::Fullscreen::Viz)
+        && app.show_viz
+        && layout.main.height > 2;
 
     background(
         buf,
@@ -85,14 +91,14 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     // opacidad detrás de los paneles. Los paneles son translúcidos, así que se
     // lee a través de ellos sin quitar legibilidad.
     let fx_opacity = app.cfg.ui.fx.ambient_opacity.min(40) as f32 / 100.0;
-    if fx_opacity > 0.001 {
+    if fx_opacity > 0.001 && !viz_fullscreen {
         match app.cfg.ui.fx.ambient.as_str() {
             "off" | "cover" | "lyrics" => {}
             _ => {
                 let w = (area.width / 2).max(12);
                 let h = (area.height / 2).max(6);
-                let audio = app.audio.clone();
-                app.ambient.render(w, h, &audio, &pal, app.last_dt);
+                let hz = app.ambient_effects_hz();
+                app.pump_ambient(w, h, hz, &pal);
                 blit_layer(
                     &app.ambient.output,
                     buf,
@@ -105,21 +111,17 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             }
         }
     }
-    let zen = app.zen && app.show_viz;
-    let viz_fullscreen = (app.viz_background || zen) && app.show_viz && layout.main.height > 2;
     if viz_fullscreen {
-        let audio = &app.audio;
-        // A resolución completa: en zen el efecto es el protagonista y el
-        // centro no puede verse más basto que la franja inferior.
-        app.viz.render(
+        let hz = app.full_effects_hz();
+        app.pump_viz(
             layout.full.width.max(20),
             layout.full.height.max(6),
-            audio,
+            hz,
             &pal,
-            app.last_dt,
         );
-        // En zen el visualizador es el protagonista: más opaco y sin paneles.
-        if zen {
+        // En zen (y en el visualizador a pantalla completa) el efecto es el
+        // protagonista: más opaco y sin paneles.
+        if zen || app.fullscreen == crate::app::Fullscreen::Viz {
             // Solo glifos sobre el fondo oscuro: antes el `bg_amount` alto
             // lavaba la pantalla con un velo blanquecino en presets claros.
             blit_viz(app, buf, layout.full, 0, 0.95, 0.0, VIZ_SCALE);
@@ -531,7 +533,14 @@ fn soft_background(_pal: &Palette) -> bool {
 /// solo mezcla el fondo, así el efecto se ve dentro del panel sin ensuciar la
 /// lectura.
 fn ambient_tint(app: &App, buf: &mut Buffer, rect: Rect, strength: f32) {
-    let layer = &app.ambient.output;
+    // Con el visualizador a pantalla completa no se regenera el canvas
+    // ambiental (quedaba debajo y no se veía): el tinte de los paneles sale
+    // del propio visualizador, que es el mismo movimiento.
+    let layer = if app.viz_background && app.viz.output.w > 0 {
+        &app.viz.output
+    } else {
+        &app.ambient.output
+    };
     if layer.w == 0 || layer.h == 0 || strength <= 0.0 {
         return;
     }

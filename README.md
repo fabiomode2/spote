@@ -66,6 +66,8 @@ Config, datos y caché en XDG (`~/.config/spote`, `~/.local/share/spote`,
 [ui]
 art_mode = "default"   # default | half | pixel | braille | off
 viz = "clean"          # clean | aurora | bloom | inferno
+fps = 60               # frames de la UI (20-60)
+fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
 
 [ui.fx]
 ambient = "cover"      # off | void | aurora | neural | glitch | lyrics | cover

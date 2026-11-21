@@ -1,5 +1,7 @@
 //! Animación: muelles, easings y transición de paleta entre canciones.
 
+use std::time::{Duration, Instant};
+
 use spote_core::artwork::Palette;
 
 /// Muelle crítico-amortiguado. Se actualiza con dt real, así que el feel no
@@ -30,7 +32,7 @@ impl Spring {
 
     pub fn update(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.05);
-        if (self.value - self.target).abs() < 0.0005 && self.velocity.abs() < 0.0005 {
+        if self.settled() {
             self.value = self.target;
             self.velocity = 0.0;
             return;
@@ -41,6 +43,11 @@ impl Spring {
         self.value += self.velocity * dt;
     }
 
+    /// Quieto en el destino (dentro del umbral visible): la UI puede dejar de
+    /// repintarse por este muelle.
+    pub fn settled(&self) -> bool {
+        (self.value - self.target).abs() < 0.0005 && self.velocity.abs() < 0.0005
+    }
 }
 
 pub fn ease_out_cubic(t: f32) -> f32 {
@@ -54,6 +61,43 @@ pub fn ease_in_out_cubic(t: f32) -> f32 {
         4.0 * t * t * t
     } else {
         1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+/// Reloj de un canvas de efectos. Separa el ritmo al que se regenera el
+/// visualizador del ritmo del bucle de la UI: si llega un frame antes de
+/// tiempo, se reutiliza el canvas y el terminal no recibe ni una celda.
+#[derive(Debug, Clone)]
+pub struct FxClock {
+    hz: f32,
+    last: Instant,
+}
+
+impl FxClock {
+    pub fn new(hz: f32) -> Self {
+        let hz = hz.clamp(1.0, 240.0);
+        Self {
+            hz,
+            last: Instant::now()
+                .checked_sub(Duration::from_secs_f32(1.0 / hz))
+                .unwrap_or_else(Instant::now),
+        }
+    }
+
+    pub fn set_hz(&mut self, hz: f32) {
+        self.hz = hz.clamp(1.0, 240.0);
+    }
+
+    /// `Some(dt)` cuando toca regenerar (dt real acumulado, acotado), `None`
+    /// cuando el canvas anterior sigue valiendo.
+    pub fn due(&mut self, now: Instant) -> Option<f32> {
+        let interval = 1.0 / self.hz;
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f32();
+        if elapsed + 1e-4 < interval {
+            return None;
+        }
+        self.last = now;
+        Some(elapsed.clamp(0.0, 0.1))
     }
 }
 
@@ -101,6 +145,11 @@ impl PaletteRuntime {
         let eased = ease_in_out_cubic(self.progress);
         self.current = self.from.lerp(&self.to, eased);
         true
+    }
+
+    /// El degradado sigue en marcha y cambia la paleta cada frame.
+    pub fn animating(&self) -> bool {
+        self.progress < 1.0
     }
 }
 
@@ -211,5 +260,44 @@ mod tests {
             pulse.update(1.0 / 60.0);
         }
         assert!(pulse.value < 0.05);
+    }
+
+    #[test]
+    fn fx_clock_respects_its_rate() {
+        let mut clock = FxClock::new(30.0);
+        let start = Instant::now();
+        // El primer frame ya vence: el canvas nunca arranca vacío.
+        assert!(clock.due(start).is_some());
+        assert!(clock.due(start + Duration::from_millis(5)).is_none());
+        assert!(clock.due(start + Duration::from_millis(34)).is_some());
+        assert!(clock.due(start + Duration::from_millis(50)).is_none());
+        // Un dt enorme se acota para que la animación no dé un salto.
+        let dt = clock.due(start + Duration::from_secs(2)).unwrap();
+        assert!(dt <= 0.1);
+    }
+
+    #[test]
+    fn palette_reports_when_it_finishes_fading() {
+        let a = Palette::dark();
+        let b = Palette::from_accents((240, 80, 40), (40, 200, 240));
+        let mut runtime = PaletteRuntime::new(a, 100);
+        assert!(!runtime.animating());
+        runtime.go(b);
+        assert!(runtime.animating());
+        for _ in 0..20 {
+            runtime.update(1.0 / 60.0);
+        }
+        assert!(!runtime.animating());
+    }
+
+    #[test]
+    fn spring_reports_when_it_settles() {
+        let mut spring = Spring::new(0.0);
+        spring.set_target(4.0);
+        assert!(!spring.settled());
+        for _ in 0..240 {
+            spring.update(1.0 / 60.0);
+        }
+        assert!(spring.settled());
     }
 }

@@ -55,8 +55,10 @@
   artistas/álbumes y nombres clicables; fondo opaco y legible.
 - **Discord**: Rich Presence con Application ID configurable, carátula,
   botón de Spotify y tiempo de reproducción.
-- **Rendimiento**: 120 fps por defecto, búsquedas/cachés de SQLite para los
-  contadores que se pintan cada frame y relleno de buffers en una pasada.
+- **Rendimiento**: 60 fps de UI como máximo y efectos a su propio ritmo
+  (`fx_fps`, 30 a pantalla completa); 10 fps en pausa. Búsquedas/cachés de
+  SQLite para los contadores que se pintan cada frame y relleno de buffers en
+  una pasada.
 
 ## Pendiente / limitaciones
 
