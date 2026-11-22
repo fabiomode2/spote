@@ -2,6 +2,8 @@
 
 mod app;
 mod fetch;
+mod mini;
+mod system_media;
 mod hires;
 mod social;
 mod spotify_jobs;
@@ -62,7 +64,7 @@ impl Args {
         let mut iter = std::env::args().skip(1).peekable();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
-                "--follow-spotify" | "--spotify" => args.follow = true,
+                "--follow-spotify" | "--follow-system" | "--spotify" => args.follow = true,
                 "--no-viz" => args.no_viz = true,
                 "--download" => args.download = true,
                 "--dry-run" => args.dry_run = true,
@@ -108,6 +110,7 @@ fn run() -> Result<()> {
         Some("record") => return run_record(&args),
         Some("harvest") => return run_harvest(&args),
         Some("discord") => return run_discord(&args),
+        Some("mini") => return run_mini(),
         Some("doctor") => return run_doctor(),
         Some("version") => {
             println!("spote {}", env!("CARGO_PKG_VERSION"));
@@ -127,6 +130,24 @@ fn run() -> Result<()> {
     run_tui(args)
 }
 
+fn run_mini() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let path = exe
+        .parent()
+        .map(|dir| dir.join("spote-mini"))
+        .filter(|path| path.is_file());
+    let mut command = if let Some(path) = path {
+        std::process::Command::new(path)
+    } else {
+        std::process::Command::new("spote-mini")
+    };
+    let status = command.status().context("no pude abrir spote-mini")?;
+    if !status.success() {
+        anyhow::bail!("spote-mini terminó con {status}");
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "spote {} — reproductor de música con TUI
@@ -141,12 +162,14 @@ USO:
   spote harvest [<url>]            saca el audio descifrado de la memoria del
          [--step ms]               cliente saltando por la pista (2-4× más rápido)
   spote discord --id <app-id>      prueba el Rich Presence y guarda el ID
+  spote mini                       abre el mini reproductor de escritorio
          [--save] [--seconds N]
   spote doctor                     comprueba dependencias y rutas
   spote version | help
 
 OPCIONES:
-  --follow-spotify                 acompaña al cliente oficial vía MPRIS
+  --follow-system                  sigue el reproductor MPRIS del sistema
+  --follow-spotify                 alias de --follow-system
   --art <default|pixel|braille|off>
   --viz <preset>                   clean, aurora, bloom, inferno, crt,
                                    lcd, rack, braille, stage (franja)

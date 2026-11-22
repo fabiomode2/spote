@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod mini;
+
 /// Unix timestamp en milisegundos.
 pub type Ts = i64;
 

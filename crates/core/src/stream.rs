@@ -478,15 +478,15 @@ fn query_variants(artist: &str, title: &str) -> Vec<String> {
     out
 }
 
-/// Busca en YouTube probando las variantes y elige el mejor candidato. Si una
-/// variante da un match fuerte se corta ahí; si no, se acumulan resultados de
-/// todas y se decide al final. Un resultado dudoso no se acepta.
 /// Busca un vídeo para una pista y devuelve su ID. La usa el `Downloader`
 /// para no mantener un segundo matcher más laxo que el de reproducción.
 pub fn find_video_id(artist: &str, title: &str, duration_ms: u64) -> Result<String> {
     search(artist, title, duration_ms).map(|candidate| candidate.id)
 }
 
+/// Busca en YouTube probando las variantes y elige el mejor candidato. Si una
+/// variante da un match fuerte se corta ahí; si no, se acumulan resultados de
+/// todas y se decide al final. Un resultado dudoso no se acepta.
 fn search(artist: &str, title: &str, duration_ms: u64) -> Result<SearchCandidate> {
     let queries = query_variants(artist, title);
     let Some(first_query) = queries.first() else {
@@ -788,18 +788,23 @@ fn title_match_score(wanted: &str, got: &str) -> Option<(i32, bool)> {
         return Some((60, true));
     }
     // Las contenciones exigen un mínimo de tres caracteres para que un
-    // resultado titulado "A" o "The" no cuele como el tema buscado.
+    // resultado titulado "A" o "The" no cuele como el tema buscado. Una
+    // contención larga ("alma en pena" dentro de "como alma en pena") es
+    // casi un match exacto: los visualizers suelen añadir una o dos palabras.
     let wanted_len = wanted.chars().count();
     let got_len = got.chars().count();
-    if (wanted_len >= 3 && got.contains(wanted)) || (got_len >= 3 && wanted.contains(got)) {
-        Some((28, false))
+    if wanted_len >= 3 && got.contains(wanted) {
+        Some((if wanted_len >= 6 { 45 } else { 28 }, false))
+    } else if got_len >= 3 && wanted.contains(got) {
+        Some((if got_len >= 6 { 38 } else { 28 }, false))
     } else {
         None
     }
 }
 
-/// Puntos por duración. `None` rechaza diferencias mayores de 8 s cuando
-/// ambas duraciones se conocen. Sin duración se penaliza, pero no se descarta.
+/// Puntos por duración. Las diferencias cortas puntúan; las de videoclip o
+/// visualizer no descartan si título y artista ya son sólidos. Solo se rechaza
+/// una diferencia mayor de dos minutos. Sin duración se penaliza, no se descarta.
 fn duration_score(wanted_ms: u64, got_ms: u64) -> Option<i32> {
     if wanted_ms == 0 || got_ms == 0 {
         return Some(-8);
@@ -808,7 +813,14 @@ fn duration_score(wanted_ms: u64, got_ms: u64) -> Option<i32> {
     if diff <= STRICT_DURATION_TOLERANCE_MS {
         Some(45)
     } else if diff <= LOOSE_DURATION_TOLERANCE_MS {
-        Some(18)
+        Some(28)
+    } else if diff <= 30_000 {
+        // Un videoclip puede añadir una intro o un outro corto.
+        Some(12)
+    } else if diff <= 120_000 {
+        // Visualizers y vídeos con intro larga: el título y el artista ya
+        // han pasado el filtro, la duración solo desempata.
+        Some(0)
     } else {
         None
     }
@@ -1960,11 +1972,11 @@ mod tests {
         );
         assert_eq!(
             title_match_score("get lucky", "daft punk get lucky"),
-            Some((28, false))
+            Some((45, false))
         );
         assert_eq!(
             title_match_score("get lucky", "get lucky remix"),
-            Some((28, false))
+            Some((45, false))
         );
         assert_eq!(title_match_score("get lucky", "one more time"), None);
         assert_eq!(title_match_score("go", "a"), None);
@@ -1977,11 +1989,35 @@ mod tests {
     fn duration_tolerances_are_strict_then_lax() {
         assert_eq!(duration_score(249_000, 250_000), Some(45));
         assert_eq!(duration_score(249_000, 251_000), Some(45));
-        assert_eq!(duration_score(249_000, 252_000), Some(18));
-        assert_eq!(duration_score(249_000, 257_000), Some(18));
-        assert_eq!(duration_score(249_000, 258_000), None);
+        assert_eq!(duration_score(249_000, 257_000), Some(28));
+        assert_eq!(duration_score(249_000, 258_000), Some(12));
+        assert_eq!(duration_score(249_000, 279_000), Some(12));
+        assert_eq!(duration_score(249_000, 296_000), Some(0));
+        assert_eq!(duration_score(249_000, 370_000), None);
         assert_eq!(duration_score(0, 249_000), Some(-8));
         assert_eq!(duration_score(249_000, 0), Some(-8));
+    }
+
+    #[test]
+    fn visualizer_with_long_intro_still_matches() {
+        // Caso real: Deezer da 118 s y el visualizer de YouTube dura 165 s.
+        let candidate = candidate(
+            "jExWbhJqRU0",
+            "superreservao - como alma en pena (visualizer)",
+            "superreservao ",
+            165_000,
+        );
+        let score = score_candidate(&candidate, "Superreservao", "Alma en pena", 118_000)
+            .expect("el visualizer debe puntuar");
+        assert!(score >= MIN_MATCH_SCORE, "score={score}");
+    }
+
+    #[test]
+    #[ignore = "diagnóstico manual con red"]
+    fn live_finds_superreservao_visualizer() {
+        let id = find_video_id("Superreservao", "Alma en pena", 118_000)
+            .expect("debe encontrar el visualizer");
+        assert_eq!(id, "jExWbhJqRU0");
     }
 
     #[test]
@@ -2100,15 +2136,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_candidates_more_than_eight_seconds_off() {
-        let candidates = vec![candidate(
+    fn accepts_music_video_length_but_rejects_full_album() {
+        // 11 s: intro/outro de videoclip, con título y artista exactos.
+        let video = vec![candidate(
             "aaaaaaaaaaa",
             "Get Lucky",
             "Daft Punk - Topic",
             260_000,
         )];
+        assert!(best_candidate(&video, "Daft Punk", "Get Lucky", 249_000).is_some());
+
+        // 150 s: ya es otra cosa (álbum completo, directo largo...).
+        let album = vec![candidate(
+            "bbbbbbbbbbb",
+            "Get Lucky",
+            "Daft Punk - Topic",
+            399_000,
+        )];
         assert_eq!(
-            best_candidate(&candidates, "Daft Punk", "Get Lucky", 249_000),
+            best_candidate(&album, "Daft Punk", "Get Lucky", 249_000),
             None
         );
     }

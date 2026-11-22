@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio_fx::AudioCfg;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
@@ -15,6 +17,8 @@ pub struct Config {
     pub download: DownloadCfg,
     pub lyrics: LyricsCfg,
     pub discord: DiscordCfg,
+    /// EQ, preamp, normalizador y limitador aplicados en caliente a mpv.
+    pub audio: AudioCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,6 +466,8 @@ fn expand(path: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    use crate::audio_fx::NormalizerMode;
+
     #[test]
     fn defaults_are_usable() {
         let cfg = Config::default();
@@ -485,5 +491,32 @@ mod tests {
         assert_eq!(cfg.ui.fps, 30);
         assert_eq!(cfg.ui.art_mode, "plain");
         assert_eq!(cfg.player.volume, 0.8);
+    }
+
+    #[test]
+    fn old_config_without_audio_section_uses_audio_defaults() {
+        let cfg: Config = toml::from_str("[ui]\nfps = 30\n[player]\nvolume = 0.4\n").unwrap();
+        assert_eq!(cfg.audio, AudioCfg::default());
+        assert!(cfg.audio.enabled);
+        assert!(cfg.audio.eq_enabled);
+        assert_eq!(cfg.audio.normalizer, NormalizerMode::Off);
+    }
+
+    #[test]
+    fn audio_section_roundtrips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.audio.enabled = true;
+        cfg.audio.preamp_db = -2.5;
+        cfg.audio.bands = [1.0, 0.0, -1.5, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, -4.0];
+        cfg.audio.normalizer = NormalizerMode::Dynamic;
+        cfg.audio.normalizer_strength = 0.75;
+        cfg.audio.limiter = true;
+
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("[audio]"));
+        assert!(text.contains("normalizer = \"dynamic\""));
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.audio, cfg.audio);
+        assert_eq!(back.ui.art_mode, cfg.ui.art_mode);
     }
 }

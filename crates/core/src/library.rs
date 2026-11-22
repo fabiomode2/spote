@@ -667,6 +667,7 @@ impl Library {
             .ok()
             .flatten()
             .and_then(|row| row.path)
+            .filter(|path| path.exists())
     }
 
     /// Búsqueda full-text. Si la query es basura para FTS5, no explota.
@@ -681,8 +682,13 @@ impl Library {
             })
             .filter(|token| !token.is_empty())
             .collect();
-        if tokens.is_empty() {
+        if query.trim().is_empty() {
             return self.recent(limit);
+        }
+        if tokens.is_empty() {
+            // Una consulta solo de puntuación no debe devolver “recientes”:
+            // el usuario está filtrando, no pidiendo la lista por defecto.
+            return Ok(Vec::new());
         }
         let fts_query = tokens
             .iter()
@@ -1434,7 +1440,7 @@ mod tests {
         assert_eq!(lib.search("505", 10).unwrap().len(), 1);
         assert_eq!(lib.search("radiohead", 10).unwrap().len(), 1);
         // Sin tokens útiles se comporta como "recientes", no como error.
-        assert_eq!(lib.search("!!!", 10).unwrap().len(), 3);
+        assert_eq!(lib.search("!!!", 10).unwrap().len(), 0);
         assert_eq!(lib.search("", 10).unwrap().len(), 3);
     }
 

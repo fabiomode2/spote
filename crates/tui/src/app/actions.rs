@@ -8,14 +8,20 @@ impl App {
                 self.hover = self.hit.hit(mouse.column, mouse.row).cloned();
             }
             MouseEventKind::ScrollDown => {
-                if self.hover == Some(Action::VolumeTrack) {
+                if let Some(Action::AudioBand(index)) = self.hover {
+                    self.audio_selected = index;
+                    self.adjust_audio(-1);
+                } else if self.hover == Some(Action::VolumeTrack) {
                     self.set_volume(self.now.volume - 0.03);
                 } else {
                     self.move_selection(1);
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.hover == Some(Action::VolumeTrack) {
+                if let Some(Action::AudioBand(index)) = self.hover {
+                    self.audio_selected = index;
+                    self.adjust_audio(1);
+                } else if self.hover == Some(Action::VolumeTrack) {
                     self.set_volume(self.now.volume + 0.03);
                 } else {
                     self.move_selection(-1);
@@ -295,6 +301,13 @@ impl App {
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
                 self.cfg.save().ok();
             }
+            Action::AudioBand(_)
+            | Action::AudioPreamp
+            | Action::AudioNormalizer
+            | Action::AudioStrength
+            | Action::AudioLimiter
+            | Action::AudioPreset(_)
+            | Action::AudioToggle => self.handle_audio_action(action),
             Action::VizPreset(index) => {
                 self.show_viz = true;
                 self.viz.set_preset(index);

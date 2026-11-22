@@ -3,6 +3,13 @@
 //! No se reimplementa audio. mpv da decodificación, gapless, pitch correction
 //! en los cambios de velocidad y una posición fiable. Nosotros solo mandamos
 //! comandos y escuchamos eventos.
+//!
+//! Los filtros de audio (EQ, preamp, normalizador, limitador) se aplican en
+//! caliente escribiendo la propiedad `af` con el string que construye
+//! [`crate::audio_fx::AudioCfg::filter_chain`]. mpv reconstruye el grafo sin
+//! reiniciar ni recargar la pista; `af` con string vacío lo deja limpio. La
+//! opción persiste entre cargas, así que la cadena sigue activa al cambiar de
+//! tema.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -40,6 +47,7 @@ enum Cmd {
     Volume(f32),
     Speed(f64),
     LoopFile(bool),
+    AudioFilters(Option<String>),
     Stop,
     Quit,
 }
@@ -176,6 +184,19 @@ impl Player {
         let _ = self.cmd.send(Cmd::LoopFile(enabled));
     }
 
+    /// Reemplaza la cadena de filtros de audio en caliente.
+    ///
+    /// `Some(chain)` aplica el grafo al instante (sin reiniciar mpv ni recargar
+    /// la pista); `None` o una cadena vacía lo limpian. La cadena sobrevive a
+    /// los cambios de fichero porque `af` es una opción del reproductor.
+    pub fn set_audio_filters(&self, chain: Option<&str>) {
+        let chain = chain
+            .map(str::trim)
+            .filter(|chain| !chain.is_empty())
+            .map(str::to_string);
+        let _ = self.cmd.send(Cmd::AudioFilters(chain));
+    }
+
     pub fn stop(&self) {
         let _ = self.cmd.send(Cmd::Stop);
     }
@@ -310,6 +331,7 @@ async fn run(
                         let value = if enabled { "inf" } else { "no" };
                         json!({"command": ["set_property", "loop-file", value]})
                     }
+                    Cmd::AudioFilters(chain) => af_command(chain.as_deref()),
                     Cmd::Stop => json!({"command": ["stop"]}),
                 };
                 if write_half
@@ -386,6 +408,21 @@ fn handle_line(line: &str, events: &broadcast::Sender<PlayerEvent>) {
     }
 }
 
+/// Comando IPC que reemplaza la cadena de filtros de audio.
+///
+/// `af` es una propiedad de tipo lista que acepta su representación en string:
+/// mpv la parsea y reconstruye el grafo al momento. Un string vacío limpia
+/// todos los filtros. Verificado contra mpv 0.40.0: `set_property af "..."`
+/// responde `success`, el filtro aparece en `get_property af` y `af ""` deja
+/// la lista vacía.
+pub fn af_command(chain: Option<&str>) -> Value {
+    let chain = chain
+        .map(str::trim)
+        .filter(|chain| !chain.is_empty())
+        .unwrap_or("");
+    json!({"command": ["set_property", "af", chain]})
+}
+
 /// Ruta del socket IPC, única por proceso.
 pub fn socket_path() -> PathBuf {
     let pid = std::process::id();
@@ -431,6 +468,26 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), PlayerEvent::Eof);
         handle_line("basura", &tx);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn af_command_sets_chain_and_clears_with_empty() {
+        assert_eq!(
+            af_command(Some("equalizer=f=1000:t=q:w=1.0:g=6")),
+            json!({"command": ["set_property", "af", "equalizer=f=1000:t=q:w=1.0:g=6"]})
+        );
+        assert_eq!(
+            af_command(None),
+            json!({"command": ["set_property", "af", ""]})
+        );
+        assert_eq!(
+            af_command(Some("   ")),
+            json!({"command": ["set_property", "af", ""]})
+        );
+        assert_eq!(
+            af_command(Some("  alimiter=limit=0.95  ")),
+            json!({"command": ["set_property", "af", "alimiter=limit=0.95"]})
+        );
     }
 
     #[tokio::test]

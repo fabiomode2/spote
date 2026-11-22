@@ -17,6 +17,7 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::Audio => self.handle_audio_key(key),
             Overlay::Trim => match key.code {
                 KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
                 KeyCode::Char('a') | KeyCode::Home => self.trim_start_here(),

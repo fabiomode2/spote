@@ -565,7 +565,7 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     put(buf, input_rect.x + 1, input_rect.y, "/", color(pal.primary), None);
     let empty = app.search.query.is_empty();
     let query = if empty {
-        "artistas, álbumes y canciones…".to_string()
+        "canciones, artistas y álbumes…".to_string()
     } else {
         app.search.query.clone()
     };
@@ -581,7 +581,7 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            "buscando artistas, álbumes y canciones…",
+            "buscando canciones, artistas y álbumes…",
             Style::new().fg(color(pal.warn)),
             Alignment::Left,
         );
@@ -597,13 +597,21 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         y += 1;
     }
 
-    // Lista mixta: artistas, álbumes y canciones, como Spotify.
+    // Lista mixta: primero canciones, luego artistas y álbumes. El catálogo
+    // de Deezer devuelve muchos álbumes y antes empujaban las pistas fuera de
+    // la pantalla, que es justo lo que el usuario venía a buscar.
     #[derive(Clone, Copy)]
     enum Row {
         Section(&'static str),
         Entry(crate::app::SearchEntry),
     }
     let mut rows: Vec<Row> = Vec::new();
+    if !app.search.results.is_empty() {
+        rows.push(Row::Section("CANCIONES"));
+        for index in 0..app.search.results.len() {
+            rows.push(Row::Entry(crate::app::SearchEntry::Track(index)));
+        }
+    }
     if !app.search.artists.is_empty() {
         rows.push(Row::Section("ARTISTAS"));
         for index in 0..app.search.artists.len() {
@@ -614,12 +622,6 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         rows.push(Row::Section("ÁLBUMES"));
         for index in 0..app.search.albums.len() {
             rows.push(Row::Entry(crate::app::SearchEntry::Album(index)));
-        }
-    }
-    if !app.search.results.is_empty() {
-        rows.push(Row::Section("CANCIONES"));
-        for index in 0..app.search.results.len() {
-            rows.push(Row::Entry(crate::app::SearchEntry::Track(index)));
         }
     }
     if rows.is_empty() {
@@ -800,10 +802,9 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
 fn entry_flat(app: &App, entry: crate::app::SearchEntry) -> usize {
     match entry {
         crate::app::SearchEntry::Artist(i) => i,
-        crate::app::SearchEntry::Album(i) => app.search.artists.len() + i,
-        crate::app::SearchEntry::Track(i) => {
-            app.search.artists.len() + app.search.albums.len() + i
-        }
+        crate::app::SearchEntry::Track(i) => i,
+        crate::app::SearchEntry::Artist(i) => app.search.results.len() + i,
+        crate::app::SearchEntry::Album(i) => app.search.results.len() + app.search.artists.len() + i,
     }
 }
 
@@ -1129,7 +1130,7 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         let mode = if app.room.is_some() {
             "sala"
         } else if app.follow_spotify {
-            "spotify"
+            "sistema"
         } else if app.social.is_some() {
             "servidor"
         } else {

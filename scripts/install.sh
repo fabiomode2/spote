@@ -83,7 +83,7 @@ for tool in mpv ffmpeg yt-dlp; do
 done
 
 say "compilando spote (release)"
-(cd "$ROOT" && cargo build --release --locked -p spote-tui -p spote-server)
+(cd "$ROOT" && cargo build --release --locked -p spote-tui -p spote-server -p spote-mini)
 
 install -d "$BIN_DIR"
 say "instalando binarios en $BIN_DIR"
@@ -91,6 +91,10 @@ say "instalando binarios en $BIN_DIR"
 # install directo puede fallar con «text file busy».
 install -m 755 "$ROOT/target/release/spote" "$BIN_DIR/.spote.new"
 mv -f "$BIN_DIR/.spote.new" "$BIN_DIR/spote"
+if [[ -x "$ROOT/target/release/spote-mini" ]]; then
+  install -m 755 "$ROOT/target/release/spote-mini" "$BIN_DIR/.spote-mini.new"
+  mv -f "$BIN_DIR/.spote-mini.new" "$BIN_DIR/spote-mini"
+fi
 if [[ -x "$ROOT/target/release/spoted" ]]; then
   install -m 755 "$ROOT/target/release/spoted" "$BIN_DIR/.spoted.new"
   mv -f "$BIN_DIR/.spoted.new" "$BIN_DIR/spoted"

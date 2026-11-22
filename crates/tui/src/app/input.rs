@@ -212,6 +212,8 @@ impl App {
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('e') if !upper => self.overlay = Overlay::Effects,
+            KeyCode::Char('A') => self.open_audio(),
+            KeyCode::Char('w') if !upper => self.open_mini(),
             KeyCode::Char('E') => self.overlay = Overlay::Layout,
             KeyCode::Char('g') if !upper => self.open_artist(),
             KeyCode::Delete => {

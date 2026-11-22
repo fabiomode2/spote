@@ -40,6 +40,15 @@ la propia TUI.
 - **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
   locales. `z` alterna tarjetas con portada y lista compacta. `/` en la
   biblioteca abre un filtro inline por título, artista o álbum.
+- **Media del sistema**: MPRIS bidireccional. spote aparece como reproductor
+  en el escritorio (teclas multimedia, OSD, widgets) y `t` sigue lo que suene
+  en Spotify, SoundCloud, VLC o cualquier otro reproductor MPRIS.
+- **Mini reproductor**: `w` abre `spote-mini`, una ventana pequeña siempre
+  encima con portada, espectro, progreso y controles. También se lanza con
+  `spote mini`.
+- **Audio ajustable**: `A` abre el ecualizador de 10 bandas, preamp,
+  normalizador (`dynaudnorm`/`loudnorm`) y limitador. Todo se aplica en caliente
+  y se guarda en `config.toml`.
 - **Salas**: `spoted` añade presencia, chat y cola compartida.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.
@@ -56,7 +65,8 @@ la propia TUI.
 | `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
 | `E` | editor de diseño | `Esc` | limpiar búsqueda |
-| `?` | ayuda | | |
+| `A` | ecualizador / dinámica | `w` | mini reproductor |
+| `t` | seguir el sistema (MPRIS) | `?` | ayuda |
 
 ## Cómo funciona
 
@@ -86,6 +96,15 @@ stream_cache = true    # guarda la copia local al terminar
 [playback]
 repeat = "off"         # off | all | one
 shuffle = false
+
+[audio]
+enabled = true
+eq_enabled = true
+bands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # dB, 31 Hz … 16 kHz
+preamp_db = 0
+normalizer = "off"     # off | dynamic | loudnorm
+normalizer_strength = 0.5
+limiter = true
 
 [lyrics]
 asr = true

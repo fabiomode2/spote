@@ -10,7 +10,6 @@ use std::sync::Arc;
 use spote_core::artwork::{decode_image, render_cover, ArtMode, CoverArt, Palette};
 use spote_core::config;
 use spote_core::lyrics::{LyricsDoc, LyricsService};
-use spote_core::spotify::{SpotifyState, SpotifyWatcher};
 use spote_core::spotify_api;
 use spote_core::util;
 use spote_protocol::TrackRef;
@@ -491,47 +490,6 @@ pub fn doc_to_lrc(doc: &LyricsDoc) -> String {
 // ---------------------------------------------------------------------------
 // Spotify (MPRIS)
 // ---------------------------------------------------------------------------
-
-pub struct SpotifyWorker {
-    states: Receiver<SpotifyState>,
-    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl SpotifyWorker {
-    pub fn start() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let flag = std::sync::Arc::clone(&active);
-        std::thread::Builder::new()
-            .name("spote-spotify".into())
-            .spawn(move || {
-                let mut watcher = SpotifyWatcher::new();
-                while flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Some(state) = watcher.poll() {
-                        // Se manda SIEMPRE, también cuando solo cambia la
-                        // posición: de esto depende la letra sincronizada.
-                        if tx.send(state).is_err() {
-                            return;
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                }
-            })
-            .ok();
-        Self { states: rx, active }
-    }
-
-    pub fn try_recv(&self) -> Option<SpotifyState> {
-        self.states.try_recv().ok()
-    }
-}
-
-impl Drop for SpotifyWorker {
-    fn drop(&mut self) {
-        self.active
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -5,6 +5,7 @@
 
 pub mod artwork;
 pub mod audio;
+pub mod audio_fx;
 pub mod audio_map;
 pub mod catalog;
 pub mod config;
@@ -14,12 +15,14 @@ pub mod harvest;
 pub mod library;
 pub mod lyrics;
 pub mod mpris;
+pub mod mpris_server;
 pub mod playback;
 pub mod player;
 pub mod record;
 pub mod spotify;
 pub mod stream;
 pub mod spotify_api;
+pub mod system_media;
 pub mod util;
 
 pub use spote_protocol as protocol;

@@ -3,6 +3,37 @@
 use super::*;
 
 impl App {
+    /// Detiene y limpia la reproducción si la pista borrada es la actual.
+    fn stop_current_if_key(&mut self, key: &str) {
+        if self.now.track.as_ref().map(|track| track.key.as_str()) != Some(key) {
+            return;
+        }
+        if let Some(player) = &self.player {
+            player.stop();
+        }
+        self.streaming = false;
+        self.pending_stream = None;
+        self.pending_play = None;
+        self.now.track = None;
+        self.now.path = None;
+        self.now.position_ms = 0;
+        self.now.duration_ms = 0;
+        self.now.playing = false;
+        self.now.loading = false;
+        self.now.ended = false;
+        self.lyrics = None;
+        self.lyrics_key.clear();
+        self.lyrics_status.clear();
+        self.art = None;
+        self.art_key.clear();
+        self.spectrum.stop();
+        self.play_context.retain(|entry| entry.track.key != key);
+        self.queue.retain(|entry| entry.track.key != key);
+        if self.context_index >= self.play_context.len() {
+            self.context_index = self.play_context.len().saturating_sub(1);
+        }
+    }
+
     pub(super) fn open_context(&mut self, action: &Action) {
         let menu = match action {
             Action::SelectRow(index) => self
@@ -227,12 +258,8 @@ impl App {
             ContextAction::RemoveLibrary => {
                 match self.lib.delete_track(&menu.key) {
                     Ok(_) => {
+                        self.stop_current_if_key(&menu.key);
                         self.toast("pista quitada de la biblioteca", ToastKind::Ok);
-                        if self.now.track.as_ref().is_some_and(|t| t.key == menu.key) {
-                            self.now.track = None;
-                            self.now.path = None;
-                            self.art = None;
-                        }
                         self.refresh_library();
                     }
                     Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
@@ -245,6 +272,7 @@ impl App {
                         Ok(()) => {
                             let cover = path.with_extension("jpg");
                             let _ = std::fs::remove_file(cover);
+                            self.stop_current_if_key(&menu.key);
                             self.lib.delete_track(&menu.key).ok();
                             self.toast("audio borrado del disco", ToastKind::Ok);
                             self.refresh_library();

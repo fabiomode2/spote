@@ -12,6 +12,7 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::None => {}
         Overlay::Help => draw_help(app, buf, layout, pal),
         Overlay::Effects => draw_effects(app, buf, layout, pal),
+        Overlay::Audio => draw_audio(app, buf, layout, pal),
         Overlay::PlaylistForm => draw_playlist_form(app, buf, layout, pal),
         Overlay::ImportPlaylist => draw_import_playlist(app, buf, layout, pal),
         Overlay::ConfirmDeletePlaylist { name, .. } => {
@@ -395,7 +396,7 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     if y < inner.y + inner.height {
         let keys: Vec<&str> = crate::viz::EffectKind::ALL.iter().map(|kind| kind.key()).collect();
         let mut available = format!("disponibles: {}", keys.join(" · "));
-        available.truncate(inner.width.saturating_sub(2) as usize);
+        truncate_chars(&mut available, inner.width.saturating_sub(2) as usize);
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),

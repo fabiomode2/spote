@@ -38,6 +38,13 @@ impl App {
             SettingRow::ProgressInViz => onoff(self.progress_in_viz),
             SettingRow::BarWidth => format!("{}%", self.bar_width_pct),
             SettingRow::ButtonPad => format!("{}", self.button_pad),
+            SettingRow::Audio => {
+                if self.cfg.audio.enabled {
+                    "abrir · on".to_string()
+                } else {
+                    "abrir · off".to_string()
+                }
+            }
             SettingRow::Spotify => onoff(self.follow_spotify),
             SettingRow::Save => "enter".to_string(),
         }
@@ -169,6 +176,7 @@ impl App {
                 self.progress_in_viz = !self.progress_in_viz;
                 self.cfg.ui.progress_in_viz = self.progress_in_viz;
             }
+            SettingRow::Audio => self.open_audio(),
             SettingRow::Spotify => self.toggle_spotify(),
             SettingRow::Save => match self.cfg.save() {
                 Ok(()) => self.toast("ajustes guardados", ToastKind::Ok),
