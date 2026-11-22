@@ -162,8 +162,8 @@ USO:
   spote harvest [<url>]            saca el audio descifrado de la memoria del
          [--step ms]               cliente saltando por la pista (2-4× más rápido)
   spote discord --id <app-id>      prueba el Rich Presence y guarda el ID
-  spote mini                       abre el mini reproductor de escritorio
          [--save] [--seconds N]
+  spote mini                       abre el mini reproductor de escritorio
   spote doctor                     comprueba dependencias y rutas
   spote version | help
 
@@ -653,6 +653,7 @@ fn run_tui(args: Args) -> Result<()> {
         .context("no se pudo crear el runtime")?;
 
     let mut app = App::new(cfg.clone())?;
+    app.start_mpris();
     match runtime.block_on(app.connect_player()) {
         Ok(()) => {}
         Err(err) => {

@@ -10,7 +10,7 @@
 //! Este módulo es puro: no habla con mpv. `AudioCfg::filter_chain` devuelve el
 //! string y `Player::set_audio_filters` lo envía por IPC.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Frecuencias centrales del EQ, en Hz. Índice alineado con `AudioCfg::bands`.
 pub const BAND_FREQS: [u32; 10] = [31, 62, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000];
@@ -80,10 +80,15 @@ pub struct AudioCfg {
     /// Permite apagar solo el EQ y conservar preamp/normalizador/limitador.
     pub eq_enabled: bool,
     /// Ganancia por banda en dB, en el orden de `BAND_FREQS`. Rango -12..+12.
+    /// El deserializador tolera listas de otra longitud (configs viejas o
+    /// editadas a mano) en vez de tirar toda la configuración.
+    #[serde(default = "default_bands", deserialize_with = "deserialize_bands")]
     pub bands: [f32; 10],
     /// Ganancia de entrada en dB. Rango -12..+12.
     pub preamp_db: f32,
-    /// Normalizador activo.
+    /// Normalizador activo. Un valor desconocido cae en `Off` sin invalidar
+    /// el resto de `config.toml`.
+    #[serde(default, deserialize_with = "deserialize_normalizer")]
     pub normalizer: NormalizerMode,
     /// Intensidad del normalizador dinámico. Rango 0..1.
     pub normalizer_strength: f32,
@@ -183,6 +188,38 @@ impl AudioCfg {
     }
 }
 
+fn default_bands() -> [f32; 10] {
+    [0.0; 10]
+}
+
+fn deserialize_bands<'de, D>(deserializer: D) -> Result<[f32; 10], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<f32>::deserialize(deserializer)?;
+    let mut bands = [0.0; 10];
+    for (slot, value) in bands.iter_mut().zip(values) {
+        *slot = if value.is_finite() {
+            value.clamp(-12.0, 12.0)
+        } else {
+            0.0
+        };
+    }
+    Ok(bands)
+}
+
+fn deserialize_normalizer<'de, D>(deserializer: D) -> Result<NormalizerMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(match value.as_deref() {
+        Some("dynamic") => NormalizerMode::Dynamic,
+        Some("loudnorm") => NormalizerMode::Loudnorm,
+        _ => NormalizerMode::Off,
+    })
+}
+
 fn clamp_db(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(-12.0, 12.0)
@@ -222,6 +259,15 @@ mod tests {
 
     fn chain(cfg: &AudioCfg) -> String {
         cfg.filter_chain().expect("la configuración produce cadena")
+    }
+
+    #[test]
+    fn tolerates_short_band_lists_and_unknown_normalizer() {
+        let cfg: AudioCfg = toml::from_str("bands = [1.0, 2.0]\nnormalizer = \"weird\"").unwrap();
+        assert_eq!(cfg.bands[0], 1.0);
+        assert_eq!(cfg.bands[1], 2.0);
+        assert_eq!(cfg.bands[9], 0.0);
+        assert_eq!(cfg.normalizer, NormalizerMode::Off);
     }
 
     #[test]

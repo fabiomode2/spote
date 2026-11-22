@@ -4,6 +4,18 @@ use super::*;
 use spote_core::mpris_server::{MprisCommand, MprisSnapshot};
 
 impl App {
+    /// Se llama tras crear la app. Si el nombre MPRIS está ocupado o no hay
+    /// bus de sesión, la TUI sigue funcionando y el usuario ve el motivo.
+    pub fn start_mpris(&mut self) {
+        if self.mpris_server.is_some() {
+            return;
+        }
+        match spote_core::mpris_server::MprisServer::start(&self.cfg.app.name) {
+            Ok(server) => self.mpris_server = Some(server),
+            Err(err) => self.toast(format!("MPRIS no disponible: {err}"), ToastKind::Warn),
+        }
+    }
+
     pub(super) fn poll_mpris(&mut self) {
         let commands: Vec<MprisCommand> = self
             .mpris_server

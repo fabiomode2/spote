@@ -53,11 +53,19 @@ impl App {
         match self.audio_selected {
             i if i < BANDS => {
                 let value = self.cfg.audio.bands[i] + delta as f32;
-                self.cfg.audio.bands[i] = value.clamp(-12.0, 12.0);
+                if value.is_finite() {
+                    self.cfg.audio.bands[i] = value.clamp(-12.0, 12.0);
+                } else {
+                    self.cfg.audio.bands[i] = 0.0;
+                }
             }
             PREAMP => {
-                self.cfg.audio.preamp_db =
-                    (self.cfg.audio.preamp_db + delta as f32).clamp(-12.0, 12.0);
+                let value = self.cfg.audio.preamp_db + delta as f32;
+                self.cfg.audio.preamp_db = if value.is_finite() {
+                    value.clamp(-12.0, 12.0)
+                } else {
+                    0.0
+                };
             }
             NORMALIZER => {
                 self.cfg.audio.normalizer = if delta > 0 {
@@ -72,7 +80,11 @@ impl App {
             }
             STRENGTH => {
                 let value = self.cfg.audio.normalizer_strength + delta as f32 * 0.05;
-                self.cfg.audio.normalizer_strength = value.clamp(0.0, 1.0);
+                self.cfg.audio.normalizer_strength = if value.is_finite() {
+                    value.clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
             }
             LIMITER => self.cfg.audio.limiter = !self.cfg.audio.limiter,
             PRESET => self.cycle_audio_preset(delta),

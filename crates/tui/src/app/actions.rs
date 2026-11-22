@@ -273,22 +273,7 @@ impl App {
                 self.focus = Pane::Transport;
             }
             Action::FocusTransport => self.focus = Pane::Transport,
-            Action::Mute => {
-                if self.now.volume > 0.0 {
-                    self.volume_before_mute = self.now.volume;
-                    // Silenciar no guarda 0 en config: al reabrir se conserva
-                    // el volumen real, no el mute temporal.
-                    self.muted = true;
-                    self.now.volume = 0.0;
-                    if let Some(player) = &self.player {
-                        player.set_volume(0.0);
-                    }
-                } else {
-                    let volume = self.volume_before_mute.max(0.2);
-                    self.muted = false;
-                    self.set_volume(volume);
-                }
-            }
+            Action::Mute => self.toggle_mute(),
             Action::VizNext => {
                 self.show_viz = true;
                 self.viz.next_preset();

@@ -53,8 +53,12 @@ impl App {
         }
         if self.mini_last_publish.elapsed() >= Duration::from_millis(50) {
             if let Some(hub) = &self.mini_hub {
-                let snapshot = self.mini_snapshot();
-                hub.publish(&snapshot);
+                // Sin ventana abierta no se consulta SQLite ni se serializa
+                // un snapshot cada 50 ms.
+                if hub.has_clients() {
+                    let snapshot = self.mini_snapshot();
+                    hub.publish(&snapshot);
+                }
             }
             self.mini_last_publish = Instant::now();
         }
@@ -76,6 +80,7 @@ impl App {
                 .art_path(&track.key)
                 .ok()
                 .flatten()
+                .filter(|path| path.exists())
                 .or_else(|| {
                     self.lib
                         .local_path(&track.key)

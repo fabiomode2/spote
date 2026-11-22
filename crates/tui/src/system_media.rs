@@ -70,6 +70,7 @@ fn run(
 ) {
     let mut watcher = SystemMediaWatcher::new();
     let mut last_key = String::new();
+    let mut sent_empty = false;
     while active.load(Ordering::Relaxed) {
         // Primero los comandos: el usuario espera respuesta inmediata.
         while let Ok(command) = commands.try_recv() {
@@ -108,12 +109,16 @@ fn run(
                 }
             }
         }
-        if let Some(state) = watcher.poll() {
-            if let Some(track) = &state.track {
-                last_key = track.key.clone();
-            }
-            // Siempre se envía, también cuando solo cambia la posición: la
-            // letra y la barra de progreso dependen de este muestreo.
+        let state = watcher.poll().unwrap_or_default();
+        let empty = state.track.is_none();
+        if let Some(track) = &state.track {
+            last_key = track.key.clone();
+            sent_empty = false;
+        }
+        // Un estado vacío también es información: si el reproductor cierra,
+        // la UI/mini/MPRIS no deben seguir mostrando la última canción.
+        if !empty || !sent_empty {
+            sent_empty = empty;
             if states.send(state).is_err() {
                 return;
             }

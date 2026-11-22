@@ -1,7 +1,7 @@
 //! Servidor del mini reproductor: publica el estado por un socket Unix y
 //! recibe comandos. El cliente vive en `crates/mini` (`spote-mini`).
 
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,13 @@ impl MiniHub {
             let _ = std::fs::remove_file(&path);
         }
         let listener = UnixListener::bind(&path)?;
+        // El socket solo debe ser accesible por el usuario que abrió spote.
+        // Especialmente importante en el fallback a /tmp.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         listener.set_nonblocking(true)?;
 
         let clients: Arc<Mutex<Vec<UnixStream>>> = Arc::new(Mutex::new(Vec::new()));
@@ -73,6 +80,13 @@ impl MiniHub {
         clients.retain_mut(|stream| stream.write_all(line.as_bytes()).is_ok());
     }
 
+    pub fn has_clients(&self) -> bool {
+        self.clients
+            .lock()
+            .map(|clients| !clients.is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn try_recv(&self) -> Option<MiniCommand> {
         self.commands.try_recv().ok()
     }
@@ -80,6 +94,11 @@ impl MiniHub {
 
 impl Drop for MiniHub {
     fn drop(&mut self) {
+        if let Ok(mut clients) = self.clients.lock() {
+            for stream in clients.iter_mut() {
+                let _ = stream.write_all(b"\"Quit\"\n");
+            }
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -102,7 +121,7 @@ fn serve(
                     Ok(writer) => {
                         // O_NONBLOCK se comparte entre clones: se usan
                         // timeouts de lectura/escritura, no modo no bloqueante.
-                        let _ = writer.set_write_timeout(Some(Duration::from_millis(25)));
+                        let _ = writer.set_write_timeout(Some(Duration::from_millis(5)));
                         if let Ok(mut list) = clients.lock() {
                             list.push(writer);
                         }
@@ -123,20 +142,32 @@ fn serve(
 }
 
 fn read_client(stream: UnixStream, commands: Sender<MiniCommand>) {
+    const MAX_LINE: usize = 64 * 1024;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        match reader.read(&mut chunk) {
             Ok(0) => break,
-            Ok(_) => {
-                if let Ok(command) = MiniCommand::from_line(&line) {
-                    if command.is_quit() {
-                        break;
-                    }
-                    if commands.send(command).is_err() {
-                        break;
+            Ok(n) => {
+                for &byte in &chunk[..n] {
+                    if byte == b'\n' {
+                        let text = String::from_utf8_lossy(&pending).into_owned();
+                        pending.clear();
+                        let Ok(command) = MiniCommand::from_line(text.trim()) else {
+                            continue;
+                        };
+                        if command.is_quit() || commands.send(command).is_err() {
+                            return;
+                        }
+                    } else {
+                        pending.push(byte);
+                        if pending.len() > MAX_LINE {
+                            // Cliente local que no termina la línea: se corta
+                            // para no agotar memoria en el hilo de la TUI.
+                            return;
+                        }
                     }
                 }
             }

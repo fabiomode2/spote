@@ -20,6 +20,7 @@ BIN_DIR="${SPOTE_BIN_DIR:-$HOME/.local/bin}"
 VENV="${SPOTE_VENV:-$DATA_DIR/venv}"
 ASR=1
 UPDATE=0
+WITH_MINI=1
 
 usage() {
   cat <<EOF
@@ -27,6 +28,7 @@ uso: scripts/install.sh [opciones]
 
   --update              git pull --ff-only antes de compilar
   --no-asr              no instala faster-whisper
+  --no-mini             no compila/instala spote-mini (servidores sin GUI)
   --bin-dir <ruta>      destino de los binarios (defecto: ~/.local/bin)
   --venv <ruta>         venv de Python (defecto: $DATA_DIR/venv)
   -y, --yes             sin preguntas (lo usa el auto-actualizador)
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --update) UPDATE=1 ;;
     --no-asr) ASR=0 ;;
+    --no-mini) WITH_MINI=0 ;;
     --bin-dir)
       BIN_DIR="${2:?falta la ruta de binarios}"
       shift
@@ -83,7 +86,13 @@ for tool in mpv ffmpeg yt-dlp; do
 done
 
 say "compilando spote (release)"
-(cd "$ROOT" && cargo build --release --locked -p spote-tui -p spote-server -p spote-mini)
+(cd "$ROOT" && cargo build --release --locked -p spote-tui -p spote-server)
+if [[ "$WITH_MINI" == 1 ]]; then
+  say "compilando spote-mini (release)"
+  if ! (cd "$ROOT" && cargo build --release --locked -p spote-mini); then
+    warn "spote-mini no compiló (¿faltan libs gráficas?); instala solo la TUI con --no-mini"
+  fi
+fi
 
 install -d "$BIN_DIR"
 say "instalando binarios en $BIN_DIR"

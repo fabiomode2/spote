@@ -344,8 +344,10 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         return;
     }
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
-    let progress = {
-        let duration = app.now.duration_ms.max(1);
+    let progress = if app.now.duration_ms == 0 {
+        0.0
+    } else {
+        let duration = app.now.duration_ms;
         let position = app.display_position_ms().min(duration);
         (position as f32 / duration as f32).clamp(0.0, 1.0)
     };

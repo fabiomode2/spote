@@ -127,7 +127,7 @@ pub(super) fn draw_audio(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: 
 
     // Columna derecha: preamp, normalizador, intensidad y limitador.
     let right_x = inner.x + 1 + 10 * 6 + 2;
-    let right_w = inner.x + inner.width - right_x;
+    let right_w = (inner.x + inner.width).saturating_sub(right_x);
     let mut ry = graph_y;
     let preamp_selected = selected == 10;
     text_at(

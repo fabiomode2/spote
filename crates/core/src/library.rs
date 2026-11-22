@@ -680,7 +680,9 @@ impl Library {
                     .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
                     .collect::<String>()
             })
-            .filter(|token| !token.is_empty())
+            .filter(|token| {
+                !token.is_empty() && token.chars().any(|c| c.is_alphanumeric())
+            })
             .collect();
         if query.trim().is_empty() {
             return self.recent(limit);
@@ -704,8 +706,14 @@ impl Library {
             .query_map(params![fts_query, limit as i64], row_to_track)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if rows.is_empty() {
-            // FTS5 no hace prefijos con acentos raros: fallback a LIKE.
-            let like = format!("%{}%", query.trim());
+            // FTS5 no hace prefijos con acentos raros: fallback a LIKE. Se
+            // escapan los comodines para que "_" o "%" no devuelvan todo.
+            let literal = query
+                .trim()
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let like = format!("%{literal}%");
             return self.like_search(&like, limit);
         }
         Ok(rows)
@@ -713,8 +721,8 @@ impl Library {
 
     fn like_search(&self, pattern: &str, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} WHERE t.title LIKE ?1 OR t.artist LIKE ?1 OR t.album LIKE ?1
-             ORDER BY t.artist LIMIT ?2"
+            "{SELECT_TRACK} WHERE t.title LIKE ?1 ESCAPE '\\' OR t.artist LIKE ?1 ESCAPE '\\'
+               OR t.album LIKE ?1 ESCAPE '\\' ORDER BY t.artist LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt

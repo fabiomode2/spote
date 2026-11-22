@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use spote_protocol::{SourceHint, TrackRef};
+use zbus::zvariant::OwnedObjectPath;
 use zbus::{OwnedVariant, Proxy};
 
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
@@ -33,6 +34,9 @@ pub struct SystemMediaState {
     pub playing: bool,
     pub track: Option<TrackRef>,
     pub position_ms: u64,
+    /// `false` si el reproductor no publica `Position`; en ese caso no hay
+    /// que resincronizar el reloj a 0.
+    pub position_known: bool,
     pub volume: Option<f32>,
     pub shuffle: Option<bool>,
     /// Valor literal de `LoopStatus`: `"None"`, `"Track"` o `"Playlist"`.
@@ -55,6 +59,8 @@ pub struct SystemMediaWatcher {
     active: Option<String>,
     active_trackid: Option<String>,
     active_track_key: Option<String>,
+    active_position_ms: u64,
+    active_position_known: bool,
 }
 
 impl SystemMediaWatcher {
@@ -70,6 +76,8 @@ impl SystemMediaWatcher {
             active: None,
             active_trackid: None,
             active_track_key: None,
+            active_position_ms: 0,
+            active_position_known: false,
         }
     }
 
@@ -102,6 +110,8 @@ impl SystemMediaWatcher {
             Some((connection, Some(reading))) => {
                 self.connection = Some(connection);
                 self.active = Some(reading.state.player.clone());
+                self.active_position_ms = reading.state.position_ms;
+                self.active_position_known = reading.state.position_known;
                 self.active_trackid = reading.trackid;
                 self.active_track_key = reading.track_key;
                 Some(reading.state)
@@ -150,23 +160,36 @@ impl SystemMediaWatcher {
     /// `spotify:track:…`). Cualquier otra cosa se rechaza: `SetPosition` con un
     /// trackid ajeno no tiene sentido.
     pub fn set_position(&self, track_key_or_path: &str, position_ms: u64) -> Result<()> {
-        let path = if track_key_or_path.starts_with('/') {
-            track_key_or_path.to_string()
-        } else if self.active_track_key.as_deref() == Some(track_key_or_path) {
-            self.active_trackid
-                .clone()
-                .ok_or_else(|| anyhow!("el reproductor activo no publica mpris:trackid"))?
-        } else {
+        let known_track = track_key_or_path.starts_with('/')
+            || self.active_track_key.as_deref() == Some(track_key_or_path);
+        if !known_track {
             bail!(
                 "pista desconocida para SetPosition: {track_key_or_path} \
                  (esperaba el object path o la clave de la pista activa)"
             );
+        }
+        let path = if track_key_or_path.starts_with('/') {
+            Some(track_key_or_path.to_string())
+        } else {
+            self.active_trackid.clone()
         };
-        let object = zbus::ObjectPath::try_from(path.as_str())
-            .map_err(|err| anyhow!("trackid MPRIS inválido: {err}"))?;
-        let position_us = i64::try_from(position_ms.saturating_mul(1000)).unwrap_or(i64::MAX);
         let player = self.require_player()?.to_string();
-        self.call_method(&player, "SetPosition", &(object, position_us))
+        if let Some(path) = path {
+            let object = zbus::ObjectPath::try_from(path.as_str())
+                .map_err(|err| anyhow!("trackid MPRIS inválido: {err}"))?;
+            let position_us = i64::try_from(position_ms.saturating_mul(1000)).unwrap_or(i64::MAX);
+            return self.call_method(&player, "SetPosition", &(object, position_us));
+        }
+        // Sin mpris:trackid (Stremio, algunos navegadores) se usa Seek
+        // relativo, que sí entienden todos los reproductores MPRIS.
+        let current = if self.active_position_known {
+            self.active_position_ms
+        } else {
+            0
+        };
+        let delta_ms = position_ms as i64 - current as i64;
+        let delta_us = delta_ms.saturating_mul(1000);
+        self.call_method(&player, "Seek", &(delta_us,))
     }
 
     pub fn set_volume(&self, volume: f32) -> Result<()> {
@@ -213,7 +236,10 @@ impl SystemMediaWatcher {
         B: serde::Serialize + zbus::DynamicType,
     {
         self.runtime.block_on(async {
-            let connection = session_connection().await?;
+            let connection = match self.connection.clone() {
+                Some(connection) => connection,
+                None => session_connection().await?,
+            };
             let proxy = Proxy::new(&connection, player, OBJECT_PATH, PLAYER_IFACE)
                 .await
                 .with_context(|| format!("proxy MPRIS de {player}"))?;
@@ -231,7 +257,10 @@ impl SystemMediaWatcher {
     {
         let player = self.require_player()?.to_string();
         self.runtime.block_on(async {
-            let connection = session_connection().await?;
+            let connection = match self.connection.clone() {
+                Some(connection) => connection,
+                None => session_connection().await?,
+            };
             let proxy = Proxy::new(&connection, player.as_str(), OBJECT_PATH, PLAYER_IFACE)
                 .await
                 .with_context(|| format!("proxy MPRIS de {player}"))?;
@@ -347,7 +376,9 @@ async fn read_player(
         .unwrap_or_else(|_| probed_status.to_string());
     let metadata: HashMap<String, OwnedVariant> =
         proxy.get_property("Metadata").await.unwrap_or_default();
-    let position_us: i64 = proxy.get_property("Position").await.unwrap_or(0);
+    let position = proxy.get_property::<i64>("Position").await.ok();
+    let position_known = position.is_some();
+    let position_us = position.unwrap_or(0);
     let volume = proxy
         .get_property::<f64>("Volume")
         .await
@@ -371,6 +402,7 @@ async fn read_player(
             playing: status == "Playing",
             track,
             position_ms,
+            position_known,
             volume,
             shuffle,
             repeat,
@@ -526,7 +558,14 @@ fn track_from_metadata(metadata: &HashMap<String, OwnedVariant>) -> Option<Track
 
 fn as_string(value: &OwnedVariant) -> Option<String> {
     let owned = value.try_clone().ok()?;
-    String::try_from(owned).ok()
+    if let Ok(text) = String::try_from(owned.clone()) {
+        return Some(text);
+    }
+    // MPRIS declara `mpris:trackid` como object path (`o`), no como string.
+    // VLC, Firefox, mpv y Elisa lo mandan así; antes se descartaba.
+    OwnedObjectPath::try_from(owned)
+        .ok()
+        .map(|path| path.to_string())
 }
 
 fn as_i64(value: &OwnedVariant) -> Option<i64> {
@@ -579,6 +618,21 @@ mod tests {
             .into_iter()
             .map(|(key, value)| (key.to_string(), value))
             .collect()
+    }
+
+    #[test]
+    fn trackid_accepts_object_path_and_string() {
+        use zbus::zvariant::ObjectPath;
+        let path = ObjectPath::try_from("/org/mpris/MediaPlayer2/TrackList/NoTrack").unwrap();
+        let value = OwnedVariant::from(path);
+        assert_eq!(
+            as_string(&value).as_deref(),
+            Some("/org/mpris/MediaPlayer2/TrackList/NoTrack")
+        );
+        assert_eq!(
+            as_string(&owned_str("spotify:track:x")).as_deref(),
+            Some("spotify:track:x")
+        );
     }
 
     fn spotify_metadata() -> HashMap<String, OwnedVariant> {

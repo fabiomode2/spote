@@ -175,7 +175,7 @@ impl MprisServer {
             .spawn(move || run_server(identity, shared, updates_rx, commands_tx, ready_tx))
             .context("no pude crear el hilo de MPRIS")?;
 
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        match ready_rx.recv_timeout(Duration::from_secs(2)) {
             Ok(Ok(())) => Ok(Self {
                 updates: updates_tx,
                 commands: Mutex::new(commands_rx),
@@ -189,7 +189,7 @@ impl MprisServer {
             Err(_) => {
                 drop(updates_tx);
                 Err(anyhow!(
-                    "MPRIS no respondió en 5 s al publicar {BUS_NAME}; ¿el bus de sesión está disponible?"
+                    "MPRIS no respondió en 2 s al publicar {BUS_NAME}; ¿el bus de sesión está disponible?"
                 ))
             }
         }

@@ -748,8 +748,10 @@ pub struct App {
     /// Autoplay deseado mientras se resuelve un stream; el usuario puede
     /// pausarlo antes de que mpv tenga la URL.
     pub stream_autoplay: bool,
-    /// Seek pedido durante la resolución; se aplica al cargar la URL/fichero.
+    /// Seek pedido durante la resolución; se aplica al cargar la URL/fichero
+    /// solo si sigue siendo la misma pista.
     pub pending_seek_ms: Option<u64>,
+    pub pending_seek_key: Option<String>,
     pub mpris_server: Option<spote_core::mpris_server::MprisServer>,
     pub mpris_last_update: Instant,
     pub player_events: Option<tokio::sync::broadcast::Receiver<PlayerEvent>>,
@@ -984,7 +986,8 @@ impl App {
             mini_child: None,
             stream_autoplay: true,
             pending_seek_ms: None,
-            mpris_server: spote_core::mpris_server::MprisServer::start("spote").ok(),
+            pending_seek_key: None,
+            mpris_server: None,
             mpris_last_update: Instant::now(),
             player_events: None,
             queue: Vec::new(),
@@ -1222,8 +1225,12 @@ impl App {
                 }
                 Err(_) => {
                     // FTS puede fallar con comodines raros; el filtro en
-                    // memoria mantiene la UI usable.
+                    // memoria mantiene la UI usable. Una query que normaliza
+                    // a vacío no debe casar con todo.
                     let query = spote_core::util::normalize(&self.lib_query);
+                    if query.is_empty() {
+                        next.clear();
+                    }
                     next.retain(|row| {
                         let haystack = spote_core::util::normalize(&format!(
                             "{} {} {}",
@@ -1369,7 +1376,13 @@ impl App {
         self.trim_end_ms = trim_end
             .filter(|end| *end > self.trim_start_ms + 500)
             .map(|end| end.min(duration));
-        let start_ms = self.pending_seek_ms.take().unwrap_or(self.trim_start_ms);
+        let start_ms = if self.pending_seek_key.as_deref() == Some(track.key.as_str()) {
+            self.pending_seek_ms.take().unwrap_or(self.trim_start_ms)
+        } else {
+            self.pending_seek_ms = None;
+            self.pending_seek_key = None;
+            self.trim_start_ms
+        };
         self.now.track = Some(track.clone());
         self.now.path = Some(path.clone());
         self.now.position_ms = start_ms;
@@ -1501,12 +1514,10 @@ impl App {
                     if self.follow_spotify {
                         continue;
                     }
-                    let is_current = self.pending_stream.as_deref() == Some(key.as_str())
-                        || self
-                            .now
-                            .track
-                            .as_ref()
-                            .is_some_and(|track| track.key == key);
+                    // Solo el trabajo pendiente actual puede resolver. Un
+                    // evento duplicado o de una pista anterior no debe
+                    // recargar la canción que ya está sonando.
+                    let is_current = self.pending_stream.as_deref() == Some(key.as_str());
                     if !is_current {
                         continue;
                     }
@@ -1515,7 +1526,15 @@ impl App {
                     self.now.loading = false;
                     self.now.playing = self.stream_autoplay;
                     self.now.path = None;
-                    let start_ms = self.pending_seek_ms.take().unwrap_or(self.trim_start_ms);
+                    let start_ms = if self.pending_seek_key.as_deref()
+                        == self.now.track.as_ref().map(|track| track.key.as_str())
+                    {
+                        self.pending_seek_ms.take().unwrap_or(self.trim_start_ms)
+                    } else {
+                        self.pending_seek_ms = None;
+                        self.pending_seek_key = None;
+                        self.trim_start_ms
+                    };
                     let provider = source.provider.clone();
                     let id = source.id.clone();
                     if let Some(track) = self.now.track.clone() {
@@ -1570,12 +1589,10 @@ impl App {
                     if self.follow_spotify {
                         continue;
                     }
-                    let is_current = self.pending_stream.as_deref() == Some(key.as_str())
-                        || self
-                            .now
-                            .track
-                            .as_ref()
-                            .is_some_and(|track| track.key == key);
+                    // Solo el trabajo pendiente actual puede resolver. Un
+                    // evento duplicado o de una pista anterior no debe
+                    // recargar la canción que ya está sonando.
+                    let is_current = self.pending_stream.as_deref() == Some(key.as_str());
                     if !is_current {
                         continue;
                     }
@@ -1614,17 +1631,16 @@ impl App {
                     }
                 }
                 StreamEvent::Failed { key, message } => {
-                    let is_current = self.pending_stream.as_deref() == Some(key.as_str())
-                        || self
-                            .now
-                            .track
-                            .as_ref()
-                            .is_some_and(|track| track.key == key);
+                    // Solo el trabajo pendiente actual puede resolver. Un
+                    // evento duplicado o de una pista anterior no debe
+                    // recargar la canción que ya está sonando.
+                    let is_current = self.pending_stream.as_deref() == Some(key.as_str());
                     if !is_current {
                         continue;
                     }
                     self.pending_stream = None;
                     self.pending_seek_ms = None;
+                    self.pending_seek_key = None;
                     self.streaming = false;
                     self.now.loading = false;
                     self.now.playing = false;
@@ -2102,6 +2118,10 @@ impl App {
                 self.now.duration_ms = entry.track.duration_ms;
                 self.now.playing = false;
                 self.now.loading = true;
+                self.now.ended = false;
+                self.stream_autoplay = true;
+                self.pending_seek_ms = None;
+                self.pending_seek_key = None;
                 self.now.message = "esperando descarga…".into();
                 self.lyrics = None;
                 self.lyrics_status = "esperando descarga…".into();
@@ -2284,6 +2304,7 @@ impl App {
             // El stream aún no está cargado: se guarda el destino y se aplica
             // al recibir la URL o el fichero descargado.
             self.pending_seek_ms = Some(target);
+            self.pending_seek_key = self.now.track.as_ref().map(|track| track.key.clone());
             self.now.position_ms = target;
             return;
         }
@@ -2316,11 +2337,14 @@ impl App {
         if self.now.volume > 0.0 {
             self.muted = false;
         }
-        self.cfg.player.volume = self.now.volume;
         if self.follow_spotify {
+            // El volumen del reproductor externo no es el volumen local de
+            // spote: no se guarda en `[player]` ni se arrastra al desactivar.
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetVolume(self.now.volume));
             }
+        } else {
+            self.cfg.player.volume = self.now.volume;
         }
         // Durante el arrastre se guarda al soltar; en teclado/rueda, ya.
         if !self.dragging_volume {
@@ -2334,12 +2358,14 @@ impl App {
     /// Guarda el volumen aunque venga de un arrastre en curso.
     pub fn persist_volume(&mut self) {
         // Un mute temporal no debe convertirse en el volumen guardado.
-        let volume = if self.muted {
-            self.volume_before_mute.max(0.0)
-        } else {
-            self.now.volume
-        };
-        self.cfg.player.volume = volume;
+        if !self.follow_spotify {
+            let volume = if self.muted {
+                self.volume_before_mute.max(0.0)
+            } else {
+                self.now.volume
+            };
+            self.cfg.player.volume = volume;
+        }
         self.cfg.save().ok();
     }
 
@@ -2876,7 +2902,21 @@ impl App {
             events.push(event);
         }
         if self.follow_spotify {
-            // En modo acompañante la posición y la duración las manda MPRIS.
+            // En modo acompañante la posición/duración las manda MPRIS, pero
+            // una desconexión de mpv sigue siendo un evento que hay que ver:
+            // al desactivar follow no podemos quedarnos con un Player muerto.
+            if events
+                .iter()
+                .any(|event| matches!(event, PlayerEvent::Disconnected))
+            {
+                self.player = None;
+                self.player_events = None;
+                self.streaming = false;
+                self.now.playing = false;
+                self.now.loading = false;
+                self.spectrum.stop();
+                self.toast("mpv desconectado; reinicia spote", ToastKind::Error);
+            }
             return;
         }
         for event in events {
@@ -3118,6 +3158,7 @@ impl App {
                     if was_pending {
                         self.pending_play = None;
                         self.pending_seek_ms = None;
+                        self.pending_seek_key = None;
                         self.now.loading = false;
                     }
                     // Si el stream ya está sonando, esta descarga era solo la
@@ -3892,6 +3933,11 @@ impl App {
             if let Some(player) = &self.player {
                 player.set_volume(0.0);
             }
+            if self.follow_spotify {
+                if let Some(worker) = &self.spotify_worker {
+                    worker.send(SystemCommand::SetVolume(0.0));
+                }
+            }
         } else {
             let volume = self.volume_before_mute.max(0.2);
             self.muted = false;
@@ -4304,7 +4350,15 @@ impl App {
             // Tope sin retroceso: antes, al pasar 500 ms, el valor caía de
             // `position_ms + 500` a `position_ms` (diente de sierra visible
             // en el karaoke cuando mpv tarda en informar).
-            (self.now.position_ms + elapsed.min(500)).min(self.now.duration_ms.max(1))
+            let current = self.now.position_ms + elapsed.min(500);
+            if self.now.duration_ms > 0 {
+                current.min(self.now.duration_ms)
+            } else {
+                // Sin duración (MPRIS/streams que no la publican) no se puede
+                // clampear a 1 ms: la barra se quedaba al 100 % y la letra
+                // congelada.
+                current
+            }
         } else {
             self.now.position_ms
         }

@@ -379,6 +379,7 @@ impl Config {
                     eprintln!("spote: config inválida en {}: {err}", path.display());
                     Self::default()
                 });
+                cfg.audio = cfg.audio.sanitized();
                 // Configs anteriores al rediseño: la rotación venía encendida y
                 // no existía `[ui.layout]`. Se migra una vez, sin tocar el resto.
                 if !text.contains("[ui.layout]") {
