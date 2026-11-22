@@ -193,8 +193,9 @@ pub struct Downloader {
     tx: Sender<Job>,
     events: Receiver<DownloadEvent>,
     children: Arc<Mutex<Vec<u32>>>,
-    /// Claves con un trabajo aceptado y todavía sin terminar. Evita descargar
-    /// dos veces la misma pista (stream cache + descarga explícita/cola).
+    /// Claves con una descarga directa aceptada y todavía sin terminar. Evita
+    /// descargar dos veces la misma pista (stream cache + descarga explícita).
+    /// Los `Resolve` no se deduplican: son el fallback si la fuente falló.
     inflight: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -254,23 +255,16 @@ impl Downloader {
         duration_ms: u64,
         out: PathBuf,
     ) {
-        let key = key.to_string();
-        if !begin_job(&self.inflight, &key) {
-            return;
-        }
-        if self
-            .tx
-            .send(Job::Resolve {
-                key: key.clone(),
-                artist: artist.to_string(),
-                title: title.to_string(),
-                duration_ms,
-                out,
-            })
-            .is_err()
-        {
-            finish_job(&self.inflight, &key);
-        }
+        // Un `Resolve` busca una fuente nueva y no se deduplica: si la copia
+        // de caché de un stream está en vuelo y mpv falla, este trabajo es el
+        // fallback que debe ejecutarse igualmente.
+        let _ = self.tx.send(Job::Resolve {
+            key: key.to_string(),
+            artist: artist.to_string(),
+            title: title.to_string(),
+            duration_ms,
+            out,
+        });
     }
 
     pub fn update_ytdlp(&self) {
@@ -390,7 +384,6 @@ fn worker(
                 out,
             } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
-                let done_key = key.clone();
                 // Mismo matcher estricto que la reproducción: variantes de
                 // consulta, rechazo de covers/directos y duración. Antes el
                 // Downloader aceptaba coincidencias que el stream rechazaba.
@@ -414,7 +407,6 @@ fn worker(
                         });
                     }
                 }
-                finish_job(&inflight, &done_key);
             }
             Job::Update => {
                 let output = Command::new(ytdlp_bin()).arg("-U").output();

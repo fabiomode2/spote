@@ -1522,6 +1522,9 @@ fn download_audio(
 
 /// Argumentos de la descarga de respaldo. Sin `-x`: nada de transcodificar.
 fn download_args(base: &Path, watch_url: &str, client: &str) -> Vec<String> {
+    // `media_dir` puede contener `%`: yt-dlp lo interpreta como plantilla.
+    // Solo se escapa para `-o`; `find_downloaded` sigue usando `base` literal.
+    let template = base.display().to_string().replace('%', "%%");
     vec![
         "--no-playlist".to_string(),
         "-f".to_string(),
@@ -1537,7 +1540,7 @@ fn download_args(base: &Path, watch_url: &str, client: &str) -> Vec<String> {
         "--extractor-args".to_string(),
         client.to_string(),
         "-o".to_string(),
-        format!("{}.%(ext)s", base.display()),
+        format!("{template}.%(ext)s"),
         "--".to_string(),
         watch_url.to_string(),
     ]
@@ -1586,7 +1589,7 @@ fn default_cache_dir() -> PathBuf {
 
 /// Binario configurable por entorno. `SPOTE_YTDLP` gana sobre
 /// `SPOTE_YTDLP_PATH`; si ninguno sirve se usa el `yt-dlp` del `PATH`.
-pub(crate) fn ytdlp_bin() -> String {
+pub fn ytdlp_bin() -> String {
     for var in ["SPOTE_YTDLP", "SPOTE_YTDLP_PATH"] {
         if let Ok(value) = std::env::var(var) {
             let value = value.trim();
@@ -1596,6 +1599,17 @@ pub(crate) fn ytdlp_bin() -> String {
         }
     }
     "yt-dlp".to_string()
+}
+
+/// `true` si el binario configurado se puede ejecutar. Acepta rutas relativas
+/// (`./bin/yt-dlp`) además de nombres en `PATH`.
+pub fn ytdlp_available() -> bool {
+    let bin = ytdlp_bin();
+    if bin.contains('/') || bin.contains('\\') {
+        Path::new(&bin).is_file()
+    } else {
+        util::which(&bin).is_some()
+    }
 }
 
 /// Ejecuta yt-dlp y convierte timeout, cancelación, salida no cero y stderr en

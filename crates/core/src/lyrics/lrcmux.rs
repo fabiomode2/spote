@@ -294,14 +294,16 @@ fn build_native_synced(rows: Vec<(Option<u64>, String)>, duration_ms: u64) -> Ly
     let mut last_start = 0u64;
     let mut next_guess = 0u64;
     for (start, _) in &rows {
-        // Inicios repetidos producían líneas de duración cero y un karaoke
-        // que parpadeaba. Se exige un hueco mínimo, salvo en la primera.
         let floor = if starts.is_empty() {
             0
         } else {
-            last_start.saturating_add(120)
+            last_start.saturating_add(1)
         };
         let value = match start {
+            // Una marca duplicada o desordenada sí necesita separación para no
+            // dejar una línea de duración cero. Una marca legítima a 50 ms de
+            // la anterior se respeta (rap, ad-libs).
+            Some(ms) if *ms <= last_start => last_start.saturating_add(120),
             Some(ms) => (*ms).max(floor),
             None => next_guess.max(floor),
         };

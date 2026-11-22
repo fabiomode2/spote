@@ -105,8 +105,8 @@ impl Default for AudioCfg {
             preamp_db: 0.0,
             normalizer: NormalizerMode::Off,
             normalizer_strength: 0.5,
-            // Neutro por defecto: un limitador siempre activo cambia el audio
-            // de todo el mundo al actualizar, aunque el EQ esté plano.
+            // Neutro por defecto: el limitador es opt-in, no se aplica a todo
+            // el audio sin que el usuario lo pida.
             limiter: false,
         }
     }

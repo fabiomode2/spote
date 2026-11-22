@@ -35,6 +35,7 @@ impl App {
         self.now.position_ms = 0;
         self.now.position_unknown = false;
         self.now.duration_ms = 0;
+        self.now.stream_duration_ms = 0;
         self.now.playing = false;
         self.now.loading = false;
         self.now.ended = false;

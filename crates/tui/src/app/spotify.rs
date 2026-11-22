@@ -68,6 +68,7 @@ impl App {
         self.now.position_ms = 0;
         self.now.duration_ms = 0;
         self.now.position_unknown = false;
+        self.now.stream_duration_ms = 0;
         self.now.playing = false;
         self.now.loading = false;
         self.now.ended = false;
@@ -124,7 +125,10 @@ impl App {
             // Solo se resincroniza cuando la deriva es de verdad.
             let drift = state.position_ms as i64 - self.now.position_ms as i64;
             let was_unknown = self.now.position_unknown;
-            if changed || (state.position_known && was_unknown) {
+            let was_playing = self.now.playing;
+            if changed
+                || (state.position_known && (was_unknown || was_playing != state.playing))
+            {
                 self.now.position_ms = state.position_ms;
                 self.now.position_seen_ms = state.position_ms;
                 self.now.position_at = Instant::now();
@@ -192,7 +196,7 @@ impl App {
 
     // --------------------------------------------------------------- letras
 
-    pub(super) fn poll_spotify(&mut self, _dt: f32) {
+    pub(super) fn poll_spotify(&mut self, dt: f32) {
         if !self.follow_spotify {
             return;
         }
@@ -200,6 +204,18 @@ impl App {
             if let Some(state) = worker.try_recv() {
                 self.apply_spotify(state);
                 self.last_spotify_poll = Instant::now();
+            }
+        }
+        // El reloj de follow se integra frame a frame; `display_position_ms`
+        // ya no suma `elapsed` en este modo. Al pausar se queda donde estaba
+        // (no salta al último sondeo ni a 0:00).
+        if self.now.playing && dt > 0.0 {
+            self.now.position_ms = self
+                .now
+                .position_ms
+                .saturating_add((dt * 1000.0) as u64);
+            if self.now.duration_ms > 0 {
+                self.now.position_ms = self.now.position_ms.min(self.now.duration_ms);
             }
         }
         if self

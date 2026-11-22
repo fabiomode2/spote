@@ -590,14 +590,25 @@ fn run_doctor() -> Result<()> {
     ] {
         println!("  {:<8} {}", name, if present { "ok" } else { "FALTA" });
     }
-    for (name, flag) in [("mpv", "--version"), ("yt-dlp", "--version")] {
-        if spote_core::util::which(name).is_none() {
-            continue;
-        }
-        if let Ok(output) = std::process::Command::new(name).arg(flag).output() {
+    if spote_core::util::which("mpv").is_some() {
+        if let Ok(output) = std::process::Command::new("mpv")
+            .arg("--version")
+            .output()
+        {
             let text = String::from_utf8_lossy(&output.stdout);
             if let Some(first) = text.lines().next() {
-                println!("  {name}: {}", first.trim());
+                println!("  mpv: {}", first.trim());
+            }
+        }
+    }
+    if spote_core::stream::ytdlp_available() {
+        if let Ok(output) = std::process::Command::new(spote_core::stream::ytdlp_bin())
+            .arg("--version")
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(first) = text.lines().next() {
+                println!("  yt-dlp: {}", first.trim());
             }
         }
     }

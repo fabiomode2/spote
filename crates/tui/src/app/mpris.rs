@@ -58,16 +58,23 @@ impl App {
                         if let Some(worker) = &self.spotify_worker {
                             worker.send(SystemCommand::Stop);
                         }
-                    } else if self.now.loading && self.pending_stream.is_some() {
+                    } else if self.now.loading
+                        && (self.pending_stream.is_some() || self.pending_play.is_some())
+                    {
                         // Stop durante la resolución no debe dejar un stream a
-                        // medio cargar que empiece solo al llegar la URL.
+                        // medio cargar que empiece solo al llegar la URL, ni
+                        // una descarga pendiente que arranque al terminar.
                         self.stream_resolver.cancel();
                         self.pending_stream = None;
+                        self.pending_play = None;
                         self.pending_seek_ms = None;
                         self.pending_seek_key = None;
                         self.stream_autoplay = false;
+                        self.streaming = false;
+                        self.stream_cache_pending = None;
                         self.now.loading = false;
                         self.now.playing = false;
+                        self.now.ended = true;
                         self.now.message.clear();
                         self.set_status("detenido");
                     } else {

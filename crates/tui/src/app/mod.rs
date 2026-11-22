@@ -361,6 +361,10 @@ pub struct NowPlaying {
     /// `true` cuando el reproductor seguido no publica `Position`: el reloj
     /// avanza por interpolación en vez de quedarse clavado en 0.
     pub position_unknown: bool,
+    /// Duración que reporta mpv para el fichero/stream actual. Puede diferir
+    /// de `duration_ms` (la de la pista): un visualizer es más largo, un vídeo
+    /// corto es más corto. Se usa para decidir el fin real.
+    pub stream_duration_ms: u64,
     pub playing: bool,
     pub volume: f32,
     pub loading: bool,
@@ -380,6 +384,7 @@ impl Default for NowPlaying {
             position_at: Instant::now(),
             position_seen_ms: 0,
             position_unknown: false,
+            stream_duration_ms: 0,
             playing: false,
             volume: 0.0,
             loading: false,
@@ -1009,7 +1014,7 @@ impl App {
             queue_selected: 0,
             queue_drag: None,
             view: Vec::new(),
-            loop_file: false,
+            loop_file: cfg.playback.repeat == "one",
             history: Vec::new(),
             play_context: Vec::new(),
             context_index: 0,
@@ -1416,6 +1421,7 @@ impl App {
         self.now.path = Some(path.clone());
         self.now.position_ms = start_ms;
         self.now.duration_ms = track.duration_ms;
+        self.now.stream_duration_ms = 0;
         self.now.playing = true;
         self.now.position_unknown = false;
         self.now.loading = false;
@@ -1494,6 +1500,7 @@ impl App {
         self.now.position_seen_ms = self.trim_start_ms;
         self.now.position_at = Instant::now();
         self.now.duration_ms = track.duration_ms;
+        self.now.stream_duration_ms = 0;
         self.stream_autoplay = true;
         // Mientras se resuelve, la intención es reproducir: MPRIS/mini deben
         // publicar `Playing` y un `Play` del sistema no debe cancelar el
@@ -2066,6 +2073,14 @@ impl App {
     /// Cambia el modo de bucle sin toast (MPRIS y el mini lo usan).
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
         if self.repeat_mode == mode {
+            // Repara el invariante si venía de config o de un SetRepeat
+            // externo con `loop_file` desincronizado.
+            self.loop_file = mode == RepeatMode::One;
+            if !self.follow_spotify {
+                if let Some(player) = &self.player {
+                    player.set_loop(self.loop_file);
+                }
+            }
             return;
         }
         self.repeat_mode = mode;
@@ -2437,7 +2452,16 @@ impl App {
     }
 
     pub fn seek_relative(&mut self, delta_ms: i64) {
-        let target = (self.now.position_ms as i64 + delta_ms).max(0) as u64;
+        if self.follow_spotify {
+            // El reproductor seguido entiende `Seek` relativo; recalcular una
+            // posición absoluta desde un reloj local atrasado saltaba a otro
+            // sitio (o abortaba si no publica `Position`).
+            if let Some(worker) = &self.spotify_worker {
+                worker.send(SystemCommand::SeekRelative(delta_ms.saturating_mul(1000)));
+            }
+            return;
+        }
+        let target = (self.display_position_ms() as i64 + delta_ms).max(0) as u64;
         self.seek_to(target);
     }
 
@@ -3045,9 +3069,10 @@ impl App {
                     // (`loop-file`), no este heurístico: si no, cada vuelta
                     // re-resolvería el stream.
                     if self.streaming
-                        && !self.loop_file
-                        && self.now.duration_ms > 0
-                        && self.now.position_ms.saturating_add(700) >= self.now.duration_ms
+                        && self.repeat_mode != RepeatMode::One
+                        && self.effective_duration_ms() > 0
+                        && self.now.position_ms.saturating_add(700)
+                            >= self.effective_duration_ms()
                     {
                         self.now.ended = true;
                         if let Some(track) = self.now.track.clone() {
@@ -3072,6 +3097,9 @@ impl App {
                 }
                 PlayerEvent::Duration(duration) => {
                     let reported = (duration * 1000.0) as u64;
+                    if reported > 0 {
+                        self.now.stream_duration_ms = reported;
+                    }
                     // En un stream el vídeo puede ser un visualizer más largo
                     // que la pista: la duración lógica manda y el corte sigue
                     // siendo el de la canción, no el del vídeo.
@@ -3083,10 +3111,9 @@ impl App {
                 PlayerEvent::Eof => {
                     // Un end-file de la pista anterior puede llegar después de
                     // cargar la siguiente. Si la posición actual está lejos
-                    // del final, el evento es obsoleto y no debe avanzar.
-                    if self.now.duration_ms > 0
-                        && self.now.position_ms.saturating_add(2_000) < self.now.duration_ms
-                    {
+                    // del final lógico/real, el evento es obsoleto.
+                    let end = self.effective_duration_ms();
+                    if end > 0 && self.now.position_ms.saturating_add(2_000) < end {
                         continue;
                     }
                     self.now.playing = false;
@@ -3638,11 +3665,23 @@ impl App {
                             } else {
                                 1
                             };
-                            let cached = self
-                                .lyrics
-                                .as_ref()
-                                .map(|old| if old.aligned { 3 } else if old.synced { 2 } else { 1 })
-                                .unwrap_or(0);
+                            let forced = self.lyrics_retry.contains(&key);
+                            let cached = if forced {
+                                0
+                            } else {
+                                self.lyrics
+                                    .as_ref()
+                                    .map(|old| {
+                                        if old.aligned {
+                                            3
+                                        } else if old.synced {
+                                            2
+                                        } else {
+                                            1
+                                        }
+                                    })
+                                    .unwrap_or(0)
+                            };
                             if cached > incoming {
                                 continue;
                             }
@@ -4277,6 +4316,13 @@ impl App {
                     self.now.playing = false;
                     self.now.ended = false;
                     self.now.message = "quitada de la cola".into();
+                    self.lyrics = None;
+                    self.lyrics_key.clear();
+                    self.lyrics_status.clear();
+                    self.lyrics_loading = false;
+                    self.art = None;
+                    self.art_key.clear();
+                    self.spectrum.stop();
                 }
             }
             self.toast("quitada de la cola", ToastKind::Info);
@@ -4527,23 +4573,38 @@ impl App {
         }
     }
 
+    /// Fin lógico de la pista actual: la duración de la canción manda sobre un
+    /// visualizer más largo, pero si el vídeo es más corto que los metadatos
+    /// no se espera a un final que nunca llega.
+    fn effective_duration_ms(&self) -> u64 {
+        match (self.now.duration_ms, self.now.stream_duration_ms) {
+            (0, reported) => reported,
+            (logical, 0) => logical,
+            (logical, reported) => logical.min(reported),
+        }
+    }
+
     /// Posición actual lista para pintar (incluye el drag en curso).
     pub fn display_position_ms(&self) -> u64 {
         if let Some(ratio) = self.drag_ratio {
             return (self.now.duration_ms as f32 * ratio) as u64;
         }
+        // En follow el reloj lo lleva `poll_spotify` frame a frame: aquí no
+        // se suma `elapsed` otra vez (eso congelaba la barra al llegar al
+        // tope de 500 ms entre sondeos de 400 ms).
+        if self.follow_spotify {
+            return if self.now.duration_ms > 0 {
+                self.now.position_ms.min(self.now.duration_ms)
+            } else {
+                self.now.position_ms
+            };
+        }
         if self.now.playing {
             let elapsed = self.now.position_at.elapsed().as_millis() as u64;
             // Tope sin retroceso: antes, al pasar 500 ms, el valor caía de
             // `position_ms + 500` a `position_ms` (diente de sierra visible
-            // en el karaoke cuando mpv tarda en informar). Si el reproductor
-            // seguido no publica `Position`, no hay tope: mejor avanzar con
-            // deriva que dejar la barra y la letra congeladas en 0.
-            let current = if self.now.position_unknown {
-                self.now.position_ms.saturating_add(elapsed)
-            } else {
-                self.now.position_ms + elapsed.min(500)
-            };
+            // en el karaoke cuando mpv tarda en informar).
+            let current = self.now.position_ms + elapsed.min(500);
             if self.now.duration_ms > 0 {
                 current.min(self.now.duration_ms)
             } else {
