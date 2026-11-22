@@ -235,6 +235,7 @@ impl App {
             Action::ToggleZen => self.set_zen(!self.zen),
             Action::Tab(tab) => {
                 self.tab = tab;
+                self.lib_search_focus = false;
                 self.needs_redraw = true;
                 if tab != Tab::Library {
                     self.lib_filter = LibFilter::All;
@@ -271,12 +272,14 @@ impl App {
                     self.volume_before_mute = self.now.volume;
                     // Silenciar no guarda 0 en config: al reabrir se conserva
                     // el volumen real, no el mute temporal.
+                    self.muted = true;
                     self.now.volume = 0.0;
                     if let Some(player) = &self.player {
                         player.set_volume(0.0);
                     }
                 } else {
                     let volume = self.volume_before_mute.max(0.2);
+                    self.muted = false;
                     self.set_volume(volume);
                 }
             }
@@ -289,6 +292,12 @@ impl App {
             Action::VizPrev => {
                 self.show_viz = true;
                 self.viz.prev_preset();
+                self.cfg.ui.viz = self.viz.preset_name().to_string();
+                self.cfg.save().ok();
+            }
+            Action::VizPreset(index) => {
+                self.show_viz = true;
+                self.viz.set_preset(index);
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
                 self.cfg.save().ok();
             }
@@ -406,6 +415,17 @@ impl App {
             Action::StartSearch => {
                 self.tab = Tab::Search;
                 self.search.query.clear();
+                self.search.results.clear();
+                self.search.albums.clear();
+                self.search.artists.clear();
+                self.search.last_query_id = self.search.last_query_id.wrapping_add(1);
+                self.search.loading = false;
+            }
+            Action::LibrarySearch => {
+                self.tab = Tab::Library;
+                self.lib_search_focus = true;
+                self.focus = Pane::Center;
+                self.needs_redraw = true;
             }
             Action::NewPlaylist => self.open_playlist_form(),
             Action::ImportPlaylist => self.open_import_playlist(),

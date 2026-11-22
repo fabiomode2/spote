@@ -45,7 +45,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
         (
             "biblioteca / búsqueda",
             vec![
-                ("/", "buscar (en buscar ya escribes)"),
+                ("/", "buscar en la biblioteca (inline)"),
                 ("enter", "reproducir / buscar"),
                 ("↑ ↓", "mover selección"),
                 ("a", "añadir a la cola"),

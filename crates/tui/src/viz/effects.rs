@@ -1,10 +1,12 @@
 #![allow(dead_code)]
 //! Los efectos. Mecanismos portados de `cli-viz` (spectrum bars, wave, circle,
 //! particles, flame, matrix, starfield, fractal, neural, pulsar, tunnel,
-//! spectro3d, scope), recoloreados con la paleta del álbum.
+//! spectro3d, scope, lcd, led, braille, floor), recoloreados con la paleta del
+//! álbum.
 
 use std::collections::VecDeque;
 
+use super::dots::Dots;
 use super::{Effect, Layer, Params, Rng, VizCtx};
 use spote_core::audio::{AudioFrame, BANDS, WAVE};
 use spote_core::artwork::Rgb;
@@ -29,6 +31,10 @@ pub fn effect_by_key(key: &str) -> Box<dyn Effect> {
         "tunnel" => Box::new(Tunnel::default()),
         "spectro3d" => Box::new(Spectro3d::default()),
         "scope" => Box::new(Scope::default()),
+        "lcd" => Box::new(Lcd::default()),
+        "led" => Box::new(Led::default()),
+        "bars_braille" => Box::new(BarsBraille::default()),
+        "floor" => Box::new(Floor::default()),
         _ => Box::new(Bars::default()),
     }
 }
@@ -48,10 +54,14 @@ pub enum EffectKind {
     Tunnel,
     Spectro3d,
     Scope,
+    Lcd,
+    Led,
+    BarsBraille,
+    Floor,
 }
 
 impl EffectKind {
-    pub const ALL: [EffectKind; 13] = [
+    pub const ALL: [EffectKind; 17] = [
         EffectKind::Bars,
         EffectKind::Wave,
         EffectKind::Circle,
@@ -65,6 +75,10 @@ impl EffectKind {
         EffectKind::Tunnel,
         EffectKind::Spectro3d,
         EffectKind::Scope,
+        EffectKind::Lcd,
+        EffectKind::Led,
+        EffectKind::BarsBraille,
+        EffectKind::Floor,
     ];
 
     pub fn key(self) -> &'static str {
@@ -82,6 +96,10 @@ impl EffectKind {
             Self::Tunnel => "tunnel",
             Self::Spectro3d => "spectro3d",
             Self::Scope => "scope",
+            Self::Lcd => "lcd",
+            Self::Led => "led",
+            Self::BarsBraille => "bars_braille",
+            Self::Floor => "floor",
         }
     }
 }
@@ -1445,6 +1463,403 @@ impl Effect for Scope {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 14. LCD segmentado
+// ---------------------------------------------------------------------------
+
+/// Tiempo que un pico se queda clavado antes de empezar a caer.
+const PEAK_HOLD: f32 = 0.30;
+
+/// Avanza un pico con hold y caída. `target` y `peak` van en celdas.
+fn update_peak(peak: &mut f32, hold: &mut f32, target: f32, dt: f32, speed: f32) {
+    if target >= *peak {
+        *peak = target;
+        *hold = PEAK_HOLD;
+    } else if *hold > 0.0 {
+        *hold = (*hold - dt).max(0.0);
+    } else {
+        let fall = (2.2 + *peak * 2.6) * dt * speed.clamp(0.25, 4.0);
+        *peak = (*peak - fall).max(target);
+    }
+}
+
+pub struct Lcd {
+    params: Params,
+    peaks: Vec<f32>,
+    holds: Vec<f32>,
+}
+
+impl Default for Lcd {
+    fn default() -> Self {
+        Self {
+            params: Params::default(),
+            peaks: Vec::new(),
+            holds: Vec::new(),
+        }
+    }
+}
+
+impl Effect for Lcd {
+    fn key(&self) -> &'static str {
+        "lcd"
+    }
+    fn name(&self) -> &'static str {
+        "lcd segmentado"
+    }
+    fn params(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn frame(&mut self, layer: &mut Layer, ctx: &VizCtx) {
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        // La tira de osciloscopio solo cabe si el ecualizador conserva altura.
+        let scope_h = if h >= 16 {
+            4
+        } else if h >= 12 {
+            3
+        } else if h >= 8 {
+            2
+        } else {
+            0
+        };
+        let bars_h = (h - scope_h - i32::from(scope_h > 0)).max(1);
+        let count = ((w / 3).clamp(4, 24)) as usize;
+        if self.peaks.len() < count {
+            self.peaks.resize(count, 0.0);
+            self.holds.resize(count, 0.0);
+        }
+        let slot = (w / count as i32).max(1);
+        let bar_w = (slot - 1).max(1);
+        for i in 0..count {
+            let t = i as f32 / (count - 1).max(1) as f32;
+            let band = t.powf(1.15) * (BANDS - 1) as f32;
+            let value =
+                (ctx.audio.band(band) * self.params.sensitivity * (1.0 + ctx.audio.kick * 0.25))
+                    .clamp(0.0, 1.0);
+            let height = value * bars_h as f32;
+            update_peak(
+                &mut self.peaks[i],
+                &mut self.holds[i],
+                height,
+                ctx.dt,
+                self.params.speed,
+            );
+            let peak = self.peaks[i];
+            // Segmentos de dos filas: las impares quedan apagadas (scanlines).
+            let segments = ((bars_h + 1) / 2).max(1);
+            let lit = ((value * segments as f32).round() as i32 * 2).min(bars_h);
+            let x0 = (i as i32 * slot).max(0);
+            let x1 = (x0 + bar_w).min(w);
+            for row in (0..lit).step_by(2) {
+                let y = bars_h - 1 - row;
+                let color = ctx.shade(0.45 + 0.50 * row as f32 / bars_h as f32);
+                for x in x0..x1 {
+                    layer.put(x, y, '█', color, 0.95);
+                }
+            }
+            if peak > height + 0.6 && peak >= 1.0 {
+                let row = peak.floor() as i32;
+                let y = (bars_h - 1 - row).clamp(0, bars_h - 1);
+                let color = ctx.shade(0.98);
+                for x in x0..x1 {
+                    layer.put(x, y, '▔', color, 0.9);
+                }
+            }
+        }
+        if scope_h > 0 {
+            let sep_y = bars_h;
+            let sep = ctx.shade(0.28);
+            for x in 0..w {
+                layer.put(x, sep_y, '─', sep, 0.35);
+            }
+            let top = bars_h + 1;
+            let base = top as f32 + (scope_h as f32 - 1.0) * 0.5;
+            let amp = ((scope_h as f32 - 1.0) * 0.5).max(0.5);
+            let color = ctx.shade(0.82);
+            for x in 0..w {
+                let t = if w > 1 {
+                    x as f32 / (w - 1) as f32
+                } else {
+                    0.0
+                };
+                let y = (base - ctx.audio.waveform_at(t) * amp).round() as i32;
+                layer.put(x, y.clamp(top, h - 1), '•', color, 0.9);
+            }
+            let base_y = (base.round() as i32).clamp(top, h - 1);
+            let dim = ctx.shade(0.35);
+            for x in (0..w).step_by(2) {
+                if layer.ch_at(x, base_y) == ' ' {
+                    layer.put(x, base_y, '·', dim, 0.25);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 15. Escalera LED (rack)
+// ---------------------------------------------------------------------------
+
+const ISO_LABELS: [&str; 10] = [
+    "31", "63", "125", "250", "500", "1k", "2k", "4k", "8k", "16k",
+];
+
+pub struct Led {
+    params: Params,
+    peaks: Vec<f32>,
+    holds: Vec<f32>,
+}
+
+impl Default for Led {
+    fn default() -> Self {
+        Self {
+            params: Params::default(),
+            peaks: Vec::new(),
+            holds: Vec::new(),
+        }
+    }
+}
+
+/// Etiquetas ISO centradas bajo cada banda, solo si el ancho da para ello.
+fn draw_iso_labels(layer: &mut Layer, ctx: &VizCtx, w: i32, h: i32, count: usize, slot: i32) {
+    if w <= 0 || h <= 0 || count == 0 {
+        return;
+    }
+    let color = ctx.shade(0.38);
+    let y = h - 1;
+    let last = (count - 1).max(1) as f32;
+    for (index, label) in ISO_LABELS.iter().enumerate() {
+        let pos = index as f32 / (ISO_LABELS.len() - 1) as f32 * last;
+        let band = pos.round() as i32;
+        let x0 = band * slot + slot / 2 - (label.len() as i32) / 2;
+        for (offset, ch) in label.chars().enumerate() {
+            let x = x0 + offset as i32;
+            if x >= 0 && x < w {
+                layer.put(x, y, ch, color, 0.65);
+            }
+        }
+    }
+}
+
+impl Effect for Led {
+    fn key(&self) -> &'static str {
+        "led"
+    }
+    fn name(&self) -> &'static str {
+        "escalera led"
+    }
+    fn params(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn frame(&mut self, layer: &mut Layer, ctx: &VizCtx) {
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        // Las etiquetas de frecuencia solo entran con ancho y alto de sobra.
+        let labels = w >= 72 && h >= 14;
+        let usable = (h - i32::from(labels)).max(1);
+        let count = ((w / 4).clamp(10, 16)) as usize;
+        if self.peaks.len() < count {
+            self.peaks.resize(count, 0.0);
+            self.holds.resize(count, 0.0);
+        }
+        let slot = (w / count as i32).max(1);
+        let seg_w = slot.min(3).max(1);
+        for i in 0..count {
+            let t = i as f32 / (count - 1).max(1) as f32;
+            let band = t * (BANDS - 1) as f32;
+            let value =
+                (ctx.audio.band(band) * self.params.sensitivity * (1.0 + ctx.audio.kick * 0.22))
+                    .clamp(0.0, 1.0);
+            let height = value * usable as f32;
+            update_peak(
+                &mut self.peaks[i],
+                &mut self.holds[i],
+                height,
+                ctx.dt,
+                self.params.speed,
+            );
+            let peak = self.peaks[i];
+            let lit = (height.floor() as i32).min(usable);
+            let x0 = i as i32 * slot + (slot - seg_w) / 2;
+            let x1 = (x0 + seg_w).min(w);
+            for row in 0..lit {
+                // Tres zonas de la rampa: cuerpo, medio y techo del LED.
+                let zone = row as f32 / usable as f32;
+                let color = if zone < 0.34 {
+                    ctx.shade(0.45)
+                } else if zone < 0.67 {
+                    ctx.shade(0.72)
+                } else {
+                    ctx.shade(0.95)
+                };
+                let y = usable - 1 - row;
+                for x in x0..x1 {
+                    layer.put(x, y, '█', color, 0.95);
+                }
+            }
+            if peak > height + 0.6 && peak >= 1.0 {
+                let y = (usable - 1 - peak.floor() as i32).clamp(0, usable - 1);
+                let color = ctx.shade(0.95);
+                for x in x0..x1 {
+                    layer.put(x, y, '▔', color, 0.9);
+                }
+            }
+        }
+        if labels {
+            draw_iso_labels(layer, ctx, w, h, count, slot);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16. Espectro Braille
+// ---------------------------------------------------------------------------
+
+pub struct BarsBraille {
+    params: Params,
+    dots: Dots,
+}
+
+impl Default for BarsBraille {
+    fn default() -> Self {
+        Self {
+            params: Params::default(),
+            dots: Dots::default(),
+        }
+    }
+}
+
+impl Effect for BarsBraille {
+    fn key(&self) -> &'static str {
+        "bars_braille"
+    }
+    fn name(&self) -> &'static str {
+        "espectro braille"
+    }
+    fn params(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn frame(&mut self, layer: &mut Layer, ctx: &VizCtx) {
+        let (w, h) = (layer.w, layer.h);
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.dots.resize(w, h);
+        self.dots.clear();
+        let dw = w as i32 * 2;
+        let dh = h as i32 * 4;
+        for x in 0..dw {
+            let t = if dw > 1 {
+                x as f32 / (dw - 1) as f32
+            } else {
+                0.0
+            };
+            let band = t.powf(1.15) * (BANDS - 1) as f32;
+            let value =
+                (ctx.audio.band(band) * self.params.sensitivity * (1.0 + ctx.audio.kick * 0.18))
+                    .clamp(0.0, 1.0);
+            // Relleno continuo desde abajo: no quedan huecos entre barras.
+            let top = dh - (value * dh as f32).round() as i32;
+            for y in top.max(0)..dh {
+                self.dots.plot(x, y, 1.0);
+            }
+        }
+        self.dots.render(layer, ctx, 128, 0.28, 0.92);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 17. Escenario en perspectiva
+// ---------------------------------------------------------------------------
+
+pub struct Floor {
+    params: Params,
+}
+
+impl Default for Floor {
+    fn default() -> Self {
+        Self {
+            params: Params::default(),
+        }
+    }
+}
+
+/// Rango horizontal del cuadrilátero del escenario en una fila. El trapecio
+/// se estrecha hacia atrás; `None` fuera de la franja del suelo.
+fn stage_span(w: i32, h: i32, y: i32) -> Option<(i32, i32)> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let near_y = h as f32 - 1.0;
+    let far_y = (h as f32 * 0.22).floor();
+    if (y as f32) < far_y || (y as f32) > near_y + 0.5 {
+        return None;
+    }
+    let span = (near_y - far_y).max(1.0);
+    let s = ((y as f32 - far_y) / span).clamp(0.0, 1.0);
+    let cx = w as f32 * 0.5;
+    let half = w as f32 * (0.18 + (0.46 - 0.18) * s);
+    let left = (cx - half).round() as i32;
+    let right = (cx + half).round() as i32;
+    Some((left.clamp(0, w - 1), right.clamp(0, w - 1)))
+}
+
+impl Effect for Floor {
+    fn key(&self) -> &'static str {
+        "floor"
+    }
+    fn name(&self) -> &'static str {
+        "escenario"
+    }
+    fn params(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn frame(&mut self, layer: &mut Layer, ctx: &VizCtx) {
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w < 4 || h < 3 {
+            return;
+        }
+        let strips = 12usize;
+        let near_y = h as f32 - 1.0;
+        let far_y = (h as f32 * 0.22).floor();
+        // Bordes del cuadrilátero: el suelo se estrecha hacia el fondo.
+        let edge = ctx.shade(0.22);
+        for y in far_y as i32..=near_y as i32 {
+            if let Some((left, right)) = stage_span(w, h, y) {
+                layer.put(left, y, '│', edge, 0.30);
+                layer.put(right, y, '│', edge, 0.30);
+            }
+        }
+        // De atrás hacia delante: las tiras cercanas se pintan encima.
+        for strip in 0..strips {
+            let t = strip as f32 / (strips - 1) as f32;
+            let p = t.powf(1.55);
+            let y = (far_y + (near_y - far_y) * p).round() as i32;
+            let Some((left, right)) = stage_span(w, h, y) else {
+                continue;
+            };
+            // Delante (t=1) lleva los graves; el fondo, los agudos.
+            let value = (ctx.audio.band((1.0 - t) * (BANDS - 1) as f32) * self.params.sensitivity)
+                .clamp(0.0, 1.0);
+            let depth = 0.35 + 0.65 * t;
+            let color = ctx.shade((0.28 + value * 0.68).min(1.0));
+            let alpha = (0.14 + value * 0.78) * (0.55 + 0.45 * depth);
+            let ch = if value > 0.62 { '═' } else { '─' };
+            for x in left..=right {
+                layer.put(x, y, ch, color, alpha);
+            }
+        }
+    }
+}
+
 /// Utilidad para tests: un frame con energía.
 pub fn test_audio(energy: f32) -> AudioFrame {
     let mut audio = AudioFrame::default();
@@ -1649,5 +2064,125 @@ mod tests {
         scope.frame(&mut layer, &ctx);
         assert!(scope.sweeps.is_empty(), "el silencio no debe capturar barridos");
         assert_eq!(layer.ch_at(0, 4), '·', "falta la línea base");
+    }
+
+    #[test]
+    fn new_effects_register_with_their_keys() {
+        let expected = [
+            ("lcd", EffectKind::Lcd),
+            ("led", EffectKind::Led),
+            ("bars_braille", EffectKind::BarsBraille),
+            ("floor", EffectKind::Floor),
+        ];
+        for (key, kind) in expected {
+            let effect = effect_by_key(key);
+            assert_eq!(effect.key(), key);
+            assert!(EffectKind::ALL.contains(&kind), "{key} no está en ALL");
+        }
+        assert_eq!(EffectKind::ALL.len(), 17);
+    }
+
+    #[test]
+    fn new_effects_draw_and_survive_extreme_geometries() {
+        let palette = Palette::dark();
+        let audio = test_audio(0.8);
+        for key in ["lcd", "led", "bars_braille", "floor"] {
+            let mut effect = effect_by_key(key);
+            for (w, h) in [(20u16, 6u16), (1, 1), (120, 40)] {
+                let mut layer = Layer::new(w, h);
+                let ctx = VizCtx {
+                    audio: &audio,
+                    palette: &palette,
+                    lut: crate::viz::shade_lut(&palette),
+                    w,
+                    h,
+                    dt: 1.0 / 60.0,
+                    time: 3.0,
+                };
+                for _ in 0..8 {
+                    layer.clear();
+                    effect.frame(&mut layer, &ctx);
+                }
+                if w > 10 {
+                    let drawn = layer.cells.iter().filter(|cell| cell.ch != ' ').count();
+                    assert!(drawn > 3, "{key} no dibuja a {w}x{h} (drawn={drawn})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_presets_compose() {
+        for preset in ["lcd", "rack", "braille", "stage"] {
+            assert!(render_all(preset, 100, 10) > 20, "preset {preset} vacío");
+        }
+    }
+
+    #[test]
+    fn braille_spectrum_leaves_no_holes() {
+        let palette = Palette::dark();
+        let mut audio = test_audio(0.9);
+        for band in audio.bands.iter_mut() {
+            *band = 0.9;
+        }
+        let mut effect = effect_by_key("bars_braille");
+        let (w, h) = (60u16, 16u16);
+        let mut layer = Layer::new(w, h);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut: crate::viz::shade_lut(&palette),
+            w,
+            h,
+            dt: 1.0 / 60.0,
+            time: 2.0,
+        };
+        effect.frame(&mut layer, &ctx);
+        let bottom = h as i32 - 1;
+        for x in 0..w as i32 {
+            let ch = layer.ch_at(x, bottom);
+            assert!(
+                ('\u{2800}'..='\u{28ff}').contains(&ch),
+                "hueco en el braille: x={x} ch={ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn floor_never_paints_outside_the_stage() {
+        let palette = Palette::dark();
+        let audio = test_audio(0.8);
+        let (w, h) = (80u16, 24u16);
+        let mut floor = Floor::default();
+        let mut layer = Layer::new(w, h);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut: crate::viz::shade_lut(&palette),
+            w,
+            h,
+            dt: 1.0 / 60.0,
+            time: 1.5,
+        };
+        floor.frame(&mut layer, &ctx);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                if layer.ch_at(x, y) == ' ' {
+                    continue;
+                }
+                let (left, right) =
+                    stage_span(w as i32, h as i32, y).expect("celda fuera de la franja");
+                assert!(
+                    x >= left && x <= right,
+                    "({x},{y}) fuera del escenario {left}..={right}"
+                );
+            }
+        }
+        assert_eq!(layer.ch_at(0, 0), ' ', "la esquina superior no es suelo");
+        assert_eq!(
+            layer.ch_at(w as i32 - 1, h as i32 - 1),
+            ' ',
+            "la esquina inferior no es suelo"
+        );
     }
 }

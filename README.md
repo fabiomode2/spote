@@ -26,6 +26,8 @@ la propia TUI.
 
 - **Arte**: portada en half-block, dither, braille o imagen real en Kitty. La
   paleta del tema sale de la carátula.
+- **Visuales**: `clean`, `aurora`, `bloom`, `inferno`, `crt`, `lcd`, `rack`,
+  `braille` y `stage`; `v` cicla y `V` los pone a pantalla completa.
 - **Letras**: LRCLIB, lrcmux, Genius y ASR local. lrcmux añade cobertura
   sincronizada; LRCLIB y Genius siguen como respaldo. Un LRC sincronizado bueno
   no se toca; el estimado se afina solo con el audio.
@@ -36,7 +38,8 @@ la propia TUI.
   y suena al momento mientras se guarda la copia local. `I` importa playlists y
   álbumes.
 - **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
-  locales. `z` alterna tarjetas con portada y lista compacta.
+  locales. `z` alterna tarjetas con portada y lista compacta. `/` en la
+  biblioteca abre un filtro inline por título, artista o álbum.
 - **Salas**: `spoted` añade presencia, chat y cola compartida.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.
@@ -48,11 +51,12 @@ la propia TUI.
 | `space` | play/pausa | `a` | encolar |
 | `n` / `p` | siguiente / anterior | `f` | favorita |
 | `←` `→` | seek ±5 s | `g` | artista |
-| `/` | buscar | `T` | recortar intro/outro |
+| `/` | buscar · filtro en biblioteca | `T` | recortar intro/outro |
 | `u` | bucle de la pista | `F` | portada a pantalla completa |
 | `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
-| `E` | editor de diseño | `?` | ayuda |
+| `E` | editor de diseño | `Esc` | limpiar búsqueda |
+| `?` | ayuda | | |
 
 ## Cómo funciona
 
@@ -68,7 +72,7 @@ Config, datos y caché en XDG (`~/.config/spote`, `~/.local/share/spote`,
 ```toml
 [ui]
 art_mode = "default"   # default | half | pixel | braille | off
-viz = "clean"          # clean | aurora | bloom | inferno | crt
+viz = "clean"          # clean | aurora | bloom | inferno | crt | lcd | rack | braille | stage
 fps = 60               # frames de la UI (20-60)
 fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
 

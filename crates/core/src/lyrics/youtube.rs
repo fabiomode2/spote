@@ -8,20 +8,21 @@
 //! Si `yt-dlp` no está, el vídeo no tiene subtítulos o el VTT no se puede
 //! leer, se devuelve `None` y sigue el fallback normal (letra plana + ASR).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use spote_protocol::TrackRef;
 use tokio::process::Command;
 
 use super::align::{align_lines, AsrWord};
-use super::text::{artist_similarity, similarity};
+use super::text::{artist_similarity, is_youtube_provider, similarity, version_kind};
 use super::{LyricLine, LyricsDoc, LyricsSource};
 use crate::util;
 
-const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
-const SUBS_TIMEOUT: Duration = Duration::from_secs(18);
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(8);
+const SUBS_TIMEOUT: Duration = Duration::from_secs(14);
 const MAX_CANDIDATES: usize = 2;
 
 #[derive(Debug, Clone)]
@@ -32,11 +33,29 @@ struct Candidate {
 /// Busca captions para `track`. `known` es la letra que ya tenemos (LRCLIB o
 /// Genius): si existe, se usa para alinear; si no, se devuelven las líneas del
 /// propio VTT.
-pub async fn fetch(track: &TrackRef, known: Option<&LyricsDoc>) -> Option<LyricsDoc> {
+///
+/// Si la pista viene de YouTube con `videoId`, solo se usan las captions de ese
+/// vídeo: son las del audio descargado y no hay que adivinar por búsqueda. Si
+/// el vídeo no tiene subtítulos se devuelve `None` y el llamante conserva la
+/// letra conocida; mezclar captions de otro upload desplaza los tiempos.
+pub async fn fetch(
+    track: &TrackRef,
+    known: Option<&LyricsDoc>,
+    deadline: Instant,
+) -> Option<LyricsDoc> {
     let ytdlp = util::which("yt-dlp")?;
-    let candidates = candidates(&ytdlp, track).await;
+    if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(1) {
+        return None;
+    }
+    let candidates = match hint_video_id(track) {
+        Some(id) => vec![Candidate { id: id.to_string() }],
+        None => candidates(&ytdlp, track, deadline).await,
+    };
     for candidate in candidates.iter().take(MAX_CANDIDATES) {
-        let Some(vtt) = subtitles(&ytdlp, &candidate.id).await else {
+        let Some(texts) = subtitles(&ytdlp, &candidate.id, deadline).await else {
+            continue;
+        };
+        let Some(vtt) = pick_subtitle(&texts, known) else {
             continue;
         };
         let cues = parse_vtt(&vtt);
@@ -47,32 +66,37 @@ pub async fn fetch(track: &TrackRef, known: Option<&LyricsDoc>) -> Option<Lyrics
     None
 }
 
-async fn candidates(ytdlp: &PathBuf, track: &TrackRef) -> Vec<Candidate> {
-    let mut out: Vec<(f64, Candidate)> = Vec::new();
-    // Si la pista viene de YouTube, ese vídeo es el primero: sus captions
-    // cuadran con el audio descargado y no hay que buscar nada.
-    if let Some(hint) = &track.source_hint {
-        let provider = hint.provider.to_ascii_lowercase();
-        if (provider.contains("youtube") || provider == "ytmusic")
-            && !hint.id.trim().is_empty()
-            && !hint.id.contains(' ')
-        {
-            out.push((
-                100.0,
-                Candidate {
-                    id: hint.id.clone(),
-                },
-            ));
-        }
+/// Id exacto del vídeo cuando la pista se descargó de YouTube/YT Music.
+fn hint_video_id(track: &TrackRef) -> Option<&str> {
+    let hint = track.source_hint.as_ref()?;
+    if !is_youtube_provider(&hint.provider) {
+        return None;
     }
+    let id = hint.id.trim();
+    let valid = (6..=20).contains(&id.len())
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    valid.then_some(id)
+}
 
+async fn candidates(ytdlp: &PathBuf, track: &TrackRef, deadline: Instant) -> Vec<Candidate> {
+    let mut out: Vec<(f64, Candidate)> = Vec::new();
+    // Solo se busca cuando no hay un id exacto: la pista llegó de Spotify/Deezer
+    // y el audio puede ser de cualquier upload. Se limpian los metadatos para
+    // que un título de YouTube no arrastre "Official Video" a la búsqueda.
+    let target = super::remote::MatchTarget::from_track(track);
     let query = format!(
         "ytsearch6:{} {} lyrics",
-        track.artist.trim(),
-        track.title.trim()
+        target.artist.trim(),
+        target.title.trim()
     );
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining < Duration::from_secs(2) {
+        return out.into_iter().map(|(_, candidate)| candidate).collect();
+    }
     let output = match tokio::time::timeout(
-        SEARCH_TIMEOUT,
+        remaining.min(SEARCH_TIMEOUT),
         Command::new(ytdlp)
             .kill_on_drop(true)
             .args([
@@ -110,12 +134,22 @@ async fn candidates(ytdlp: &PathBuf, track: &TrackRef) -> Vec<Candidate> {
                 .unwrap_or_default()
                 .to_string();
             let duration_s = value.get("duration").and_then(Value::as_f64);
-            let title_score = similarity(&title, &track.title);
-            if title_score < 0.45 {
+            // Una versión distinta (directo, remix, cover) no tiene por qué
+            // compartir tiempos ni texto con la pista pedida.
+            if version_kind(&title, None) != target.version {
                 continue;
             }
-            let artist_score = artist_similarity(&channel, &track.artist);
-            let duration_score = match (duration_s, track.duration_ms) {
+            let title_score = similarity(&title, &target.title);
+            let minimum = if target.artist.trim().is_empty() {
+                0.65
+            } else {
+                0.45
+            };
+            if title_score < minimum {
+                continue;
+            }
+            let artist_score = artist_similarity(&channel, &target.artist);
+            let duration_score = match (duration_s, target.duration_ms) {
                 (Some(duration), duration_ms) if duration_ms > 0 => {
                     let diff = (duration * 1000.0 - duration_ms as f64).abs();
                     if diff <= 3_000.0 {
@@ -134,23 +168,22 @@ async fn candidates(ytdlp: &PathBuf, track: &TrackRef) -> Vec<Candidate> {
             if duration_score <= 0.0 {
                 continue;
             }
-            out.push((
-                score,
-                Candidate {
-                    id: id.to_string(),
-                },
-            ));
+            out.push((score, Candidate { id: id.to_string() }));
         }
     }
     out.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     out.into_iter()
         .filter(|(_, candidate)| seen.insert(candidate.id.clone()))
         .map(|(_, candidate)| candidate)
         .collect()
 }
 
-async fn subtitles(ytdlp: &PathBuf, video_id: &str) -> Option<String> {
+async fn subtitles(ytdlp: &PathBuf, video_id: &str, deadline: Instant) -> Option<Vec<String>> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining < Duration::from_secs(1) {
+        return None;
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -160,7 +193,7 @@ async fn subtitles(ytdlp: &PathBuf, video_id: &str) -> Option<String> {
     let pattern = dir.join("%(id)s.%(ext)s");
     let url = format!("https://www.youtube.com/watch?v={video_id}");
     let _ = tokio::time::timeout(
-        SUBS_TIMEOUT,
+        remaining.min(SUBS_TIMEOUT),
         Command::new(ytdlp)
             .kill_on_drop(true)
             .args([
@@ -193,12 +226,51 @@ async fn subtitles(ytdlp: &PathBuf, video_id: &str) -> Option<String> {
         .filter(|path| path.extension().is_some_and(|ext| ext == "vtt"))
         .collect();
     files.sort();
-    let text = files
+    let texts: Vec<String> = files
         .iter()
         .filter_map(|path| std::fs::read_to_string(path).ok())
-        .max_by_key(String::len);
+        .collect();
     let _ = std::fs::remove_dir_all(&dir);
-    text
+    (!texts.is_empty()).then_some(texts)
+}
+
+/// Elige el VTT que mejor casa con la letra conocida. yt-dlp puede bajar la
+/// pista original y su traducción; el archivo más grande no siempre es el
+/// bueno. Sin letra conocida se queda el más largo (el más completo).
+fn pick_subtitle(texts: &[String], known: Option<&LyricsDoc>) -> Option<String> {
+    if texts.is_empty() {
+        return None;
+    }
+    let Some(known) = known else {
+        return texts.iter().max_by_key(|text| text.len()).cloned();
+    };
+    let wanted: HashSet<String> = known
+        .lines
+        .iter()
+        .flat_map(|line| {
+            line.text
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|token| token.chars().count() >= 2)
+                .map(|token| token.to_lowercase())
+        })
+        .collect();
+    if wanted.is_empty() {
+        return texts.iter().max_by_key(|text| text.len()).cloned();
+    }
+    let mut best: Option<(usize, &String)> = None;
+    for text in texts {
+        let plain = strip_tags(text);
+        let overlap = plain
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|token| token.chars().count() >= 2)
+            .map(|token| token.to_lowercase())
+            .filter(|token| wanted.contains(token))
+            .count();
+        if best.as_ref().is_none_or(|(best, _)| overlap > *best) {
+            best = Some((overlap, text));
+        }
+    }
+    best.map(|(_, text)| text.clone())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -217,16 +289,42 @@ fn build_doc(track: &TrackRef, known: Option<&LyricsDoc>, cues: &[Cue]) -> Optio
         .collect();
     if words.len() >= 6 {
         if let Some(known) = known.filter(|doc| doc.lines.len() >= 2) {
-            if let Some((lines, confidence, _)) = align_lines(&known.lines, &words, duration_s) {
-                if confidence >= 0.35 {
-                    return Some(LyricsDoc {
-                        lines,
-                        synced: true,
-                        instrumental: known.instrumental,
-                        source: LyricsSource::Captions,
-                        offset_ms: 0,
-                        aligned: false,
-                    });
+            // `align_lines` calcula contra tiempo de audio: hay que quitar el
+            // offset del documento (hoy siempre 0, pero el parser lo hornea) y
+            // las marcas instrumentales, que no se cantan.
+            let offset = known.offset_ms;
+            let known_lines: Vec<LyricLine> = known
+                .lines
+                .iter()
+                .filter(|line| {
+                    let text = line.text.trim();
+                    !text.is_empty() && text != "♪" && text.chars().any(|ch| ch.is_alphanumeric())
+                })
+                .map(|line| {
+                    let mut line = line.clone();
+                    line.start_ms = (line.start_ms as i64 - offset).max(0) as u64;
+                    line.end_ms = (line.end_ms as i64 - offset).max(0) as u64;
+                    line.words.clear();
+                    line.words_exact = false;
+                    line
+                })
+                .collect();
+            if known_lines.len() >= 2 {
+                if let Some((lines, confidence, _)) = align_lines(&known_lines, &words, duration_s)
+                {
+                    // Sustituir un LRC ya sincronizado exige más confianza que
+                    // completar una letra plana.
+                    let minimum = if known.synced { 0.45 } else { 0.35 };
+                    if confidence >= minimum {
+                        return Some(LyricsDoc {
+                            lines,
+                            synced: true,
+                            instrumental: known.instrumental,
+                            source: LyricsSource::Captions,
+                            offset_ms: 0,
+                            aligned: false,
+                        });
+                    }
                 }
             }
         }
@@ -242,7 +340,7 @@ fn build_doc(track: &TrackRef, known: Option<&LyricsDoc>, cues: &[Cue]) -> Optio
     let mut previous_text = String::new();
     for cue in cues {
         let text = cue.text.trim();
-        if text.is_empty() || text == previous_text {
+        if text.is_empty() || text == previous_text || is_caption_noise(text) {
             continue;
         }
         previous_text = text.to_string();
@@ -275,6 +373,19 @@ fn build_doc(track: &TrackRef, known: Option<&LyricsDoc>, cues: &[Cue]) -> Optio
         offset_ms: 0,
         aligned: false,
     })
+}
+
+/// Anotaciones de auto-captions que no son letra: `[Música]`, `[Applause]`,
+/// `♪` suelto. Si se cuelan, el documento parece tener versos que no existen.
+fn is_caption_noise(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return true;
+    }
+    if text.chars().all(|ch| ch == '♪' || ch.is_whitespace()) {
+        return true;
+    }
+    text.starts_with('[') && text.ends_with(']') && !text[1..text.len() - 1].contains('[')
 }
 
 fn parse_vtt(text: &str) -> Vec<Cue> {
@@ -341,9 +452,9 @@ fn parse_time(text: &str) -> Option<f64> {
                 + minutes.parse::<f64>().ok()? * 60.0
                 + seconds.parse::<f64>().ok()?,
         ),
-        [minutes, seconds] => Some(
-            minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?,
-        ),
+        [minutes, seconds] => {
+            Some(minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?)
+        }
         _ => None,
     }
 }
@@ -516,5 +627,60 @@ mod tests {
         .unwrap();
         assert_eq!(doc.lines.len(), 2);
         assert_eq!(doc.source, LyricsSource::Captions);
+    }
+
+    #[test]
+    fn exact_youtube_hint_is_recognized() {
+        let track = TrackRef {
+            title: "Arctic Monkeys - Do I Wanna Know? (Official Video)".into(),
+            artist: "Arctic Monkeys - Topic".into(),
+            source_hint: Some(spote_protocol::SourceHint {
+                provider: "youtube".into(),
+                id: "bpOSn9Q1xQU".into(),
+                duration_ms: 290_000,
+            }),
+            ..TrackRef::default()
+        };
+        assert_eq!(hint_video_id(&track), Some("bpOSn9Q1xQU"));
+
+        let mut music = track.clone();
+        music.source_hint = Some(spote_protocol::SourceHint {
+            provider: "ytmusic".into(),
+            id: "bpOSn9Q1xQU".into(),
+            duration_ms: 0,
+        });
+        assert_eq!(hint_video_id(&music), Some("bpOSn9Q1xQU"));
+
+        let mut other = track;
+        other.source_hint = Some(spote_protocol::SourceHint {
+            provider: "spotify".into(),
+            id: "abc".into(),
+            duration_ms: 0,
+        });
+        assert_eq!(hint_video_id(&other), None);
+    }
+
+    #[test]
+    fn subtitle_pick_prefers_the_transcript_that_matches_the_lyrics() {
+        // yt-dlp puede bajar la letra original y una traducción; el archivo más
+        // grande no siempre es el que comparte palabras con la letra conocida.
+        let known = LyricsDoc::from_lrc(
+            "[00:00.00]hola mundo\n[00:02.00]otra frase cualquiera",
+            true,
+        );
+        let translated = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nbonjour le monde\n";
+        let original = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nhola mundo otra frase\n";
+        let texts = vec![translated.to_string(), original.to_string()];
+        let picked = pick_subtitle(&texts, Some(&known)).unwrap();
+        assert!(picked.contains("hola mundo"), "{picked}");
+    }
+
+    #[test]
+    fn caption_noise_is_not_lyrics() {
+        for text in ["[Música]", "[Applause]", "♪♪", "   "] {
+            assert!(is_caption_noise(text), "{text}");
+        }
+        assert!(!is_caption_noise("Hola mundo"));
+        assert!(!is_caption_noise("(oh oh)"));
     }
 }

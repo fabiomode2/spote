@@ -210,6 +210,7 @@ impl PlaylistForm {
 pub enum Action {
     Tab(Tab),
     LibraryFilter(LibFilter),
+    LibrarySearch,
     PlaylistOpen(i64),
     SettingsRow(usize),
     SettingsAdjust(usize, i32),
@@ -229,6 +230,7 @@ pub enum Action {
     FocusTransport,
     VizNext,
     VizPrev,
+    VizPreset(usize),
     VizLayer(usize),
     VizFullscreen,
     VizToggle,
@@ -716,6 +718,8 @@ pub struct App {
     pub center_focus: CenterFocus,
     pub now: NowPlaying,
     pub volume_before_mute: f32,
+    /// `true` mientras el silencio es temporal; no se persiste como volumen 0.
+    pub muted: bool,
     pub player_events: Option<tokio::sync::broadcast::Receiver<PlayerEvent>>,
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
@@ -743,6 +747,9 @@ pub struct App {
     pub album_page_status: String,
     pub lib_filter: LibFilter,
     pub selected: usize,
+    /// Filtro de texto de la biblioteca (buscador inline).
+    pub lib_query: String,
+    pub lib_search_focus: bool,
     /// Primera fila visible de la biblioteca. El scroll es por bordes: la
     /// selección se mueve dentro de la página y la lista solo desplaza cuando
     /// hace falta, sin que la "cámara" persiga al cursor con un muelle.
@@ -938,6 +945,7 @@ impl App {
                 ..Default::default()
             },
             volume_before_mute: player_volume,
+            muted: false,
             player_events: None,
             queue: Vec::new(),
             queue_selected: 0,
@@ -954,7 +962,7 @@ impl App {
             },
             shuffle_on: cfg.playback.shuffle,
             shuffle_state: None,
-            stream_resolver: StreamResolver::start(),
+            stream_resolver: StreamResolver::start_in(cfg.media_dir().join("stream")),
             pending_stream: None,
             streaming: false,
             albums: Vec::new(),
@@ -965,6 +973,8 @@ impl App {
             album_page_status: String::new(),
             lib_filter: LibFilter::All,
             selected: 0,
+            lib_query: String::new(),
+            lib_search_focus: false,
             list_start: 0,
             queue_start: 0,
             search_start: 0,
@@ -1126,7 +1136,7 @@ impl App {
                 LibFilter::Playlist(id) => lib.playlist_tracks(*id)?,
             })
         };
-        let next = match self.tab {
+        let mut next = match self.tab {
             Tab::Library | Tab::Now => match load(&self.lib, &self.lib_filter) {
                 Ok(rows) => rows,
                 Err(err) => {
@@ -1154,6 +1164,37 @@ impl App {
             }
             Tab::Search | Tab::Room | Tab::Settings => Vec::new(),
         };
+        if self.tab == Tab::Library && !self.lib_query.trim().is_empty() {
+            // FTS5 busca en toda la biblioteca, no solo en las primeras 500
+            // filas del filtro. Para favoritas/listas se intersecta por clave.
+            match self.lib.search(self.lib_query.trim(), 500) {
+                Ok(found) => {
+                    if matches!(self.lib_filter, LibFilter::All) {
+                        next = found;
+                    } else {
+                        let keys: std::collections::HashSet<String> = found
+                            .into_iter()
+                            .map(|row| row.track.key)
+                            .collect();
+                        next.retain(|row| keys.contains(&row.track.key));
+                    }
+                }
+                Err(_) => {
+                    // FTS puede fallar con comodines raros; el filtro en
+                    // memoria mantiene la UI usable.
+                    let query = spote_core::util::normalize(&self.lib_query);
+                    next.retain(|row| {
+                        let haystack = spote_core::util::normalize(&format!(
+                            "{} {} {}",
+                            row.track.title,
+                            row.track.artist,
+                            row.track.album.as_deref().unwrap_or("")
+                        ));
+                        haystack.contains(&query)
+                    });
+                }
+            }
+        }
         self.view = next;
         if error.is_some() && self.view.is_empty() && !previous.is_empty() {
             // Solo un error real de SQLite justifica rescatar la vista anterior.
@@ -1275,6 +1316,7 @@ impl App {
         self.lyrics_status.clear();
         self.lyrics_key.clear();
         self.lyrics_loading = false;
+        self.reset_lyrics_view();
         self.art = None;
         self.art_prev = None;
         self.art_variants.clear();
@@ -1352,6 +1394,8 @@ impl App {
         self.lyrics_status.clear();
         self.lyrics_key.clear();
         self.lyrics_loading = false;
+        self.lyrics_auto_offset = None;
+        self.reset_lyrics_view();
         self.lyrics_offset_ms = self.lib.lyrics_offset(&track.key).unwrap_or(0);
         self.art = None;
         self.art_prev = None;
@@ -1396,6 +1440,29 @@ impl App {
                     self.now.loading = false;
                     self.now.playing = true;
                     self.now.path = None;
+                    let provider = source.provider.clone();
+                    let id = source.id.clone();
+                    if let Some(track) = self.now.track.clone() {
+                        if let Ok(track_id) = self.lib.upsert_track(&track) {
+                            self.lib
+                                .set_source(
+                                    track_id,
+                                    &provider,
+                                    Some(&id),
+                                    None,
+                                    spote_core::library::SourceStatus::Pending,
+                                    None,
+                                )
+                                .ok();
+                        }
+                        let mut track = track;
+                        track.source_hint = Some(spote_protocol::SourceHint {
+                            provider: provider.clone(),
+                            id: id.clone(),
+                            duration_ms: track.duration_ms,
+                        });
+                        self.now.track = Some(track);
+                    }
                     if let Some(player) = &self.player {
                         player.load_url(source.url, self.trim_start_ms as f64 / 1000.0);
                     }
@@ -1415,6 +1482,47 @@ impl App {
                     }
                     self.set_status("▶ stream · descargando copia local");
                 }
+                StreamEvent::Downloaded {
+                    key,
+                    path,
+                    provider,
+                    id,
+                } => {
+                    let is_current = self.pending_stream.as_deref() == Some(key.as_str())
+                        || self
+                            .now
+                            .track
+                            .as_ref()
+                            .is_some_and(|track| track.key == key);
+                    if !is_current {
+                        continue;
+                    }
+                    self.pending_stream = None;
+                    self.streaming = false;
+                    self.now.loading = false;
+                    if let Some(track) = self.now.track.clone() {
+                        let hint = if provider.trim().is_empty() {
+                            self.lib.source_hint(&key)
+                        } else {
+                            Some((provider.clone(), id.clone()))
+                        };
+                        if let Ok(track_id) = self.lib.upsert_track(&track) {
+                            self.lib
+                                .set_source(
+                                    track_id,
+                                    hint.as_ref().map(|(p, _)| p.as_str()).unwrap_or("stream"),
+                                    hint.as_ref().map(|(_, i)| i.as_str()),
+                                    Some(&path),
+                                    spote_core::library::SourceStatus::Ready,
+                                    std::fs::metadata(&path).ok().map(|m| m.len()),
+                                )
+                                .ok();
+                        }
+                        self.play_local(track, Some(path));
+                    } else {
+                        self.set_status("audio descargado, pero no hay pista activa");
+                    }
+                }
                 StreamEvent::Failed { key, message } => {
                     let is_current = self.pending_stream.as_deref() == Some(key.as_str())
                         || self
@@ -1430,11 +1538,18 @@ impl App {
                     self.now.loading = false;
                     self.now.playing = false;
                     self.toast(format!("stream no disponible: {message}"), ToastKind::Warn);
-                    if let Some(track) = self.now.track.clone() {
-                        self.start_resolve(&track);
-                        self.pending_play = Some(track.key.clone());
-                        self.now.loading = true;
-                        self.set_status("descargando tras fallar el stream…");
+                    // NoMatch / AgeGated / GeoBlocked no mejoran con una
+                    // descarga completa: reintentar solo alarga el fallo.
+                    let terminal = ["NoMatch", "AgeGated", "GeoBlocked"]
+                        .iter()
+                        .any(|code| message.starts_with(code));
+                    if !terminal {
+                        if let Some(track) = self.now.track.clone() {
+                            self.start_resolve(&track);
+                            self.pending_play = Some(track.key.clone());
+                            self.now.loading = true;
+                            self.set_status("descargando tras fallar el stream…");
+                        }
                     }
                 }
             }
@@ -1553,13 +1668,14 @@ impl App {
             return;
         }
         if self.now.track.is_none() {
-            // Nada cargado: reproduce la fila seleccionada o la primera.
-            if let Some(row) = self.selected_row().cloned() {
-                self.play_local(row.track, row.path);
+            // Nada cargado: reproduce la fila seleccionada o la primera y crea
+            // contexto para que repeat/next/prev tengan una lista estable.
+            if self.selected_row().is_some() {
+                self.play_row(self.selected);
                 return;
             }
-            if let Some(row) = self.view.first().cloned() {
-                self.play_local(row.track, row.path);
+            if !self.view.is_empty() {
+                self.play_row(0);
             }
             return;
         }
@@ -1592,6 +1708,13 @@ impl App {
         } else {
             self.spectrum.stop();
         }
+    }
+
+    /// La letra de la pista anterior no debe arrastrar su scroll a la nueva.
+    fn reset_lyrics_view(&mut self) {
+        self.lyrics_scroll = Spring::new(0.0);
+        self.lyrics_scroll_index = None;
+        self.lyrics_debug_last = None;
     }
 
     /// Define el contexto de reproducción (vista, búsqueda, álbum, artista).
@@ -1727,7 +1850,11 @@ impl App {
                     .collect();
                 self.set_context(entries, self.selected);
             }
-            let len = self.play_context.len().max(self.view.len());
+            let len = if self.play_context.is_empty() {
+                self.view.len()
+            } else {
+                self.play_context.len()
+            };
             let current = if self.play_context.is_empty() {
                 self.selected
             } else {
@@ -1833,6 +1960,7 @@ impl App {
                 self.lyrics = None;
                 self.lyrics_status = "esperando descarga…".into();
                 self.lyrics_key.clear();
+                self.reset_lyrics_view();
                 self.art = None;
                 self.art_key.clear();
                 self.art_png = None;
@@ -1864,7 +1992,8 @@ impl App {
             self.apply_advance(advance);
             return;
         }
-        self.play_view_step(1, true, true, false);
+        let wrap = self.repeat_mode == RepeatMode::All;
+        self.play_view_step(1, wrap, true, false);
     }
 
     pub fn prev_track(&mut self) {
@@ -1914,7 +2043,8 @@ impl App {
                 return;
             }
         }
-        self.play_view_step(-1, false, false, true);
+        let wrap = self.repeat_mode == RepeatMode::All;
+        self.play_view_step(-1, wrap, false, true);
     }
 
     /// Mete la pista actual al principio de la cola local. Se usa al
@@ -1969,7 +2099,14 @@ impl App {
         let next = if wrap {
             (index as i32 + delta).rem_euclid(len)
         } else {
-            (index as i32 + delta).clamp(0, len - 1)
+            let raw = index as i32 + delta;
+            if raw < 0 || raw >= len {
+                // Repeat off: en el borde no se da la vuelta ni se corta la
+                // pista actual; simplemente no hay siguiente/anterior.
+                self.set_status("fin de la cola");
+                return;
+            }
+            raw
         };
         self.selected = next as usize;
         if let Some(row) = self.view.get(self.selected).cloned() {
@@ -2040,6 +2177,9 @@ impl App {
 
     pub fn set_volume(&mut self, volume: f32) {
         self.now.volume = volume.clamp(0.0, 1.0);
+        if self.now.volume > 0.0 {
+            self.muted = false;
+        }
         self.cfg.player.volume = self.now.volume;
         // Durante el arrastre se guarda al soltar; en teclado/rueda, ya.
         if !self.dragging_volume {
@@ -2052,7 +2192,13 @@ impl App {
 
     /// Guarda el volumen aunque venga de un arrastre en curso.
     pub fn persist_volume(&mut self) {
-        self.cfg.player.volume = self.now.volume;
+        // Un mute temporal no debe convertirse en el volumen guardado.
+        let volume = if self.muted {
+            self.volume_before_mute.max(0.0)
+        } else {
+            self.now.volume
+        };
+        self.cfg.player.volume = volume;
         self.cfg.save().ok();
     }
 
@@ -2590,6 +2736,21 @@ impl App {
                     // interpolador no adelanta un frame el playhead de la letra.
                     self.now.position_seen_ms = self.now.position_ms;
                     self.now.position_at = Instant::now();
+                    // Los streams HLS pueden quedarse reconectando en el EOF y
+                    // no emitir `end-file eof`; se avanza por posición cuando
+                    // la pista conocida ya terminó.
+                    if self.streaming
+                        && self.now.duration_ms > 0
+                        && self.now.position_ms.saturating_add(700) >= self.now.duration_ms
+                    {
+                        if let Some(track) = self.now.track.clone() {
+                            self.lib
+                                .record_play(&track.key, self.now.position_ms, true)
+                                .ok();
+                        }
+                        self.auto_next();
+                        return;
+                    }
                     if let Some(end) = self.trim_end_ms {
                         if self.now.position_ms >= end.saturating_sub(30) {
                             if let Some(track) = self.now.track.clone() {
@@ -2629,7 +2790,9 @@ impl App {
                     }
                 }
                 PlayerEvent::Disconnected => {
-                    self.set_status("mpv desconectado");
+                    self.player = None;
+                    self.player_events = None;
+                    self.toast("mpv desconectado; reinicia spote", ToastKind::Error);
                 }
                 _ => {}
             }
@@ -2736,11 +2899,12 @@ impl App {
                         }
                     }
                     if let Ok(Some(row)) = self.lib.track_by_key(&key) {
+                        let hint = self.lib.source_hint(&key);
                         self.lib
                             .set_source(
                                 row.id,
-                                "ytmusic",
-                                None,
+                                hint.as_ref().map(|(p, _)| p.as_str()).unwrap_or("ytmusic"),
+                                hint.as_ref().map(|(_, id)| id.as_str()),
                                 Some(&path),
                                 spote_core::library::SourceStatus::Ready,
                                 std::fs::metadata(&path).ok().map(|m| m.len()),
@@ -3080,10 +3244,13 @@ impl App {
                     lrc,
                     error,
                 } => {
-                    self.lyrics_loading = false;
+                    // Una respuesta de la pista anterior no debe cancelar la
+                    // carga de la actual: solo se apaga el flag si sigue
+                    // siendo la misma pista.
                     if self.now.track.as_ref().map(|t| &t.key) != Some(&key) {
                         continue;
                     }
+                    self.lyrics_loading = false;
                     match doc {
                         Some(doc) => {
                             if let Some(text) = lrc {
@@ -3535,12 +3702,14 @@ impl App {
             self.volume_before_mute = self.now.volume;
             // Silenciar no debe guardar 0 en config: al reabrir, el usuario
             // espera el volumen que tenía, no la app muda.
+            self.muted = true;
             self.now.volume = 0.0;
             if let Some(player) = &self.player {
                 player.set_volume(0.0);
             }
         } else {
             let volume = self.volume_before_mute.max(0.2);
+            self.muted = false;
             self.set_volume(volume);
         }
     }

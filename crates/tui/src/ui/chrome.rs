@@ -347,7 +347,7 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
     let controls_y = rect.y + u16::from(progress_row);
     let controls_h = rect.height.saturating_sub(u16::from(progress_row)).max(1);
     let compact = rect.width < 82;
-    let big = controls_h >= 2 && rect.width >= 64;
+    let big = controls_h >= 2 && rect.width >= 100;
     let pad = u16::from(app.button_pad.clamp(1, 4));
     let (prev_label, play_label, next_label) =
         ("◀◀", if app.now.playing { PAUSE } else { PLAY }, "▶▶");
@@ -356,8 +356,8 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         spote_core::playback::RepeatMode::All => "⟲",
         spote_core::playback::RepeatMode::One => "⟲1",
     };
-    let side_w = 5u16;
-    let (prev_w, play_w, next_w, loop_w) = if big {
+    let side_w = if big { 9 } else { 5 };
+    let (prev_w, play_w, next_w, repeat_w) = if big {
         (7, 9, 9, side_w)
     } else {
         (
@@ -367,123 +367,122 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
             side_w,
         )
     };
-    let show_modes = rect.width >= prev_w + play_w + next_w + side_w * 2 + 14;
-    let total_w = prev_w + play_w + next_w + loop_w + 3 + if show_modes { side_w + 1 } else { 0 };
+    let show_modes = rect.width >= 72;
+    // Con los modos ocultos no se reserva su hueco: play/next deben quedar
+    // centrados aunque el ancho no permita enseñar shuffle y repeat.
+    let total_w = prev_w + play_w + next_w + 2
+        + if show_modes {
+            (side_w + 1) * 2
+        } else {
+            0
+        };
     let mut x = rect.x + rect.width.saturating_sub(total_w) / 2;
+    let play_rect = Rect::new(
+        x + if show_modes { side_w + 1 } else { 0 } + prev_w + 1,
+        controls_y,
+        play_w,
+        controls_h,
+    );
+    if app.cfg.ui.fx.bloom_play {
+        bloom_glow(buf, play_rect, pal, 0.35 + app.audio.kick_pulse * 0.45);
+    }
+
     if show_modes {
         let shuffle = Rect::new(x, controls_y, side_w, controls_h);
-        draw_mode_button(
+        draw_transport_control(
             app,
             buf,
             shuffle,
             Action::ToggleShuffle,
-            "⇄",
+            false,
             app.shuffle_on,
+            &[],
+            Some("⇄"),
+            "azar",
+            "⇄",
             pal,
+            big,
+            controls_h,
+            pulse,
         );
         x += side_w + 1;
     }
-    let play_rect = Rect::new(x + prev_w + 1, controls_y, play_w, controls_h);
-    if app.cfg.ui.fx.bloom_play {
-        bloom_glow(buf, play_rect, pal, 0.35 + app.audio.kick_pulse * 0.45);
-    }
-    for (label, width, action, primary) in [
-        (prev_label, prev_w, Action::Prev, false),
-        (play_label, play_w, Action::PlayPause, true),
-        (next_label, next_w, Action::Next, false),
-        (repeat_label, loop_w, Action::CycleRepeat, false),
-    ] {
-        let button = Rect::new(x, controls_y, width, controls_h);
-        let hover = app.hover == Some(action.clone());
-        let looping = matches!(action, Action::CycleRepeat)
-            && !matches!(app.repeat_mode, spote_core::playback::RepeatMode::Off);
-        let bg = if hover {
-            pal.surface_alt
-        } else if primary {
-            mix_oklab(pal.surface, pal.primary, 0.25 + pulse * 0.32)
-        } else if looping {
-            mix_oklab(pal.surface, pal.primary, 0.30)
-        } else {
-            pal.surface
-        };
-        fill_soft(buf, button, bg, 0.95, pal.bg_deep);
-        if primary && controls_h >= 2 {
-            let edge = mix_oklab(pal.primary, pal.secondary, pulse);
-            for i in 1..button.width.saturating_sub(1) {
-                put(buf, button.x + i, button.y, "▔", color(edge), None);
-                // Con etiqueta en la última fila, la línea inferior la tacharía.
-                if controls_h < 3 {
-                    put(buf, button.x + i, button.y + button.height - 1, "▁", color(edge), None);
-                }
-            }
-        }
-        if matches!(action, Action::CycleRepeat) {
-            text_at(
-                buf,
-                button,
-                repeat_label.to_string(),
-                Style::new()
-                    .fg(color(if looping { pal.primary } else { pal.muted }))
-                    .add_modifier(if looping || !big {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-                Alignment::Center,
-            );
-        } else if big {
-            let icon = if primary {
-                if app.now.playing { ICON_PAUSE } else { ICON_PLAY }
-            } else if matches!(action, Action::Prev) {
-                ICON_PREV
-            } else {
-                ICON_NEXT
-            };
-            let label = if primary {
-                if app.now.playing { "pausa" } else { "play" }
-            } else if matches!(action, Action::Prev) {
-                "atrás"
-            } else {
-                "siguiente"
-            };
-            if controls_h >= 3 {
-                let icon_rect = Rect::new(button.x, button.y, button.width, controls_h - 1);
-                draw_icon(
-                    buf,
-                    icon_rect,
-                    icon,
-                    color(if primary { pal.text } else { pal.muted }),
-                    primary,
-                );
-                text_at(
-                    buf,
-                    Rect::new(button.x, button.y + controls_h - 1, button.width, 1),
-                    label,
-                    Style::new().fg(color(if primary { pal.primary } else { pal.dim })),
-                    Alignment::Center,
-                );
-            } else {
-                draw_icon(
-                    buf,
-                    button,
-                    icon,
-                    color(if primary { pal.text } else { pal.muted }),
-                    primary,
-                );
-            }
-        } else {
-            text_at(
-                buf,
-                button,
-                label.to_string(),
-                Style::new()
-                    .fg(color(if primary { pal.primary } else { pal.text }))
-                    .add_modifier(Modifier::BOLD),
-                Alignment::Center,
-            );
-        }
-        app.hit.add(button, action);
-        x += width + 1;
+    let prev = Rect::new(x, controls_y, prev_w, controls_h);
+    draw_transport_control(
+        app,
+        buf,
+        prev,
+        Action::Prev,
+        false,
+        false,
+        ICON_PREV,
+        None,
+        "atrás",
+        prev_label,
+        pal,
+        big,
+        controls_h,
+        pulse,
+    );
+    x += prev_w + 1;
+    let play = Rect::new(x, controls_y, play_w, controls_h);
+    draw_transport_control(
+        app,
+        buf,
+        play,
+        Action::PlayPause,
+        true,
+        false,
+        if app.now.playing { ICON_PAUSE } else { ICON_PLAY },
+        None,
+        if app.now.playing { "pausa" } else { "play" },
+        play_label,
+        pal,
+        big,
+        controls_h,
+        pulse,
+    );
+    x += play_w + 1;
+    let next = Rect::new(x, controls_y, next_w, controls_h);
+    draw_transport_control(
+        app,
+        buf,
+        next,
+        Action::Next,
+        false,
+        false,
+        ICON_NEXT,
+        None,
+        "siguiente",
+        next_label,
+        pal,
+        big,
+        controls_h,
+        pulse,
+    );
+    x += next_w + 1;
+    if show_modes {
+        let repeat = Rect::new(x, controls_y, repeat_w, controls_h);
+        draw_transport_control(
+            app,
+            buf,
+            repeat,
+            Action::CycleRepeat,
+            false,
+            !matches!(app.repeat_mode, spote_core::playback::RepeatMode::Off),
+            &[],
+            Some(repeat_label),
+            match app.repeat_mode {
+                spote_core::playback::RepeatMode::One => "bucle 1",
+                spote_core::playback::RepeatMode::All => "todo",
+                spote_core::playback::RepeatMode::Off => "bucle",
+            },
+            repeat_label,
+            pal,
+            big,
+            controls_h,
+            pulse,
+        );
     }
 
     // Slider de volumen: barra con degradado, knob y porcentaje. Se puede
@@ -598,6 +597,7 @@ const ICON_PAUSE: &[&str] = &[
     "█  █",
     "█  █",
 ];
+
 const ICON_PREV: &[&str] = &[
     "█  █ ",
     "██ █ ",
@@ -692,34 +692,108 @@ pub(super) fn bloom_glow(buf: &mut Buffer, rect: Rect, pal: &Palette, amount: f3
     }
 }
 
-/// Botón pequeño de modo (shuffle/repeat) con el mismo lenguaje que el
-/// transporte. El estado activo se marca con el acento de la paleta.
-fn draw_mode_button(
+/// Botón del transporte. Todos comparten altura, relleno, hover, borde activo
+/// y el mismo par icono/etiqueta; así shuffle y bucle no parecen de otra TUI.
+#[allow(clippy::too_many_arguments)]
+fn draw_transport_control(
     app: &mut App,
     buf: &mut Buffer,
     rect: Rect,
     action: Action,
-    label: &str,
+    primary: bool,
     active: bool,
+    icon: &[&str],
+    glyph: Option<&str>,
+    big_label: &str,
+    compact_label: &str,
     pal: &Palette,
+    big: bool,
+    controls_h: u16,
+    pulse: f32,
 ) {
     let hover = app.hover == Some(action.clone());
     let bg = if hover {
         pal.surface_alt
+    } else if primary {
+        mix_oklab(pal.surface, pal.primary, 0.25 + pulse * 0.32)
     } else if active {
         mix_oklab(pal.surface, pal.primary, 0.30)
     } else {
         pal.surface
     };
     fill_soft(buf, rect, bg, 0.95, pal.bg_deep);
-    let fg = if active { pal.primary } else { pal.dim };
-    text_at(
-        buf,
-        rect,
-        label.to_string(),
-        Style::new().fg(color(fg)).add_modifier(Modifier::BOLD),
-        Alignment::Center,
-    );
+    if (primary || active) && controls_h >= 2 {
+        let edge = if active {
+            mix_oklab(pal.primary, pal.secondary, 0.35)
+        } else {
+            mix_oklab(pal.primary, pal.secondary, pulse)
+        };
+        for i in 1..rect.width.saturating_sub(1) {
+            put(buf, rect.x + i, rect.y, "▔", color(edge), None);
+            if controls_h < 3 {
+                put(buf, rect.x + i, rect.y + rect.height - 1, "▁", color(edge), None);
+            }
+        }
+    }
+    if big {
+        if controls_h >= 3 {
+            let icon_rect = Rect::new(rect.x, rect.y, rect.width, controls_h - 1);
+            if let Some(glyph) = glyph {
+                text_at(
+                    buf,
+                    icon_rect,
+                    glyph.to_string(),
+                    Style::new()
+                        .fg(color(if primary || active { pal.text } else { pal.muted }))
+                        .add_modifier(Modifier::BOLD),
+                    Alignment::Center,
+                );
+            } else {
+                draw_icon(
+                    buf,
+                    icon_rect,
+                    icon,
+                    color(if primary || active { pal.text } else { pal.muted }),
+                    primary,
+                );
+            }
+            text_at(
+                buf,
+                Rect::new(rect.x, rect.y + controls_h - 1, rect.width, 1),
+                big_label,
+                Style::new().fg(color(if primary || active { pal.primary } else { pal.dim })),
+                Alignment::Center,
+            );
+        } else if let Some(glyph) = glyph {
+            text_at(
+                buf,
+                rect,
+                glyph.to_string(),
+                Style::new()
+                    .fg(color(if primary || active { pal.text } else { pal.muted }))
+                    .add_modifier(Modifier::BOLD),
+                Alignment::Center,
+            );
+        } else {
+            draw_icon(
+                buf,
+                rect,
+                icon,
+                color(if primary || active { pal.text } else { pal.muted }),
+                primary,
+            );
+        }
+    } else {
+        text_at(
+            buf,
+            rect,
+            compact_label.to_string(),
+            Style::new()
+                .fg(color(if primary || active { pal.primary } else { pal.text }))
+                .add_modifier(Modifier::BOLD),
+            Alignment::Center,
+        );
+    }
     app.hit.add(rect, action);
 }
 

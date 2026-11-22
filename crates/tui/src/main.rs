@@ -148,7 +148,8 @@ USO:
 OPCIONES:
   --follow-spotify                 acompaña al cliente oficial vía MPRIS
   --art <default|pixel|braille|off>
-  --viz <preset>                   clean, aurora, bloom, inferno (franja)
+  --viz <preset>                   clean, aurora, bloom, inferno, crt,
+                                   lcd, rack, braille, stage (franja)
   --no-viz                         arranca sin visualizador
   --fps <n>                        límite de frames de la UI (20-60, default 60)
 

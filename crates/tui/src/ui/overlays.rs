@@ -313,6 +313,9 @@ pub(super) fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
 
 pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = overlay_frame(layout, pal, buf, 74, 22, "visualizaciones · capas y presets");
+    // El cierre se registra primero: el HitMap se queda con la última acción
+    // añadida y, si fuera al final, se tragaría los clics de presets/capas.
+    app.hit.add(rect, Action::CloseOverlay);
     let inner = Rect::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(4), rect.height.saturating_sub(3));
 
     // Presets.
@@ -346,7 +349,7 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             Style::new().fg(color(if active { pal.text } else { pal.muted })),
             Alignment::Left,
         );
-        app.hit.add(chip_rect, Action::VizNext);
+        app.hit.add(chip_rect, Action::VizPreset(i));
     }
     y += ((presets.len() + per_row - 1) / per_row + 1) as u16;
 
@@ -401,7 +404,6 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             Alignment::Left,
         );
     }
-    app.hit.add(rect, Action::CloseOverlay);
 }
 
 pub(super) fn blend_label(blend: Blend) -> &'static str {

@@ -113,7 +113,7 @@ pub struct LyricsRow {
 
 /// Se sube cuando cambia el alineado (scoring, relecturas, reparto). Las filas
 /// guardadas con una versión anterior se re-alinean al reproducirlas.
-pub const LYRICS_ALIGN_VERSION: i64 = 2;
+pub const LYRICS_ALIGN_VERSION: i64 = 3;
 
 pub struct Library {
     conn: Connection,

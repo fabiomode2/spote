@@ -69,14 +69,44 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         chip_right = chip_right.saturating_sub(1);
     }
 
+    // Buscador inline de la biblioteca. Comparte la fila con nada más para
+    // que el texto respire; la lista empieza en `inner.y + 3`.
+    let search_rect = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    fill(buf, search_rect, if app.lib_search_focus { pal.surface_alt } else { pal.surface });
+    let mut search_text = if app.lib_query.is_empty() {
+        "buscar en la biblioteca…  ( / )".to_string()
+    } else {
+        format!("⌕ {}", app.lib_query)
+    };
+    if app.lib_search_focus {
+        search_text.push('▏');
+    }
+    truncate_chars(&mut search_text, search_rect.width.saturating_sub(1) as usize);
+    text_at(
+        buf,
+        search_rect,
+        search_text,
+        Style::new().fg(color(if app.lib_search_focus {
+            pal.text
+        } else if app.lib_query.is_empty() {
+            pal.dim
+        } else {
+            pal.primary
+        })),
+        Alignment::Left,
+    );
+    app.hit.add(search_rect, Action::LibrarySearch);
+
     // Cabecera de la lista: portada y descripción, si hay una abierta. Los
     // chips de gestión ocupan la primera fila; la lista empieza debajo para
     // que las canciones no se pinten encima de «N lista / I importar».
+    // Fila 0: chips. Fila 1: buscador. Fila 2: cabecera de columnas.
+    // La lista empieza en +3 para no pintar canciones sobre el buscador.
     let mut list_area = Rect::new(
         inner.x,
-        inner.y + 2,
+        inner.y + 3,
         inner.width,
-        inner.height.saturating_sub(2),
+        inner.height.saturating_sub(3),
     );
     if let crate::app::LibFilter::Playlist(id) = app.lib_filter {
         if let Ok(Some(list)) = app.lib.playlist(id) {
@@ -130,9 +160,9 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             );
             list_area = Rect::new(
                 inner.x,
-                inner.y + 5,
+                inner.y + 6,
                 inner.width,
-                inner.height.saturating_sub(5),
+                inner.height.saturating_sub(6),
             );
         }
     }
@@ -152,7 +182,9 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         }
     }
     if app.view.is_empty() {
-        let message = if in_playlist {
+        let message = if !app.lib_query.is_empty() {
+            "sin resultados para la búsqueda · Esc limpia"
+        } else if in_playlist {
             "lista vacía · l añade desde la biblioteca · d borra la lista"
         } else if app.lib.count().unwrap_or(0) > 0 {
             "no hay pistas en este filtro · [ ] cambia de filtro"

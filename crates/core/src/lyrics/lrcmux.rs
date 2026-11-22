@@ -7,18 +7,9 @@
 //! vía falla, se usa la API nativa (`/get`), que entrega las líneas ya
 //! separadas y con un `start` opcional en segundos.
 //!
-//! El módulo es autónomo: no modifica `mod.rs` ni `remote.rs`. Para integrarlo
-//! basta con declarar `mod lrcmux;` dentro de `crates/core/src/lyrics/mod.rs`
-//! y llamar a [`fetch`] como proveedor alternativo (por ejemplo, después de
-//! LRCLIB o antes, según la preferencia del llamante).
-//!
-//! # TODO de integración
-//!
-//! `LyricsSource` todavía no tiene una variante `Lrcmux`. Mientras no se añada
-//! en `crates/core/src/lyrics/mod.rs` (junto a su `label()`), este módulo usa
-//! [`LyricsSource::Lrclib`] para los documentos sincronizados a través de
-//! [`lrcmux_source`]. Al integrar, hay que añadir la variante y cambiar esa
-//! función; no se toca el enum desde aquí para no romper el crate.
+//! La respuesta pasa por la misma puerta de metadatos que LRCLIB: el endpoint
+//! compatible puede devolver la versión de otro artista si el título coincide,
+//! y un LRC sincronizado de otra grabación desincroniza el karaoke.
 
 use std::time::{Duration, Instant};
 
@@ -33,8 +24,6 @@ const COMPAT_URL: &str = "https://api.lrcmux.dev/compat/lrclib/api/get";
 const NATIVE_URL: &str = "https://api.lrcmux.dev/get";
 /// Tope por petición: la UI no puede quedarse colgada esperando la letra.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-/// Presupuesto total de las dos vías (compat + nativa).
-const TOTAL_BUDGET: Duration = Duration::from_secs(12);
 /// Duración estimada de una línea cuando no hay duración de la pista.
 const PLAIN_LINE_MS: u64 = 4_000;
 
@@ -42,21 +31,21 @@ const PLAIN_LINE_MS: u64 = 4_000;
 // API pública
 // ---------------------------------------------------------------------------
 
-/// Busca la letra de `track` en lrcmux.
-///
-/// Devuelve `Ok(None)` cuando no hay nada aprovechable (título vacío, respuesta
-/// válida sin letra o presupuesto agotado sin error previo). Los fallos de red,
-/// los HTTP distintos de 404 y las respuestas ilegibles se devuelven como
-/// [`LyricsError`] para que el llamante pueda seguir con otro proveedor.
-pub async fn fetch(
+/// Igual que [`fetch`], pero con el plazo que fija la cascada. El presupuesto
+/// de lrcmux nunca puede superar el global: antes una respuesta lenta de este
+/// proveedor dejaba a Genius y YouTube sin turno.
+pub async fn fetch_before(
     client: &reqwest::Client,
     track: &TrackRef,
+    deadline: Instant,
 ) -> Result<Option<LyricsDoc>, LyricsError> {
     if track.title.trim().is_empty() {
         return Ok(None);
     }
+    if deadline.saturating_duration_since(Instant::now()).is_zero() {
+        return Ok(None);
+    }
 
-    let deadline = Instant::now() + TOTAL_BUDGET;
     let mut compat_error: Option<LyricsError> = None;
 
     // La vía de compatibilidad necesita artista y duración para que el endpoint
@@ -74,7 +63,7 @@ pub async fn fetch(
 
     // Si compat agotó el presupuesto, no se lanza una petición condenada a
     // expirar: se devuelve el error para que el llamante pruebe otra fuente.
-    if Instant::now() >= deadline {
+    if deadline.saturating_duration_since(Instant::now()).is_zero() {
         return match compat_error {
             Some(err) => Err(err),
             None => Ok(None),
@@ -173,6 +162,25 @@ pub(crate) fn parse_compat(
 ) -> Result<Option<LyricsDoc>, LyricsError> {
     let raw = CompatResponse::deserialize(value).map_err(parse_error)?;
 
+    // El endpoint compatible puede devolver la versión de otro artista si el
+    // título coincide; se valida antes de aceptar tiempos.
+    if !super::remote::metadata_matches(
+        track,
+        &raw.track_name,
+        &raw.artist_name,
+        &raw.album_name,
+        raw.duration,
+    ) {
+        tracing::debug!(
+            target: "spote::lyrics",
+            "lrcmux: metadatos descartados para '{} - {}'",
+            raw.artist_name,
+            raw.track_name
+        );
+        return Ok(None);
+    }
+
+    let duration_ms = effective_duration_ms(track.duration_ms, raw.duration);
     if let Some(text) = raw
         .synced_lyrics
         .as_deref()
@@ -182,7 +190,10 @@ pub(crate) fn parse_compat(
         let parsed = parse_lrc(text);
         // Una sola marca (o un LRC lleno de huecos instrumentales) no da para
         // karaoke: se prefiere la letra plana, que al menos se puede repartir.
-        if parsed.synced && lyric_line_count(&parsed) >= 2 {
+        if parsed.synced
+            && lyric_line_count(&parsed) >= 2
+            && super::remote::sync_problem(&parsed, duration_ms).is_none()
+        {
             return Ok(Some(LyricsDoc {
                 lines: parsed.lines,
                 synced: true,
@@ -202,19 +213,34 @@ pub(crate) fn parse_compat(
         return Ok(None);
     };
     let texts = split_plain_lines(plain);
-    let duration_ms = effective_duration_ms(track.duration_ms, raw.duration);
     Ok(build_plain_doc(texts, duration_ms))
 }
 
 /// Convierte la respuesta nativa (`lines` + `start` opcional) en un documento.
 ///
 /// Hay sincronización cuando al menos dos líneas con texto traen un `start`
-/// numérico. En caso contrario las líneas se reparten como letra plana.
+/// numérico **y** la mayoría de las líneas están cronometradas. En caso
+/// contrario las líneas se reparten como letra plana.
 pub(crate) fn parse_native(
     value: &serde_json::Value,
     track: &TrackRef,
 ) -> Result<Option<LyricsDoc>, LyricsError> {
     let raw = NativeResponse::deserialize(value).map_err(parse_error)?;
+    if !super::remote::metadata_matches(
+        track,
+        &raw.track.title,
+        &raw.track.artist,
+        &raw.track.album,
+        raw.track.duration,
+    ) {
+        tracing::debug!(
+            target: "spote::lyrics",
+            "lrcmux nativo: metadatos descartados para '{} - {}'",
+            raw.track.artist,
+            raw.track.title
+        );
+        return Ok(None);
+    }
     let rows: Vec<(Option<u64>, String)> = raw
         .lines
         .iter()
@@ -236,12 +262,21 @@ pub(crate) fn parse_native(
 
     let duration_ms = effective_duration_ms(track.duration_ms, raw.track.duration);
     let timed = rows.iter().filter(|(start, _)| start.is_some()).count();
-    if timed >= 2 {
-        Ok(Some(build_native_synced(rows, duration_ms)))
-    } else {
-        let texts = rows.into_iter().map(|(_, text)| text).collect();
-        Ok(build_plain_doc(texts, duration_ms))
+    // Dos líneas con tiempo entre cincuenta sin él no es una letra sincronizada:
+    // el resto se colocaría a saltos de 4 s y el karaoke iría a trompicones.
+    let mostly_timed = timed >= 2 && timed * 100 >= rows.len() * 60;
+    if mostly_timed {
+        let doc = build_native_synced(rows, duration_ms);
+        if super::remote::sync_problem(&doc, duration_ms).is_none() {
+            return Ok(Some(doc));
+        }
+        // Tiempos imposibles (primer verso tardísimo, fuera de la pista):
+        // mejor letra plana que un karaoke mintiendo.
+        let texts = doc.lines.into_iter().map(|line| line.text).collect();
+        return Ok(build_plain_doc(texts, duration_ms));
     }
+    let texts = rows.into_iter().map(|(_, text)| text).collect();
+    Ok(build_plain_doc(texts, duration_ms))
 }
 
 // ---------------------------------------------------------------------------
@@ -337,11 +372,7 @@ fn build_plain_doc(texts: Vec<String>, duration_ms: u64) -> Option<LyricsDoc> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Origen que debería llevar todo documento servido por lrcmux.
-///
-/// TODO(integración): cuando `LyricsSource` tenga la variante `Lrcmux`, esta
-/// función debe devolverla. Hasta entonces se reutiliza `Lrclib` (es el
-/// proveedor con el que lrcmux es compatible) sin tocar el enum desde aquí.
+/// Origen de todo documento servido por lrcmux.
 fn lrcmux_source() -> LyricsSource {
     LyricsSource::Lrcmux
 }
@@ -430,11 +461,17 @@ fn parse_error(err: serde_json::Error) -> LyricsError {
 // Respuestas crudas
 // ---------------------------------------------------------------------------
 
-/// Respuesta de `/compat/lrclib/api/get`. El resto del payload (título,
-/// artista, álbum) se ignora: el parseo solo necesita duración y textos.
+/// Respuesta de `/compat/lrclib/api/get`. Los metadatos se usan solo para
+/// validar que la letra pertenece a la pista pedida.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompatResponse {
+    #[serde(default)]
+    track_name: String,
+    #[serde(default)]
+    artist_name: String,
+    #[serde(default)]
+    album_name: String,
     /// Segundos, con decimales.
     #[serde(default)]
     duration: f64,
@@ -455,6 +492,12 @@ struct NativeResponse {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct NativeTrack {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    artist: String,
+    #[serde(default)]
+    album: String,
     /// Segundos, con decimales.
     #[serde(default)]
     duration: f64,
@@ -559,7 +602,7 @@ mod tests {
     #[test]
     fn native_parses_lines_with_start() {
         let value = json!({
-            "track": { "title": "x", "artist": "y", "album": "z", "duration": 200.0 },
+            "track": { "title": "Do I Wanna Know?", "artist": "Arctic Monkeys", "album": "AM", "duration": 272.0 },
             "lines": [
                 { "text": "uno", "start": 1.5 },
                 { "text": "dos", "start": 5.25 }
@@ -663,6 +706,58 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn compat_rejects_a_response_from_another_artist() {
+        let value = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Some Cover Band",
+            "albumName": "Covers",
+            "duration": 272.0,
+            "syncedLyrics": "[00:12.30] Have you got colour in your cheeks?\n[00:18.90] Do you ever get that fear"
+        });
+        assert!(parse_compat(&value, &track())
+            .expect("respuesta válida")
+            .is_none());
+    }
+
+    #[test]
+    fn compat_rejects_sync_with_impossible_times() {
+        let value = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "duration": 272.0,
+            "syncedLyrics": "[00:45.00] uno\n[02:40.00] dos\n[05:00.00] tres",
+            "plainLyrics": "uno\ndos\ntres"
+        });
+        let doc = parse_compat(&value, &track())
+            .expect("respuesta válida")
+            .expect("hay letra plana");
+        assert!(!doc.synced, "la sync imposible se descarta");
+        assert_eq!(doc.source, LyricsSource::Plain);
+    }
+
+    #[test]
+    fn native_with_only_a_few_timed_lines_is_not_synced() {
+        // Dos líneas con tiempo y cuatro sin él no es karaoke: las demás se
+        // colocarían a saltos de 4 s y el resultado iría a trompicones.
+        let value = json!({
+            "track": { "title": "Do I Wanna Know?", "artist": "Arctic Monkeys", "duration": 272.0 },
+            "lines": [
+                { "text": "uno", "start": 1.0 },
+                { "text": "dos", "start": 5.0 },
+                { "text": "tres" },
+                { "text": "cuatro" },
+                { "text": "cinco" },
+                { "text": "seis" }
+            ]
+        });
+        let doc = parse_native(&value, &track())
+            .expect("respuesta válida")
+            .expect("hay letra");
+        assert!(!doc.synced);
+        assert_eq!(doc.source, LyricsSource::Plain);
+    }
+
     #[tokio::test]
     #[ignore = "diagnóstico manual con red"]
     async fn live_lrcmux_returns_something() {
@@ -671,7 +766,7 @@ mod tests {
         t.title = "Borderline".into();
         t.artist = "Tame Impala".into();
         t.duration_ms = 238_000;
-        let result = fetch(&client, &t).await;
+        let result = fetch_before(&client, &t, Instant::now() + Duration::from_secs(12)).await;
         eprintln!(
             "lrcmux live => {:?}",
             result.map(|doc| doc.map(|d| (d.synced, d.lines.len(), d.source)))
@@ -683,7 +778,9 @@ mod tests {
         let client = reqwest::Client::new();
         let mut blank = track();
         blank.title = "   ".into();
-        let result = fetch(&client, &blank).await.expect("no hay error");
+        let result = fetch_before(&client, &blank, Instant::now() + Duration::from_secs(12))
+            .await
+            .expect("no hay error");
         assert!(result.is_none());
     }
 }

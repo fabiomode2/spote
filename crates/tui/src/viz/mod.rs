@@ -2,6 +2,7 @@
 //! Composición de visualizadores: capas con blend modes sobre un canvas de
 //! celdas RGB. Portado (no copiado) de los efectos de `cli-viz`.
 
+mod dots;
 mod effects;
 
 pub use effects::{effect_by_key, EffectKind};
@@ -411,6 +412,26 @@ pub const PRESETS: &[Preset] = &[
         // arranque (el preset por defecto sigue siendo `clean`).
         layers: &[("scope", Blend::Screen, 0.95, Mask::Full)],
     },
+    Preset {
+        name: "lcd",
+        description: "vu segmentado con scanlines + osciloscopio",
+        layers: &[("lcd", Blend::Normal, 0.95, Mask::Full)],
+    },
+    Preset {
+        name: "rack",
+        description: "escalera led de 16 bandas",
+        layers: &[("led", Blend::Normal, 0.95, Mask::Full)],
+    },
+    Preset {
+        name: "braille",
+        description: "espectro braille de doble resolución",
+        layers: &[("bars_braille", Blend::Normal, 0.95, Mask::Full)],
+    },
+    Preset {
+        name: "stage",
+        description: "escenario en perspectiva",
+        layers: &[("floor", Blend::Normal, 0.95, Mask::Full)],
+    },
 ];
 
 /// Compositor: N capas, un canvas final.
@@ -461,7 +482,9 @@ impl Viz {
 
     /// Presets que se ciclan con `v` y en ajustes. Los ruidosos (`void`,
     /// `neural`, `glitch`) viven como fondo ambiental, no en la franja.
-    pub const STRIP: [&'static str; 5] = ["clean", "aurora", "bloom", "inferno", "crt"];
+    pub const STRIP: [&'static str; 9] = [
+        "clean", "aurora", "bloom", "inferno", "crt", "lcd", "rack", "braille", "stage",
+    ];
 
     fn strip_index(&self) -> usize {
         Self::STRIP
@@ -720,6 +743,15 @@ mod tests {
         }
         assert_eq!(a.below(0), 0);
         assert!(a.below(5) < 5);
+    }
+
+    #[test]
+    fn strip_presets_exist_and_roundtrip() {
+        for name in Viz::STRIP {
+            let viz = Viz::from_preset(name);
+            assert_eq!(viz.preset_name(), name, "preset {name} no resuelve");
+            assert!(!viz.layers.is_empty(), "preset {name} sin capas");
+        }
     }
 
     #[test]

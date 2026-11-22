@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use super::text::{
-    artist_similarity, clean_artist, clean_title, primary_artist, similarity, split_artist_title,
-    version_kind,
+    artist_similarity, clean_artist, clean_title, is_curator_artist, is_youtube_provider,
+    primary_artist, search_title, similarity, split_artist_title, starts_with_version_marker,
+    version_kind, VersionKind,
 };
 use crate::lyrics::{parse_lrc, LyricLine, LyricsDoc, LyricsError, LyricsSource};
 use spote_protocol::TrackRef;
@@ -27,24 +28,32 @@ use spote_protocol::TrackRef;
 /// API pública de LRCLIB (gratis y sin auth).
 const API_BASE: &str = "https://lrclib.net/api";
 /// Tope por petición: la UI no puede quedarse colgada esperando la letra.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(7);
 /// Presupuesto total de la búsqueda: con varias variantes no compensa esperar
 /// más, y menos cuando la red está muerta y cada petición agota su timeout.
-const TOTAL_BUDGET: Duration = Duration::from_secs(15);
+const TOTAL_BUDGET: Duration = Duration::from_secs(24);
+/// Tramos por proveedor. Ninguno puede comerse el presupuesto de los demás:
+/// antes lrcmux/Genius/YouTube podían sumar más de un minuto de espera.
+const LRCLIB_BUDGET: Duration = Duration::from_secs(9);
+const LRCMUX_BUDGET: Duration = Duration::from_secs(6);
+const GENIUS_BUDGET: Duration = Duration::from_secs(5);
+const YOUTUBE_BUDGET: Duration = Duration::from_secs(12);
+/// Por debajo de esto no se lanza una petición condenada a expirar.
+const MIN_REQUEST_BUDGET: Duration = Duration::from_millis(700);
 /// Score mínimo para aceptar el mejor candidato de `/api/search`.
 const MIN_SCORE: f64 = 0.55;
 /// Sin un mínimo de título no se acepta nada, aunque duración y artista cuadren.
-const MIN_TITLE: f64 = 0.45;
+const MIN_TITLE: f64 = 0.50;
+/// Títulos muy cortos ("Love", "Halo") exigen más parecido: un candidato tipo
+/// "Love Story" comparte una palabra y no es la misma canción.
+const GENERIC_TITLE: f64 = 0.72;
 /// Con artista conocido, un candidato de otro artista no vale.
 const MIN_ARTIST: f64 = 0.34;
-/// Con la duración muy desviada hace falta mucha coincidencia de título+artista.
-const MIN_SCORE_FAR: f64 = 0.80;
-/// Desviación de duración (ms) a partir de la cual se exige [`MIN_SCORE_FAR`].
-const FAR_DURATION_MS: f64 = 8_000.0;
-/// Similitud mínima de título cuando la duración no cuadra.
-const TITLE_STRICT: f64 = 0.90;
-/// Similitud mínima de artista cuando la duración no cuadra.
-const ARTIST_STRICT: f64 = 0.90;
+/// Desviación de duración (ms) a partir de la cual se descarta el candidato.
+/// Es otra grabación (directo, remix, versión de vídeo) y sus tiempos no sirven.
+const FAR_DURATION_MS: f64 = 12_000.0;
+/// YouTube añade intro/outro y silencios de vídeo: se tolera algo más.
+const YOUTUBE_FAR_DURATION_MS: f64 = 35_000.0;
 
 /// Primer verso más tarde que esto es sospechoso: intro eterna o LRC de otro máster.
 const SYNC_MAX_FIRST_MS: u64 = 30_000;
@@ -61,8 +70,14 @@ const SYNC_MIN_LINES: usize = 2;
 // API pública
 // ---------------------------------------------------------------------------
 
-/// Busca letra en LRCLIB, Genius y captions de YouTube. `Ok(None)` = no hay
-/// nada.
+/// Busca letra en LRCLIB, lrcmux, Genius y captions de YouTube. `Ok(None)` = no
+/// hay nada.
+///
+/// La cascada está acotada por tramos: un proveedor lento no puede agotar el
+/// presupuesto de los siguientes. Si la pista viene de YouTube y hay un
+/// `videoId` exacto, las captions de ese vídeo se usan para reajustar la letra
+/// al audio descargado aunque LRCLIB ya devolviera un LRC sincronizado: el
+/// vídeo suele llevar intro/outro y el LRC de estudio queda desplazado.
 pub async fn fetch_track(
     client: &reqwest::Client,
     track: &TrackRef,
@@ -70,66 +85,244 @@ pub async fn fetch_track(
     if track.title.trim().is_empty() {
         return Ok(None);
     }
+    let target = MatchTarget::from_track(track);
     let variants = query_variants(track);
     let deadline = Instant::now() + TOTAL_BUDGET;
+    let prefer_captions = youtube_hint(track).is_some();
+    let mut best: Option<LyricsDoc> = None;
     let mut fallback: Option<LyricsDoc> = None;
 
-    // 1) Metadatos exactos: si LRCLIB lo tiene sincronizado, es el bueno.
+    // 1) Metadatos exactos y búsqueda libre de LRCLIB, con su propio tramo.
+    let lrclib_deadline = slice(deadline, LRCLIB_BUDGET);
     for variant in &variants {
-        if Instant::now() >= deadline {
+        if !has_budget(lrclib_deadline, MIN_REQUEST_BUDGET) {
             break;
         }
-        if let Ok(Some(doc)) = fetch_exact(client, variant).await {
-            if let Some(doc) = keep_fallback(&mut fallback, doc) {
-                return Ok(Some(doc));
+        if let Ok(Some(doc)) = fetch_exact(client, variant, &target, lrclib_deadline).await {
+            if absorb(&mut best, &mut fallback, doc) {
+                if !prefer_captions {
+                    return Ok(best);
+                }
+                break;
             }
         }
     }
-    // 2) Búsqueda libre + ranking por título, artista, duración y versión.
-    for variant in &variants {
-        if Instant::now() >= deadline {
-            break;
-        }
-        if let Ok(Some(doc)) = fetch_search(client, variant).await {
-            if let Some(doc) = keep_fallback(&mut fallback, doc) {
-                return Ok(Some(doc));
+    if best.is_none() {
+        for variant in &variants {
+            if !has_budget(lrclib_deadline, MIN_REQUEST_BUDGET) {
+                break;
+            }
+            if let Ok(Some(doc)) = fetch_search(client, variant, &target, lrclib_deadline).await {
+                if absorb(&mut best, &mut fallback, doc) {
+                    if !prefer_captions {
+                        return Ok(best);
+                    }
+                    break;
+                }
             }
         }
     }
-    // 3) lrcmux: agregador compatible con LRCLIB, con más cobertura y a
-    // veces tiempos por palabra. Un fallo aquí no impide probar Genius.
-    if Instant::now() < deadline {
-        if let Ok(Some(doc)) = super::lrcmux::fetch(client, track).await {
-            if let Some(doc) = keep_fallback(&mut fallback, doc) {
-                return Ok(Some(doc));
+
+    // 2) lrcmux: agregador compatible con LRCLIB, a veces con más cobertura.
+    if best.is_none() {
+        let lrcmux_deadline = slice(deadline, LRCMUX_BUDGET);
+        if has_budget(lrcmux_deadline, MIN_REQUEST_BUDGET) {
+            // Se consulta con la variante limpia: un título de YouTube con
+            // "Official Video" no encaja en el endpoint compatible.
+            let query = variants.first().unwrap_or(track);
+            if let Ok(Some(doc)) = super::lrcmux::fetch_before(client, query, lrcmux_deadline).await
+            {
+                if absorb(&mut best, &mut fallback, doc) && !prefer_captions {
+                    return Ok(best);
+                }
             }
         }
     }
-    // 4) Genius: letra plana.
-    if Instant::now() < deadline {
-        if let Ok(Some(doc)) = fetch_genius(client, track).await {
-            if let Some(doc) = keep_fallback(&mut fallback, doc) {
-                return Ok(Some(doc));
+
+    // 3) Genius: letra plana como respaldo.
+    if best.is_none() {
+        let genius_deadline = slice(deadline, GENIUS_BUDGET);
+        if has_budget(genius_deadline, MIN_REQUEST_BUDGET) {
+            if let Ok(Some(doc)) = fetch_genius(client, track, &target, genius_deadline).await {
+                if absorb(&mut best, &mut fallback, doc) && !prefer_captions {
+                    return Ok(best);
+                }
             }
         }
     }
-    // 5) Captions de YouTube: si hay letra conocida, alinean; si no, sirven
-    //    como letra sincronizada de emergencia.
-    if let Some(doc) = super::youtube::fetch(track, fallback.as_ref()).await {
-        return Ok(Some(doc));
+
+    // 4) Captions de YouTube: alinean la letra conocida contra el audio exacto
+    //    o, si no hay letra, sirven de letra sincronizada de emergencia.
+    let known = best.as_ref().or(fallback.as_ref());
+    let youtube_deadline = slice(deadline, YOUTUBE_BUDGET);
+    if has_budget(youtube_deadline, Duration::from_secs(2)) {
+        if let Some(doc) = super::youtube::fetch(track, known, youtube_deadline).await {
+            return Ok(Some(doc));
+        }
     }
-    Ok(fallback)
+    Ok(best.or(fallback))
 }
 
-/// Los documentos sincronizados ganan; los planos se guardan como respaldo.
-fn keep_fallback(fallback: &mut Option<LyricsDoc>, doc: LyricsDoc) -> Option<LyricsDoc> {
+/// Guarda un documento: los sincronizados compiten por el primer puesto, los
+/// planos solo rellenan el respaldo si aún no hay ninguno.
+fn absorb(best: &mut Option<LyricsDoc>, fallback: &mut Option<LyricsDoc>, doc: LyricsDoc) -> bool {
     if doc.synced {
-        Some(doc)
+        *best = Some(doc);
+        true
     } else {
         if fallback.is_none() {
             *fallback = Some(doc);
         }
-        None
+        false
+    }
+}
+
+/// Final del tramo de un proveedor, sin pasarse del presupuesto global.
+fn slice(deadline: Instant, budget: Duration) -> Instant {
+    let end = Instant::now() + budget;
+    if end < deadline {
+        end
+    } else {
+        deadline
+    }
+}
+
+fn has_budget(deadline: Instant, minimum: Duration) -> bool {
+    deadline.saturating_duration_since(Instant::now()) >= minimum
+}
+
+/// Id de vídeo exacto si la pista se descargó de YouTube/YT Music. Sin esto no
+/// se puede garantizar que las captions pertenezcan al mismo audio.
+fn youtube_hint(track: &TrackRef) -> Option<&str> {
+    let hint = track.source_hint.as_ref()?;
+    if !is_youtube_provider(&hint.provider) {
+        return None;
+    }
+    let id = hint.id.trim();
+    let valid = (6..=20).contains(&id.len())
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    valid.then_some(id)
+}
+
+/// Metadatos contra los que se puntúa un candidato. A diferencia de la pista
+/// cruda, el título viene limpio y el artista se deduce del patrón
+/// "Artista - Tema" cuando el canal de YouTube no es el artista.
+#[derive(Debug, Clone)]
+pub(crate) struct MatchTarget {
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub duration_ms: u64,
+    pub version: VersionKind,
+    /// El artista procede del canal o del título y se puede exigir. Si es un
+    /// canal de YouTube sin relación (recopilatorio, "Lyrics"), se relaja la
+    /// puerta de artista y se compensa con un título más estricto.
+    pub artist_trusted: bool,
+    /// La pista se descargó de YouTube: la duración del vídeo incluye
+    /// intro/outro y la tolerancia debe ser mayor.
+    pub youtube: bool,
+}
+
+impl MatchTarget {
+    pub(crate) fn from_track(track: &TrackRef) -> Self {
+        let channel = track.artist.to_ascii_lowercase();
+        let title_lower = track.title.to_ascii_lowercase();
+        let looks_like_video = [
+            "official video",
+            "official music video",
+            "official audio",
+            "lyric video",
+            "lyrics video",
+            "video oficial",
+            "audio oficial",
+            "visualizer",
+        ]
+        .iter()
+        .any(|marker| title_lower.contains(*marker));
+        let youtube = track
+            .source_hint
+            .as_ref()
+            .is_some_and(|hint| is_youtube_provider(&hint.provider))
+            // Pistas viejas/importadas sin source_hint pero con el canal típico
+            // de YouTube: "Artista - Topic" o "ArtistaVEVO".
+            || channel.contains("- topic")
+            || channel.ends_with("vevo")
+            // O con el ruido de vídeo en el título.
+            || looks_like_video;
+        let mut artist = clean_artist(&track.artist);
+        let mut title = clean_title(&track.title);
+        let mut artist_trusted = !artist.is_empty();
+
+        if let Some((left, right)) = split_artist_title(&track.title) {
+            let left_clean = clean_title(left);
+            let right_clean = clean_title(right);
+            let left_is_artist = !artist.is_empty() && similarity(&left_clean, &artist) >= 0.60;
+            let right_is_artist = !artist.is_empty() && similarity(&right_clean, &artist) >= 0.60;
+            if left_is_artist && !right_clean.is_empty() {
+                artist = clean_artist(left);
+                title = right_clean;
+                artist_trusted = true;
+            } else if right_is_artist && !left_clean.is_empty() {
+                artist = clean_artist(right);
+                title = left_clean;
+                artist_trusted = true;
+            } else if !left_clean.is_empty()
+                && !right_clean.is_empty()
+                && starts_with_version_marker(right)
+            {
+                // "Tema - Live at Reading": el lado derecho es la versión, no
+                // el título. Se queda el tema de la izquierda y el canal como
+                // artista (fiable fuera de YouTube; allí puede ser un upload).
+                title = left_clean;
+                if youtube {
+                    artist_trusted = false;
+                }
+            } else if (youtube || artist.is_empty())
+                && !left_clean.is_empty()
+                && !right_clean.is_empty()
+            {
+                // Canal de YouTube que no es el artista: el patrón habitual
+                // "Artista - Tema (Official Video)" sigue valiendo.
+                artist = clean_artist(left);
+                title = right_clean;
+                artist_trusted = true;
+            } else if youtube && !artist.is_empty() {
+                // El canal no casa con ningún lado del título: probablemente
+                // sea un canal de recopilación. No se puede exigir artista.
+                artist_trusted = false;
+            }
+        }
+        if title.is_empty() {
+            title = clean_title(&track.title);
+        }
+        // Un canal de discográfica/recopilatorio no identifica al artista: se
+        // relaja la puerta de artista y manda título+duración+versión.
+        if youtube && artist_trusted && is_curator_artist(&artist) {
+            artist_trusted = false;
+        }
+        Self {
+            title,
+            artist,
+            album: track
+                .album
+                .as_deref()
+                .map(clean_title)
+                .filter(|album| !album.is_empty()),
+            duration_ms: track.duration_ms,
+            version: version_kind(&track.title, track.album.as_deref()),
+            artist_trusted,
+            youtube,
+        }
+    }
+
+    fn far_duration_ms(&self) -> f64 {
+        if self.youtube {
+            YOUTUBE_FAR_DURATION_MS
+        } else {
+            FAR_DURATION_MS
+        }
     }
 }
 
@@ -150,74 +343,78 @@ fn query_variants(track: &TrackRef) -> Vec<TrackRef> {
         out.push(candidate);
     };
 
+    let target = MatchTarget::from_track(track);
+    let album = target.album.clone();
+
+    // La variante limpia primero: es la que más probabilidad tiene de acertar
+    // en `/api/get` y evita gastar el tramo de LRCLIB en títulos de YouTube.
+    if !target.title.is_empty() && !target.artist.is_empty() {
+        let mut cleaned = track.clone();
+        cleaned.title = target.title.clone();
+        cleaned.artist = target.artist.clone();
+        cleaned.album = album.clone();
+        push(cleaned);
+    }
     push(track.clone());
 
-    let title = clean_title(&track.title);
-    let title = if title.is_empty() {
-        track.title.clone()
-    } else {
-        title
-    };
-    let artist = clean_artist(&track.artist);
-    let album = track
-        .album
-        .as_deref()
-        .map(clean_title)
-        .filter(|album| !album.is_empty());
-
-    // "Artista - Tema": típico de YouTube, donde el título arrastra al artista
-    // (o al revés). Se queda el lado que no es el artista como título.
-    let mut split_title: Option<String> = None;
+    // "Artista - Tema": se prueban las dos orientaciones. La que coincide con
+    // el canal ya la usó `MatchTarget`, pero un canal recopilatorio no.
     if let Some((left, right)) = split_artist_title(&track.title) {
-        let known = if track.artist.trim().is_empty() {
-            artist.clone()
-        } else {
-            track.artist.clone()
-        };
-        let looks_like_artist = !known.trim().is_empty() && similarity(left, &known) >= 0.6;
-        let right_looks_like_artist = !known.trim().is_empty() && similarity(right, &known) >= 0.6;
-        let (artist_part, title_part) = if looks_like_artist {
-            (Some(left), right)
-        } else if right_looks_like_artist {
-            (Some(right), left)
-        } else {
-            (None, "")
-        };
-        let clean = clean_title(title_part);
-        if !clean.is_empty() {
-            let mut split = track.clone();
-            split.title = clean.clone();
-            split.artist = artist_part
-                .map(clean_artist)
-                .filter(|part| !part.is_empty())
-                .unwrap_or_else(|| artist.clone());
-            split.album = album.clone();
-            push(split);
-            split_title = Some(clean);
+        let left_clean = clean_title(left);
+        let right_clean = clean_title(right);
+        if !left_clean.is_empty() && !right_clean.is_empty() {
+            let mut left_artist = track.clone();
+            left_artist.title = right_clean.clone();
+            left_artist.artist = clean_artist(left);
+            left_artist.album = album.clone();
+            push(left_artist);
+
+            // En YouTube el patrón es "Artista - Tema"; la orientación
+            // inversa solo añade una petición que nunca va a pasar la puerta.
+            if !target.youtube {
+                let mut right_artist = track.clone();
+                right_artist.title = left_clean;
+                right_artist.artist = clean_artist(right);
+                right_artist.album = album.clone();
+                push(right_artist);
+            }
         }
     }
 
-    let mut cleaned = track.clone();
-    cleaned.title = title.clone();
-    cleaned.artist = artist.clone();
-    cleaned.album = album;
-    push(cleaned.clone());
+    // Título limpio con el canal tal cual: cubre canales que sí son artistas.
+    // Si el artista se dedujo del título, el canal es ruido y no se consulta.
+    if !target.title.is_empty() && clean_artist(&track.artist) == target.artist {
+        let mut title_channel = track.clone();
+        title_channel.title = target.title.clone();
+        title_channel.artist = clean_artist(&track.artist);
+        title_channel.album = album.clone();
+        push(title_channel);
+    }
 
     // Artista principal de una colaboración ("A, B" → "A").
-    let primary = primary_artist(&artist);
-    if !primary.is_empty() && primary != artist {
-        let mut solo = cleaned.clone();
-        solo.artist = primary.clone();
+    let primary = primary_artist(&target.artist);
+    if !primary.is_empty() && primary != target.artist {
+        let mut solo = track.clone();
+        solo.title = target.title.clone();
+        solo.artist = primary;
+        solo.album = album;
         push(solo);
+    }
 
-        let mut both = track.clone();
-        both.artist = primary;
-        push(both);
+    // Recurso intermedio: título plegado (comillas y guiones tipográficos).
+    if !target.title.is_empty() {
+        let folded_title = search_title(&target.title);
+        if !folded_title.is_empty() && folded_title != target.title {
+            let mut folded = track.clone();
+            folded.title = folded_title;
+            folded.artist = target.artist.clone();
+            push(folded);
+        }
     }
 
     // Último recurso: solo título, sin artista ni álbum.
     let mut title_only = track.clone();
-    title_only.title = split_title.unwrap_or(title);
+    title_only.title = target.title;
     title_only.artist.clear();
     title_only.album = None;
     push(title_only);
@@ -263,11 +460,16 @@ impl Candidate {
 }
 
 /// Ordena los candidatos de mejor a peor y deja el score calculado en cada uno.
+#[cfg(test)]
 pub(crate) fn rank_candidates(cands: Vec<Candidate>, track: &TrackRef) -> Vec<Candidate> {
+    rank_for(cands, &MatchTarget::from_track(track))
+}
+
+fn rank_for(cands: Vec<Candidate>, target: &MatchTarget) -> Vec<Candidate> {
     let mut scored: Vec<Candidate> = cands
         .into_iter()
         .map(|mut cand| {
-            cand.score = score_candidate(&cand, track);
+            cand.score = score_for(&cand, target);
             cand
         })
         .collect();
@@ -284,26 +486,32 @@ pub(crate) fn rank_candidates(cands: Vec<Candidate>, track: &TrackRef) -> Vec<Ca
 
 /// Puntúa un candidato contra la pista pedida. Devuelve `0..=1`.
 ///
-/// Pesos: título 0.48, artista 0.24, duración 0.28; bonus por llevar letra
-/// sincronizada y castigo por ser una versión distinta (directo, remix, cover,
-/// karaoke, sped up…) cuando se pidió la de estudio.
+/// Pesos: título 0.48, artista 0.24, duración 0.28; bonus pequeño por llevar
+/// letra sincronizada y castigo por ser una versión distinta (directo, remix,
+/// cover, karaoke, sped up…) cuando se pidió la de estudio. Los timestamps no
+/// pueden compensar un título o un artista que no son los pedidos: eso lo
+/// decide [`acceptable`], no el score.
+#[cfg(test)]
 pub(crate) fn score_candidate(cand: &Candidate, track: &TrackRef) -> f64 {
-    let title = title_similarity(&cand.track_name, track);
-    let artist = if track.artist.trim().is_empty() {
-        // Sin artista de referencia no hay ni premio ni castigo.
+    score_for(cand, &MatchTarget::from_track(track))
+}
+
+fn score_for(cand: &Candidate, target: &MatchTarget) -> f64 {
+    let title = title_similarity_for(&cand.track_name, target);
+    let artist = if target.artist.trim().is_empty() {
         0.5
+    } else if cand.artist_name.trim().is_empty() {
+        0.0
     } else {
-        artist_similarity(&cand.artist_name, &track.artist)
+        artist_similarity(&cand.artist_name, &target.artist)
     };
-    let duration = duration_score(cand.duration, track.duration_ms);
+    let duration = duration_score(cand.duration, target.duration_ms, target.youtube);
 
     let mut score = 0.48 * title + 0.24 * artist + 0.28 * duration;
 
-    // Versión: un directo o un remix no es la misma letra, y menos con tiempos.
-    let requested = version_kind(&track.title, track.album.as_deref());
     let offered = version_kind(&cand.track_name, Some(&cand.album_name));
-    if requested != offered {
-        score -= if requested == super::text::VersionKind::Studio {
+    if offered != target.version {
+        score -= if target.version == VersionKind::Studio {
             0.22
         } else {
             0.12
@@ -311,15 +519,14 @@ pub(crate) fn score_candidate(cand: &Candidate, track: &TrackRef) -> f64 {
     }
 
     if cand.synced {
-        // La sincronizada siempre vale más que la plana.
+        // La sincronizada vale un poco más, pero solo como desempate.
         score += 0.05;
     } else if !cand.plain {
         // Sin letra no sirve de nada aunque el título cuadre al milímetro.
         score *= 0.35;
     }
-    // El álbum solo desempata: dos versiones del mismo título suelen compartirlo.
     if !cand.album_name.trim().is_empty() {
-        let album = track.album.as_deref().unwrap_or_default();
+        let album = target.album.as_deref().unwrap_or_default();
         if similarity(&cand.album_name, album) >= 0.99 {
             score += 0.03;
         }
@@ -328,79 +535,142 @@ pub(crate) fn score_candidate(cand: &Candidate, track: &TrackRef) -> f64 {
 }
 
 /// `true` si el candidato merece devolverse.
+#[cfg(test)]
 fn acceptable(best: &Candidate, track: &TrackRef) -> bool {
+    acceptable_for(best, &MatchTarget::from_track(track))
+}
+
+fn acceptable_for(best: &Candidate, target: &MatchTarget) -> bool {
     if best.score < MIN_SCORE {
         return false;
     }
-    // La duración y el artista pueden coincidir por casualidad; el título no.
-    if title_similarity(&best.track_name, track) < MIN_TITLE {
+    let title = title_similarity_for(&best.track_name, target);
+    let minimum = if target.artist.trim().is_empty() {
+        // Sin artista solo queda el título y la duración: se exige más.
+        0.70
+    } else {
+        MIN_TITLE
+    };
+    if title < minimum {
         return false;
     }
-    if !track.artist.trim().is_empty()
-        && !best.artist_name.trim().is_empty()
-        && artist_similarity(&best.artist_name, &track.artist) < MIN_ARTIST
-    {
+    if is_generic_title(&target.title) && title < GENERIC_TITLE {
         return false;
     }
-    // Karaoke, instrumental o versión de otro artista: la letra no es la pedida.
-    let requested = version_kind(&track.title, track.album.as_deref());
+
+    // Puerta de artista. Un canal de YouTube que no es el artista no puede
+    // bloquear la única coincidencia buena; en ese caso manda el título.
+    let artist = if best.artist_name.trim().is_empty() {
+        0.0
+    } else {
+        artist_similarity(&best.artist_name, &target.artist)
+    };
+    if !target.artist.trim().is_empty() {
+        if target.artist_trusted {
+            if best.artist_name.trim().is_empty() || artist < MIN_ARTIST {
+                return false;
+            }
+        } else if title < GENERIC_TITLE {
+            return false;
+        }
+    }
+
+    // Una versión distinta con tiempos propios (directo, remix, cover) no vale
+    // aunque el título se limpie igual: los timestamps son de otro audio.
     let offered = version_kind(&best.track_name, Some(&best.album_name));
-    if offered.is_incompatible() && offered != requested {
-        return false;
+    if offered != target.version {
+        if offered.is_incompatible() || best.synced {
+            return false;
+        }
     }
-    let known = track.duration_ms > 0 && best.duration.is_finite() && best.duration > 0.0;
+
+    let known = target.duration_ms > 0 && best.duration.is_finite() && best.duration > 0.0;
     if !known {
         return true;
     }
     // LRCLIB manda la duración en segundos: se pasa a ms antes de comparar.
-    let diff = (best.duration * 1000.0 - track.duration_ms as f64).abs();
-    if diff <= FAR_DURATION_MS {
-        return true;
-    }
-    // Duración muy distinta (directo, relleno, vídeo): solo cuela si el título y
-    // el artista coinciden casi palabra por palabra.
-    let artist_ok = track.artist.trim().is_empty()
-        || best.artist_name.trim().is_empty()
-        || artist_similarity(&best.artist_name, &track.artist) >= ARTIST_STRICT;
-    best.score >= MIN_SCORE_FAR
-        && title_similarity(&best.track_name, track) >= TITLE_STRICT
-        && artist_ok
+    let diff = (best.duration * 1000.0 - target.duration_ms as f64).abs();
+    diff <= target.far_duration_ms()
 }
 
-/// Similitud de título teniendo en cuenta que el título pedido puede arrastrar
-/// el nombre del artista ("Artista - Tema", típico de YouTube).
-fn title_similarity(candidate_title: &str, track: &TrackRef) -> f64 {
-    let mut best = similarity(candidate_title, &track.title);
-    let Some((left, right)) = split_artist_title(&track.title) else {
-        return best;
-    };
-    let known = if track.artist.trim().is_empty() {
-        String::new()
-    } else {
-        track.artist.clone()
-    };
-    if known.trim().is_empty() {
-        return best;
+/// Comprueba los metadatos de una respuesta de un proveedor que no pasa por el
+/// ranking de `/api/search` (lrcmux, `/api/get`). Devuelve `true` cuando no hay
+/// metadatos suficientes para juzgar.
+pub(crate) fn metadata_matches(
+    track: &TrackRef,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_seconds: f64,
+) -> bool {
+    if title.trim().is_empty() && artist.trim().is_empty() {
+        return true;
     }
-    // El lado que se parece al artista es ruido; el otro es el título de verdad.
-    if similarity(left, &known) >= 0.6 {
-        best = best.max(similarity(candidate_title, right));
-    } else if similarity(right, &known) >= 0.6 {
-        best = best.max(similarity(candidate_title, left));
+    let target = MatchTarget::from_track(track);
+    let cand = Candidate {
+        source_index: 0,
+        id: 0,
+        track_name: if title.trim().is_empty() {
+            target.title.clone()
+        } else {
+            title.to_string()
+        },
+        artist_name: artist.to_string(),
+        album_name: album.to_string(),
+        duration: duration_seconds,
+        synced: true,
+        plain: true,
+        score: 0.0,
+    };
+    let mut cand = cand;
+    cand.score = score_for(&cand, &target);
+    acceptable_for(&cand, &target)
+}
+
+/// Similitud de título teniendo en cuenta que el candidato o la pista pueden
+/// arrastrar el nombre del artista ("Artista - Tema", típico de YouTube).
+fn title_similarity_for(candidate_title: &str, target: &MatchTarget) -> f64 {
+    if target.title.trim().is_empty() {
+        return 0.0;
+    }
+    let mut best = similarity(candidate_title, &target.title);
+    if let Some((left, right)) = split_artist_title(candidate_title) {
+        // El candidato también puede venir con "Artista - Tema".
+        best = best.max(similarity(right, &target.title));
+        best = best.max(similarity(left, &target.title));
     }
     best
+}
+
+/// Título con muy pocas palabras significativas ("Love", "Halo"): exige un
+/// parecido mayor para que "Love Story" no pase por "Love".
+fn is_generic_title(title: &str) -> bool {
+    let cleaned = clean_title(title);
+    let words = cleaned.split_whitespace().count();
+    let letters = cleaned.chars().filter(|ch| ch.is_alphanumeric()).count();
+    words <= 2 || letters <= 8
 }
 
 /// Cuánto se parece la duración del candidato a la de la pista.
 ///
 /// Por tramos: el vídeo suele añadir unos segundos de intro/outro y eso no debe
 /// pesar como si fuera otra canción.
-fn duration_score(candidate_seconds: f64, track_ms: u64) -> f64 {
+fn duration_score(candidate_seconds: f64, track_ms: u64, youtube: bool) -> f64 {
     // Sin una de las dos duraciones no se puede comparar: neutro.
     if track_ms == 0 || !candidate_seconds.is_finite() || candidate_seconds <= 0.0 {
         return 0.5;
     }
     let diff = (candidate_seconds * 1000.0 - track_ms as f64).abs();
+    if youtube {
+        // El vídeo añade intro/outro: se tolera más antes de castigar.
+        return match diff {
+            diff if diff <= 4_000.0 => 1.0,
+            diff if diff <= 12_000.0 => 0.9,
+            diff if diff <= 25_000.0 => 0.75,
+            diff if diff <= 35_000.0 => 0.5,
+            diff => (1.0 - diff / track_ms as f64).clamp(0.0, 0.2),
+        };
+    }
     match diff {
         diff if diff <= 2_000.0 => 1.0,
         diff if diff <= 5_000.0 => 0.9,
@@ -419,6 +689,8 @@ fn duration_score(candidate_seconds: f64, track_ms: u64) -> f64 {
 async fn fetch_exact(
     client: &reqwest::Client,
     track: &TrackRef,
+    target: &MatchTarget,
+    deadline: Instant,
 ) -> Result<Option<LyricsDoc>, LyricsError> {
     if track.artist.trim().is_empty() || track.title.trim().is_empty() {
         return Ok(None);
@@ -442,16 +714,24 @@ async fn fetch_exact(
         url.push_str(&format!("&duration={}", track.duration_ms / 1000));
     }
 
-    let response = client
-        .get(url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(map_error)?;
-    if !response.status().is_success() {
+    let Some(response) = get_with_budget(client, &url, deadline).await? else {
+        return Ok(None);
+    };
+    let raw: RemoteLyrics = response.json().await.map_err(map_error)?;
+    // `/api/get` devuelve un único registro, pero también puede devolver una
+    // versión mal etiquetada. Se valida con la misma puerta que la búsqueda.
+    let mut cand = Candidate::from_parts(0, &raw);
+    cand.score = score_for(&cand, target);
+    if !acceptable_for(&cand, target) {
+        tracing::debug!(
+            target: "spote::lyrics",
+            "lrclib get descartado: '{} - {}' score={:.2}",
+            cand.artist_name,
+            cand.track_name,
+            cand.score
+        );
         return Ok(None);
     }
-    let raw: RemoteLyrics = response.json().await.map_err(map_error)?;
     Ok(build_doc(&raw, track))
 }
 
@@ -459,6 +739,8 @@ async fn fetch_exact(
 async fn fetch_search(
     client: &reqwest::Client,
     track: &TrackRef,
+    target: &MatchTarget,
+    deadline: Instant,
 ) -> Result<Option<LyricsDoc>, LyricsError> {
     let mut url = format!("{API_BASE}/search?track_name={}", url_encode(&track.title));
     if !track.artist.trim().is_empty() {
@@ -466,27 +748,21 @@ async fn fetch_search(
         url.push_str(&url_encode(&track.artist));
     }
 
-    let response = client
-        .get(url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .map_err(map_error)?;
-    if !response.status().is_success() {
+    let Some(response) = get_with_budget(client, &url, deadline).await? else {
         return Ok(None);
-    }
+    };
     let entries: Vec<RemoteLyrics> = response.json().await.map_err(map_error)?;
     let candidates = entries
         .iter()
         .enumerate()
         .map(|(index, raw)| Candidate::from_parts(index, raw))
         .collect();
-    let ranked = rank_candidates(candidates, track);
-    // Del mejor al peor: el primero que dé un documento usable gana. Nunca se
-    // coge el primero de la lista sin puntuar.
+    let ranked = rank_for(candidates, target);
+    // Del mejor al peor: el primero que pase la puerta gana. Nunca se coge el
+    // primero de la lista sin puntuar, y un synced con mal título no compensa.
     for best in &ranked {
-        if !acceptable(best, track) {
-            break;
+        if !acceptable_for(best, target) {
+            continue;
         }
         // El ranking solo lleva metadatos: el texto se recupera del original.
         let Some(raw) = entries.get(best.source_index) else {
@@ -508,6 +784,29 @@ async fn fetch_search(
     Ok(None)
 }
 
+/// Lanza una petición GET respetando el presupuesto del proveedor. Devuelve
+/// `None` (sin error) cuando ya no queda tiempo: no es un fallo de la fuente.
+async fn get_with_budget(
+    client: &reqwest::Client,
+    url: &str,
+    deadline: Instant,
+) -> Result<Option<reqwest::Response>, LyricsError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining < MIN_REQUEST_BUDGET {
+        return Ok(None);
+    }
+    let response = client
+        .get(url)
+        .timeout(remaining.min(REQUEST_TIMEOUT))
+        .send()
+        .await
+        .map_err(map_error)?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    Ok(Some(response))
+}
+
 // ---------------------------------------------------------------------------
 // Construcción del documento
 // ---------------------------------------------------------------------------
@@ -515,8 +814,16 @@ async fn fetch_search(
 /// Prefiere `syncedLyrics`; si no hay (o sus tiempos no son de fiar), reparte
 /// `plainLyrics` sobre la duración.
 fn build_doc(raw: &RemoteLyrics, track: &TrackRef) -> Option<LyricsDoc> {
+    build_doc_with_source(raw, track, LyricsSource::Lrclib)
+}
+
+fn build_doc_with_source(
+    raw: &RemoteLyrics,
+    track: &TrackRef,
+    source: LyricsSource,
+) -> Option<LyricsDoc> {
     let duration_ms = effective_duration_ms(raw, track);
-    if let Some(doc) = synced_doc(raw, duration_ms) {
+    if let Some(doc) = synced_doc(raw, duration_ms, source) {
         return Some(doc);
     }
     plain_doc(raw, track)
@@ -524,7 +831,7 @@ fn build_doc(raw: &RemoteLyrics, track: &TrackRef) -> Option<LyricsDoc> {
 
 /// Letra con tiempos reales, tal cual viene en LRC. `None` si el LRC no trae
 /// tiempos o si los trae imposibles (ver [`sync_problem`]).
-fn synced_doc(raw: &RemoteLyrics, duration_ms: u64) -> Option<LyricsDoc> {
+fn synced_doc(raw: &RemoteLyrics, duration_ms: u64, source: LyricsSource) -> Option<LyricsDoc> {
     let text = raw
         .synced_lyrics
         .as_deref()
@@ -548,7 +855,7 @@ fn synced_doc(raw: &RemoteLyrics, duration_ms: u64) -> Option<LyricsDoc> {
         lines: parsed.lines,
         synced: true,
         instrumental: parsed.instrumental,
-        source: LyricsSource::Lrclib,
+        source,
         offset_ms: parsed.offset_ms,
         aligned: false,
     })
@@ -728,8 +1035,7 @@ const GENIUS_BASE: &str = "https://genius.com";
 const GENIUS_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
                          (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const GENIUS_ACCEPT_JSON: &str = "application/json";
-const GENIUS_ACCEPT_HTML: &str =
-    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+const GENIUS_ACCEPT_HTML: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
 
 #[derive(Debug, Deserialize)]
 struct GeniusSearch {
@@ -776,30 +1082,25 @@ struct GeniusSong {
 async fn fetch_genius(
     client: &reqwest::Client,
     track: &TrackRef,
+    target: &MatchTarget,
+    deadline: Instant,
 ) -> Result<Option<LyricsDoc>, LyricsError> {
-    let query = format!("{} {}", track.title.trim(), track.artist.trim());
+    let query = format!("{} {}", target.title.trim(), target.artist.trim());
     let query = query.trim();
     if query.is_empty() {
         return Ok(None);
     }
-    let url = format!(
-        "{GENIUS_SEARCH}?per_page=5&q={}",
-        url_encode(query)
-    );
-    let response = client
-        .get(url)
-        .header(reqwest::header::USER_AGENT, GENIUS_UA)
-        .header(reqwest::header::ACCEPT, GENIUS_ACCEPT_JSON)
-        .send()
-        .await
-        .map_err(map_error)?;
-    if !response.status().is_success() {
+    let url = format!("{GENIUS_SEARCH}?per_page=5&q={}", url_encode(query));
+    let Some(response) = genius_get(client, &url, GENIUS_ACCEPT_JSON, deadline).await? else {
         return Ok(None);
-    }
+    };
     let body: GeniusSearch = response.json().await.map_err(map_error)?;
-    let Some(song) = best_genius_song(&body, track) else {
+    let Some(song) = best_genius_song(&body, target) else {
         if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
-            eprintln!("[genius] sin candidato en {} secciones", body.response.sections.len());
+            eprintln!(
+                "[genius] sin candidato en {} secciones",
+                body.response.sections.len()
+            );
         }
         return Ok(None);
     };
@@ -813,16 +1114,9 @@ async fn fetch_genius(
     } else {
         format!("{GENIUS_BASE}/{}", song.path)
     };
-    let response = client
-        .get(&path)
-        .header(reqwest::header::USER_AGENT, GENIUS_UA)
-        .header(reqwest::header::ACCEPT, GENIUS_ACCEPT_HTML)
-        .send()
-        .await
-        .map_err(map_error)?;
-    if !response.status().is_success() {
+    let Some(response) = genius_get(client, &path, GENIUS_ACCEPT_HTML, deadline).await? else {
         return Ok(None);
-    }
+    };
     let status = response.status();
     let page = response.text().await.map_err(map_error)?;
     let text = extract_genius_lyrics(&page);
@@ -849,7 +1143,31 @@ async fn fetch_genius(
     Ok(plain_doc(&raw, track))
 }
 
-fn best_genius_song<'a>(search: &'a GeniusSearch, track: &TrackRef) -> Option<&'a GeniusSong> {
+async fn genius_get(
+    client: &reqwest::Client,
+    url: &str,
+    accept: &str,
+    deadline: Instant,
+) -> Result<Option<reqwest::Response>, LyricsError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining < MIN_REQUEST_BUDGET {
+        return Ok(None);
+    }
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, GENIUS_UA)
+        .header(reqwest::header::ACCEPT, accept)
+        .timeout(remaining.min(REQUEST_TIMEOUT))
+        .send()
+        .await
+        .map_err(map_error)?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    Ok(Some(response))
+}
+
+fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Option<&'a GeniusSong> {
     let mut best: Option<(f64, &GeniusSong)> = None;
     for section in &search.response.sections {
         for hit in &section.hits {
@@ -865,18 +1183,35 @@ fn best_genius_song<'a>(search: &'a GeniusSearch, track: &TrackRef) -> Option<&'
             if song.lyrics_state == "unavailable" {
                 continue;
             }
-            let title_score = title_similarity(&song.title, track);
-            if title_score < 0.50 {
+            // Genius no da duración, así que la versión se juzga por el título:
+            // una letra de directo/remix no debe colarse por la de estudio.
+            let offered = version_kind(&song.title, None);
+            if offered != target.version && offered.is_incompatible() {
                 continue;
             }
-            let artist_score = if track.artist.trim().is_empty() {
+            let title_score = title_similarity_for(&song.title, target);
+            let minimum = if target.artist.trim().is_empty() {
+                0.80
+            } else {
+                MIN_TITLE
+            };
+            if title_score < minimum {
+                continue;
+            }
+            let artist_score = if target.artist.trim().is_empty() {
                 0.5
             } else {
-                artist_similarity(&song.artist_names, &track.artist)
+                artist_similarity(&song.artist_names, &target.artist)
             };
-            // Mismo título de otro artista no vale para nada.
-            if !track.artist.trim().is_empty() && artist_score < 0.20 {
-                continue;
+            // Mismo título de otro artista no vale. Con un canal de YouTube no
+            // fiable se compensa exigiendo un título casi exacto.
+            if !target.artist.trim().is_empty() {
+                if target.artist_trusted && artist_score < 0.30 {
+                    continue;
+                }
+                if !target.artist_trusted && title_score < 0.80 {
+                    continue;
+                }
             }
             let score = title_score * 0.72 + artist_score * 0.28;
             if best.as_ref().is_none_or(|(best, _)| score > *best) {
@@ -896,16 +1231,23 @@ fn best_genius_song<'a>(search: &'a GeniusSearch, track: &TrackRef) -> Option<&'
 fn extract_genius_lyrics(page: &str) -> String {
     let page = strip_excluded_blocks(page);
     let mut lines: Vec<String> = Vec::new();
-    for marker in ["data-lyrics-container=\"true\"", "data-lyrics-container='true'"] {
+    for marker in [
+        "data-lyrics-container=\"true\"",
+        "data-lyrics-container='true'",
+    ] {
         let mut cursor = 0;
         while let Some(found) = page[cursor..].find(marker) {
             let at = cursor + found;
-            let Some(open) = page[..at].rfind('<') else { break };
+            let Some(open) = page[..at].rfind('<') else {
+                break;
+            };
             if !page[open..].to_ascii_lowercase().starts_with("<div") {
                 cursor = at + marker.len();
                 continue;
             }
-            let Some(close) = page[at..].find('>') else { break };
+            let Some(close) = page[at..].find('>') else {
+                break;
+            };
             let body_start = at + close + 1;
             let Some(end) = matching_div_end(&page, body_start) else {
                 break;
@@ -939,8 +1281,12 @@ fn strip_excluded_blocks(html: &str) -> String {
         let Some(at) = page.find("data-exclude-from-selection") else {
             return page;
         };
-        let Some(open) = page[..at].rfind('<') else { return page };
-        let Some(close) = page[open..].find('>') else { return page };
+        let Some(open) = page[..at].rfind('<') else {
+            return page;
+        };
+        let Some(close) = page[open..].find('>') else {
+            return page;
+        };
         let body_start = open + close + 1;
         let Some(end) = matching_div_end(&page, body_start) else {
             return page;
@@ -1021,7 +1367,9 @@ fn decode_entities(text: &str) -> String {
             "gt" => Some('>'),
             "nbsp" => Some(' '),
             _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-                u32::from_str_radix(&entity[2..], 16).ok().and_then(char::from_u32)
+                u32::from_str_radix(&entity[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
             }
             _ if entity.starts_with('#') => {
                 entity[1..].parse::<u32>().ok().and_then(char::from_u32)
@@ -1167,13 +1515,13 @@ mod tests {
         );
         assert!(!acceptable(&karaoke, &track()));
 
-        // Un directo del mismo artista y duración parecida sí se acepta: la
-        // letra es la misma, solo pierde en el ranking.
+        // Un directo con timestamps propios no se acepta para una pista de
+        // estudio: la letra puede coincidir, pero el karaoke iría desfasado.
         let live = scored(
             candidate(2, "Do I Wanna Know? (Live)", "Arctic Monkeys", 272.0, true),
             &track(),
         );
-        assert!(acceptable(&live, &track()));
+        assert!(!acceptable(&live, &track()));
         assert!(
             live.score
                 < scored(
@@ -1182,6 +1530,187 @@ mod tests {
                 )
                 .score
         );
+    }
+
+    #[test]
+    fn search_response_fixture_picks_the_studio_recording() {
+        // Respuesta representativa de `/api/search`: directo, karaoke, remix y
+        // la grabación buena, en ese orden.
+        let entries: Vec<RemoteLyrics> = serde_json::from_str(
+            r#"[
+                {"id":1,"trackName":"Do I Wanna Know? (Live at Reading)","artistName":"Arctic Monkeys","albumName":"Live at Reading","duration":285.0,"syncedLyrics":"[00:10.00]uno\n[00:20.00]dos"},
+                {"id":2,"trackName":"Do I Wanna Know? (Karaoke Version)","artistName":"Karaoke Hits","albumName":"","duration":272.0,"syncedLyrics":"[00:10.00]uno\n[00:20.00]dos"},
+                {"id":3,"trackName":"Do I Wanna Know?","artistName":"Arctic Monkeys","albumName":"AM","duration":272.2,"syncedLyrics":"[00:12.30]Have you got colour\n[00:18.90]Do you ever get that fear"},
+                {"id":4,"trackName":"Do I Wanna Know? (Remix)","artistName":"DJ X","albumName":"","duration":270.0,"syncedLyrics":"[00:10.00]uno\n[00:20.00]dos"}
+            ]"#,
+        )
+        .expect("fixture válida");
+        let candidates = entries
+            .iter()
+            .enumerate()
+            .map(|(index, raw)| Candidate::from_parts(index, raw))
+            .collect();
+        let ranked = rank_for(candidates, &MatchTarget::from_track(&track()));
+        assert_eq!(
+            ranked[0].id,
+            3,
+            "{:?}",
+            ranked.iter().map(|c| c.id).collect::<Vec<_>>()
+        );
+        assert!(acceptable(&ranked[0], &track()));
+        let raw = &entries[ranked[0].source_index];
+        let doc = build_doc(raw, &track()).expect("hay letra");
+        assert!(doc.synced);
+        assert_eq!(doc.lines[0].start_ms, 12_300);
+    }
+
+    #[test]
+    fn youtube_junk_channel_still_matches_the_artist_in_the_title() {
+        let mut input = TrackRef {
+            title: "Tame Impala - The Less I Know the Better (Official Video)".into(),
+            artist: "Indie Uploads".into(),
+            duration_ms: 220_000,
+            ..TrackRef::default()
+        };
+        input.source_hint = Some(spote_protocol::SourceHint {
+            provider: "youtube".into(),
+            id: "sBzrzS1Ag_g".into(),
+            duration_ms: 220_000,
+        });
+        let exact = scored(
+            candidate(1, "The Less I Know the Better", "Tame Impala", 216.0, true),
+            &input,
+        );
+        assert!(acceptable(&exact, &input), "{exact:?}");
+
+        // El canal no es el artista: una versión de otro artista no puede
+        // colarse solo porque el título coincide.
+        let cover = scored(
+            candidate(
+                2,
+                "The Less I Know the Better (Cover)",
+                "Some Cover Band",
+                220.0,
+                true,
+            ),
+            &input,
+        );
+        assert!(!acceptable(&cover, &input));
+    }
+
+    #[test]
+    fn youtube_curator_channel_does_not_block_the_real_song() {
+        let mut input = TrackRef {
+            title: "The Less I Know the Better (Official Video)".into(),
+            artist: "Sony Music".into(),
+            duration_ms: 220_000,
+            ..TrackRef::default()
+        };
+        input.source_hint = Some(spote_protocol::SourceHint {
+            provider: "youtube".into(),
+            id: "sBzrzS1Ag_g".into(),
+            duration_ms: 220_000,
+        });
+        let exact = scored(
+            candidate(1, "The Less I Know the Better", "Tame Impala", 220.0, true),
+            &input,
+        );
+        assert!(acceptable(&exact, &input), "{exact:?}");
+    }
+
+    #[test]
+    fn youtube_live_title_without_artist_still_finds_the_live_version() {
+        let mut input = TrackRef {
+            title: "Do I Wanna Know? - Live at Reading".into(),
+            artist: "Random Uploads".into(),
+            duration_ms: 285_000,
+            ..TrackRef::default()
+        };
+        input.source_hint = Some(spote_protocol::SourceHint {
+            provider: "youtube".into(),
+            id: "liveVid1234".into(),
+            duration_ms: 285_000,
+        });
+        let live = scored(
+            candidate(
+                1,
+                "Do I Wanna Know? (Live at Reading)",
+                "Arctic Monkeys",
+                285.0,
+                true,
+            ),
+            &input,
+        );
+        assert!(acceptable(&live, &input), "{live:?}");
+        let studio = scored(
+            candidate(2, "Do I Wanna Know?", "Arctic Monkeys", 272.0, true),
+            &input,
+        );
+        assert!(!acceptable(&studio, &input));
+    }
+
+    #[test]
+    fn synced_remix_and_live_are_rejected_but_plain_text_is_usable() {
+        let remix = scored(
+            candidate(1, "Do I Wanna Know? (Remix)", "Arctic Monkeys", 272.0, true),
+            &track(),
+        );
+        assert!(!acceptable(&remix, &track()));
+        let remix_plain = scored(
+            candidate(
+                2,
+                "Do I Wanna Know? (Remix)",
+                "Arctic Monkeys",
+                272.0,
+                false,
+            ),
+            &track(),
+        );
+        assert!(acceptable(&remix_plain, &track()));
+    }
+
+    #[test]
+    fn collaboration_artist_matches_when_one_side_is_the_requested_artist() {
+        let mut input = track();
+        input.title = "One Kiss".into();
+        input.artist = "Calvin Harris, Dua Lipa".into();
+        input.duration_ms = 215_000;
+        let collab = scored(candidate(1, "One Kiss", "Dua Lipa", 215.0, true), &input);
+        assert!(acceptable(&collab, &input), "{collab:?}");
+    }
+
+    #[test]
+    fn generic_titles_require_a_near_exact_match() {
+        let input = TrackRef {
+            title: "Love".into(),
+            artist: "Artist".into(),
+            duration_ms: 200_000,
+            ..TrackRef::default()
+        };
+        let other = scored(candidate(1, "Love Story", "Artist", 200.0, true), &input);
+        assert!(!acceptable(&other, &input), "{other:?}");
+        let same = scored(candidate(2, "Love", "Artist", 200.0, true), &input);
+        assert!(acceptable(&same, &input));
+    }
+
+    #[test]
+    fn metadata_gate_rejects_a_different_artist_from_lrcmux() {
+        assert!(!metadata_matches(
+            &track(),
+            "Do I Wanna Know?",
+            "Some Cover Band",
+            "AM",
+            272.0,
+        ));
+        assert!(metadata_matches(
+            &track(),
+            "Do I Wanna Know? - Remastered",
+            "Arctic Monkeys",
+            "AM",
+            272.0,
+        ));
+        // Sin metadatos no se puede juzgar: no se rompe la compatibilidad.
+        assert!(metadata_matches(&track(), "", "", "", 0.0));
     }
 
     #[test]
@@ -1318,11 +1847,12 @@ mod tests {
     #[test]
     fn variants_clean_youtube_metadata_and_keep_order() {
         let variants = query_variants(&youtube_track());
-        // Cruda, limpia y solo título: la primera y la última son las importantes.
-        assert_eq!(variants[0].title, youtube_track().title);
-        assert!(variants.iter().any(
-            |variant| variant.title == "Do I Wanna Know?" && variant.artist == "Arctic Monkeys"
-        ));
+        // Limpia primero, cruda después y solo título al final.
+        assert_eq!(variants[0].title, "Do I Wanna Know?");
+        assert_eq!(variants[0].artist, "Arctic Monkeys");
+        assert!(variants
+            .iter()
+            .any(|variant| variant.title == youtube_track().title));
         let last = variants.last().expect("hay variantes");
         assert!(last.artist.is_empty(), "{last:?}");
         assert_eq!(last.title, "Do I Wanna Know?");

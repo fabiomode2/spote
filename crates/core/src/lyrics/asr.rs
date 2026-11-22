@@ -13,19 +13,30 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::align::{align_lines, AlignStats, AsrWord};
 use super::LyricLine;
 
-const READ_TIMEOUT: Duration = Duration::from_secs(180);
+/// Tope de una lectura. Si el modelo se atasca, el worker no se queda esperando
+/// minutos: se mata el proceso y se conserva la letra anterior.
+const READ_TIMEOUT: Duration = Duration::from_secs(70);
+/// Presupuesto total de la alineación (lectura completa + relecturas).
+const TOTAL_BUDGET: Duration = Duration::from_secs(95);
+/// Confianza a partir de la cual no merece la pena releer zonas: cada relectura
+/// decodifica y transcribe otra vez y era la causa de que el ASR tardara.
+const GOOD_CONFIDENCE: f64 = 0.55;
 const MIN_TAIL_GAP_S: f64 = 8.0;
-const CONTEXT_S: f64 = 15.0;
-const WINDOW_S: f64 = 45.0;
-const MAX_READS: usize = 4;
+const CONTEXT_S: f64 = 12.0;
+const WINDOW_S: f64 = 30.0;
+/// Una lectura completa y como mucho dos relecturas de zonas cojas.
+const MAX_EXTRA_READS: usize = 2;
+/// Cada cuánto se comprueba la cancelación mientras el modelo trabaja.
+const CANCEL_POLL: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone)]
 pub struct AsrConfig {
@@ -64,7 +75,13 @@ impl AsrConfig {
         Some(Self {
             python,
             script,
-            model: cfg.asr_model.clone(),
+            // Permite probar un modelo pequeño/grande sin recompilar ni tocar
+            // la configuración guardada.
+            model: std::env::var("SPOTE_ASR_MODEL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| cfg.asr_model.clone()),
             device: cfg.asr_device.clone(),
             language: cfg.asr_language.clone(),
         })
@@ -152,7 +169,12 @@ impl AsrSession {
         &mut self,
         audio: &Path,
         windows: &[(f64, f64)],
+        cancel: Option<&AtomicBool>,
+        deadline: Instant,
     ) -> Option<(Vec<Vec<AsrWord>>, Option<f64>)> {
+        if is_cancelled(cancel) || Instant::now() >= deadline {
+            return None;
+        }
         let audio = audio.to_string_lossy().into_owned();
         let request = ReadRequest {
             audio: &audio,
@@ -162,13 +184,30 @@ impl AsrSession {
             language: self.language.as_deref(),
         };
         let line = serde_json::to_string(&request).ok()?;
-        writeln!(self.stdin, "{line}").ok()?;
-        self.stdin.flush().ok()?;
-        let response = match self.lines.recv_timeout(READ_TIMEOUT) {
-            Ok(response) => response,
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+        if writeln!(self.stdin, "{line}").is_err() || self.stdin.flush().is_err() {
+            let _ = self.child.kill();
+            return None;
+        }
+        let started = Instant::now();
+        let response = loop {
+            if is_cancelled(cancel) || Instant::now() >= deadline {
+                // Matar el hijo corta la transcripción en curso; el worker puede
+                // atender la pista nueva sin esperar al modelo.
                 let _ = self.child.kill();
                 return None;
+            }
+            match self.lines.recv_timeout(CANCEL_POLL) {
+                Ok(response) => break response,
+                Err(RecvTimeoutError::Timeout) => {
+                    if started.elapsed() >= READ_TIMEOUT {
+                        let _ = self.child.kill();
+                        return None;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = self.child.kill();
+                    return None;
+                }
             }
         };
         let parsed: HelperResponse = serde_json::from_str(&response).ok()?;
@@ -197,6 +236,10 @@ impl AsrSession {
     }
 }
 
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
 impl Drop for AsrSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -204,18 +247,25 @@ impl Drop for AsrSession {
     }
 }
 
-/// Alinea una letra contra el audio local con una lectura completa y
-/// relecturas de las zonas cojas.
-pub fn align_track(
+/// Igual que [`align_track`], con cancelación y plazo opcionales. El worker
+/// pasa una bandera que se activa al cambiar de pista y un deadline; así una
+/// transcripción lenta no bloquea el resto de la sesión.
+pub fn align_track_with(
     cfg: &AsrConfig,
     audio: &Path,
     duration_s: f64,
     lines: &[LyricLine],
+    cancel: Option<&AtomicBool>,
+    deadline: Option<Instant>,
 ) -> Option<(Vec<LyricLine>, f64)> {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + TOTAL_BUDGET);
+    if is_cancelled(cancel) || Instant::now() >= deadline {
+        return None;
+    }
     let mut session = AsrSession::start(cfg)?;
     // La duración puede venir del reproductor o del propio fichero. Si no se
     // conoce, el script lee hasta el final.
-    let (reads, helper_duration) = session.read(audio, &[(0.0, duration_s)])?;
+    let (reads, helper_duration) = session.read(audio, &[(0.0, duration_s)], cancel, deadline)?;
     let words = reads.into_iter().next()?;
     let duration = if duration_s > 0.0 {
         duration_s
@@ -225,19 +275,26 @@ pub fn align_track(
     let (mut best_lines, mut best_confidence, stats) = align_lines(lines, &words, duration)?;
     tracing::debug!(
         target: "spote::lyrics",
-        "ASR: {} líneas ancladas de {}, shift {:+.2}s",
-        stats.matched, lines.len(), stats.median_shift
+        "ASR: {} líneas ancladas de {}, shift {:+.2}s, confianza {:.2}",
+        stats.matched, lines.len(), stats.median_shift, best_confidence
     );
+
+    // Con una alineación ya buena no se relanza el modelo: las relecturas eran
+    // el 80 % del tiempo del ASR y apenas cambiaban el resultado.
+    if best_confidence >= GOOD_CONFIDENCE {
+        return Some((best_lines, best_confidence));
+    }
 
     let mut all_words = words;
     let windows = candidate_windows(&best_lines, &stats, &all_words, duration);
-    let mut reads_done = 1usize;
+    let mut reads_done = 0usize;
     for (begin, end) in windows {
-        if reads_done >= MAX_READS {
+        if reads_done >= MAX_EXTRA_READS || is_cancelled(cancel) || Instant::now() >= deadline {
             break;
         }
-        let Some((extra_reads, _)) = session.read(audio, &[(begin, end)]) else {
-            continue;
+        let Some((extra_reads, _)) = session.read(audio, &[(begin, end)], cancel, deadline) else {
+            // El proceso se mató (timeout/cancelación): no se insiste.
+            break;
         };
         let Some(extra) = extra_reads.into_iter().next() else {
             continue;
@@ -377,6 +434,7 @@ fn candidate_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn line(start_ms: u64) -> LyricLine {
         LyricLine {
@@ -384,6 +442,15 @@ mod tests {
             text: "x".into(),
             ..LyricLine::default()
         }
+    }
+
+    #[test]
+    fn cancellation_flag_is_honoured() {
+        let flag = AtomicBool::new(false);
+        assert!(!is_cancelled(Some(&flag)));
+        flag.store(true, Ordering::Relaxed);
+        assert!(is_cancelled(Some(&flag)));
+        assert!(!is_cancelled(None));
     }
 
     #[test]
