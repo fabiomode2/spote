@@ -7,6 +7,14 @@ use spote_protocol::mini::{
 
 impl App {
     pub fn open_mini(&mut self) {
+        if self.mini_hub.is_none() {
+            let reason = self
+                .mini_error
+                .clone()
+                .unwrap_or_else(|| "el socket del mini no está disponible".to_string());
+            self.toast(format!("mini no disponible: {reason}"), ToastKind::Error);
+            return;
+        }
         if let Some(child) = &mut self.mini_child {
             if matches!(child.try_wait(), Ok(None)) {
                 self.toast("el mini reproductor ya está abierto", ToastKind::Info);

@@ -105,7 +105,9 @@ impl Default for AudioCfg {
             preamp_db: 0.0,
             normalizer: NormalizerMode::Off,
             normalizer_strength: 0.5,
-            limiter: true,
+            // Neutro por defecto: un limitador siempre activo cambia el audio
+            // de todo el mundo al actualizar, aunque el EQ esté plano.
+            limiter: false,
         }
     }
 }
@@ -271,6 +273,11 @@ mod tests {
     }
 
     #[test]
+    fn defaults_are_neutral() {
+        assert_eq!(AudioCfg::default().filter_chain(), None);
+    }
+
+    #[test]
     fn flat_without_extras_has_no_chain() {
         let cfg = AudioCfg {
             limiter: false,
@@ -371,6 +378,7 @@ mod tests {
     #[test]
     fn limiter_closes_the_chain() {
         let mut cfg = AudioCfg {
+            limiter: true,
             normalizer: NormalizerMode::Dynamic,
             ..AudioCfg::default()
         };
@@ -468,6 +476,6 @@ mod tests {
         assert_eq!(cfg.bands, [0.0; 10]);
         assert_eq!(cfg.normalizer, NormalizerMode::Off);
         assert_eq!(cfg.normalizer_strength, 0.5);
-        assert!(cfg.limiter);
+        assert!(!cfg.limiter);
     }
 }

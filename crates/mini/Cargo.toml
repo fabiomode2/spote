@@ -3,7 +3,8 @@ name = "spote-mini"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# eframe 0.32 exige 1.85; el workspace declara 1.82 pero el toolchain real es 1.100.
+# eframe 0.32 exige 1.85. El crate queda fuera de `default-members` para que
+# el build/test normal no dependa de libs gráficas.
 rust-version = "1.85"
 
 [dependencies]

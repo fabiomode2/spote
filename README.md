@@ -67,6 +67,7 @@ la propia TUI.
 | `E` | editor de diseño | `Esc` | limpiar búsqueda |
 | `A` | ecualizador / dinámica | `w` | mini reproductor |
 | `t` | seguir el sistema (MPRIS) | `?` | ayuda |
+| `q` | salir de spote | | |
 
 ## Cómo funciona
 
@@ -91,7 +92,7 @@ ambient = "cover"      # off | void | aurora | neural | glitch | lyrics | cover
 
 [player]
 streaming = true       # resuelve YouTube y suena mientras descarga
-stream_cache = true    # guarda la copia local al terminar
+stream_cache = true    # guarda la copia local al terminar (tras unos segundos de escucha)
 
 [playback]
 repeat = "off"         # off | all | one
@@ -104,7 +105,7 @@ bands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # dB, 31 Hz … 16 kHz
 preamp_db = 0
 normalizer = "off"     # off | dynamic | loudnorm
 normalizer_strength = 0.5
-limiter = true
+limiter = false
 
 [lyrics]
 asr = true

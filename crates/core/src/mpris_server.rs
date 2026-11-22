@@ -71,6 +71,10 @@ impl MprisSnapshot {
     fn playback_status(&self) -> &'static str {
         if self.playing {
             "Playing"
+        } else if self.title.trim().is_empty() {
+            // Sin pista no hay pausa que mostrar: los widgets del escritorio
+            // deben soltar la última canción en vez de dejarla congelada.
+            "Stopped"
         } else {
             "Paused"
         }
@@ -730,6 +734,16 @@ mod tests {
             track_object_path(&with_title),
             track_object_path(&with_title)
         );
+    }
+
+    #[test]
+    fn empty_snapshot_is_stopped_not_paused() {
+        let mut empty = snapshot("");
+        empty.title.clear();
+        empty.playing = false;
+        assert_eq!(empty.playback_status(), "Stopped");
+        empty.playing = true;
+        assert_eq!(empty.playback_status(), "Playing");
     }
 
     #[test]

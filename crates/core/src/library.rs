@@ -446,6 +446,20 @@ impl Library {
         title: &str,
         duration_ms: u64,
     ) -> Result<Option<TrackRow>> {
+        self.find_by_meta_within(artist, title, duration_ms, 8_000)
+    }
+
+    /// Igual que [`find_by_meta`](Self::find_by_meta) con una tolerancia de
+    /// duración explícita. `find_by_meta` es para portada/letras (8 s); un
+    /// reemplazo de reproducción va más justo para no cambiar una versión por
+    /// otra (directo, remix) con el mismo título.
+    fn find_by_meta_within(
+        &self,
+        artist: &str,
+        title: &str,
+        duration_ms: u64,
+        tolerance_ms: u64,
+    ) -> Result<Option<TrackRow>> {
         let artist = artist.trim().to_lowercase();
         let title = title.trim().to_lowercase();
         if title.is_empty() {
@@ -455,12 +469,15 @@ impl Library {
             "{SELECT_TRACK}
              WHERE lower(t.title) = ?1
                AND lower(t.artist) = ?2
-               AND (?3 = 0 OR t.duration_ms = 0 OR abs(t.duration_ms - ?3) < 8000)
+               AND (?3 = 0 OR t.duration_ms = 0 OR abs(t.duration_ms - ?3) < ?4)
              ORDER BY (s.status = 'ready') DESC, abs(t.duration_ms - ?3)
              LIMIT 1"
         ))?;
         let row = stmt
-            .query_row(params![title, artist, duration_ms as i64], row_to_track)
+            .query_row(
+                params![title, artist, duration_ms as i64, tolerance_ms as i64],
+                row_to_track,
+            )
             .optional()?;
         Ok(row)
     }
@@ -469,7 +486,7 @@ impl Library {
     /// proveedor (ISRC/Spotify) distinto. Evita que importar una lista cree
     /// una segunda fila de algo que ya está descargado en la biblioteca.
     pub fn canonical_key(&self, track: &TrackRef) -> String {
-        self.find_by_meta(&track.artist, &track.title, track.duration_ms)
+        self.find_by_meta_within(&track.artist, &track.title, track.duration_ms, 2_000)
             .ok()
             .flatten()
             .map(|row| row.track.key)
@@ -1554,6 +1571,22 @@ mod tests {
             lib.canonical_key(&track("isrc:otro", "El Hueso", "Ralphie Choo")),
             "sha1:local"
         );
+    }
+
+    #[test]
+    fn canonical_key_does_not_swap_a_different_duration() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let local = track("sha1:local", "El Hueso", "Ralphie Choo");
+        lib.upsert_track(&local).unwrap();
+
+        // Misma pareja título/artista, pero 5 s más: puede ser el directo o el
+        // videoclip. Para reproducir no se cambia por la copia local.
+        let mut other = track("isrc:otro", "El Hueso", "Ralphie Choo");
+        other.duration_ms = local.duration_ms + 5_000;
+        assert_eq!(lib.canonical_key(&other), "isrc:otro");
+
+        let same = track("isrc:igual", "El Hueso", "Ralphie Choo");
+        assert_eq!(lib.canonical_key(&same), "sha1:local");
     }
 
     #[test]

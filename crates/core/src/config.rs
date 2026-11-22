@@ -475,6 +475,9 @@ mod tests {
         assert_eq!(cfg.ui.art_mode, "plain");
         assert!(!cfg.server.url.is_empty() || cfg.server.url.is_empty());
         assert!(cfg.player.volume > 0.0);
+        // El audio por defecto no procesa nada: el limitador es opt-in.
+        assert!(!cfg.audio.limiter);
+        assert_eq!(cfg.audio.filter_chain(), None);
     }
 
     #[test]

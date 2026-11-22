@@ -36,6 +36,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -140,6 +141,9 @@ struct Job {
     duration_ms: u64,
     hint: Option<SourceHint>,
     strategy: Strategy,
+    /// Generación del `resolve` que lo creó (solo `StreamFirst`). Permite
+    /// cancelar un trabajo que ya nació obsoleto por una pista más nueva.
+    generation: Option<u64>,
 }
 
 /// Caché de URLs: clave lógica -> fuente y momento en que se guardó.
@@ -156,10 +160,60 @@ struct CachedFile {
 /// Caché de ficheros descargados: clave lógica -> fichero y su identidad.
 type FileCache = Arc<Mutex<HashMap<String, CachedFile>>>;
 
+/// Token de cancelación de una resolución en curso.
+///
+/// La UI incrementa `generation` al pedir una pista nueva. El worker captura
+/// el valor al empezar y mata el `yt-dlp` en vuelo en cuanto ve otro valor:
+/// saltar de pista no espera a que expire un timeout de 45 s o de 3 min.
+#[derive(Clone)]
+struct Cancel {
+    generation: Arc<AtomicU64>,
+    mine: u64,
+}
+
+impl Cancel {
+    /// `mine` es la generación con la que nació el trabajo; `None` para los
+    /// prefetch, que se cancelan solo si llega una reproducción después.
+    fn new(generation: &Arc<AtomicU64>, mine: Option<u64>) -> Self {
+        Self {
+            generation: Arc::clone(generation),
+            mine: mine.unwrap_or_else(|| generation.load(Ordering::Relaxed)),
+        }
+    }
+
+    fn requested(&self) -> bool {
+        self.generation.load(Ordering::Relaxed) != self.mine
+    }
+}
+
+/// Error interno para no publicar `Failed` cuando el trabajo simplemente se
+/// sustituyó por otro más reciente.
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("resolución cancelada por una pista más reciente")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+fn cancelled_error() -> anyhow::Error {
+    anyhow::Error::new(Cancelled)
+}
+
+fn is_cancelled(err: &anyhow::Error) -> bool {
+    err.is::<Cancelled>()
+}
+
 /// Cola de resolución en un hilo propio.
 pub struct StreamResolver {
     tx: Sender<Job>,
     rx: Receiver<StreamEvent>,
+    /// Se incrementa con cada `resolve` (reproducción). Los prefetch no la
+    /// tocan para no cancelar la pista que está sonando.
+    generation: Arc<AtomicU64>,
     /// Se conservan para que los `Arc` vivan mientras exista el resolver; el
     /// worker tiene sus propias copias.
     _urls: UrlCache,
@@ -182,18 +236,30 @@ impl StreamResolver {
         let (event_tx, event_rx): (Sender<StreamEvent>, Receiver<StreamEvent>) = mpsc::channel();
         let urls: UrlCache = Arc::new(Mutex::new(HashMap::new()));
         let files: FileCache = Arc::new(Mutex::new(HashMap::new()));
+        let generation = Arc::new(AtomicU64::new(0));
         let worker_urls = Arc::clone(&urls);
         let worker_files = Arc::clone(&files);
+        let worker_generation = Arc::clone(&generation);
         let worker_dir = cache_dir.clone();
 
         thread::Builder::new()
             .name("spote-stream".into())
-            .spawn(move || worker(job_rx, event_tx, worker_urls, worker_files, worker_dir))
+            .spawn(move || {
+                worker(
+                    job_rx,
+                    event_tx,
+                    worker_urls,
+                    worker_files,
+                    worker_generation,
+                    worker_dir,
+                )
+            })
             .expect("no se pudo arrancar el resolver de streams");
 
         Self {
             tx: job_tx,
             rx: event_rx,
+            generation,
             _urls: urls,
             _files: files,
             _cache_dir: cache_dir,
@@ -210,7 +276,18 @@ impl StreamResolver {
         duration_ms: u64,
         hint: Option<SourceHint>,
     ) {
-        self.enqueue(key, artist, title, duration_ms, hint, Strategy::StreamFirst);
+        // Invalida el trabajo en vuelo (si lo hay) antes de encolar: el worker
+        // lo mata en el siguiente sondeo y atiende esta pista.
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.enqueue(Job {
+            key: key.into(),
+            artist: artist.to_string(),
+            title: title.to_string(),
+            duration_ms,
+            hint,
+            strategy: Strategy::StreamFirst,
+            generation: Some(generation),
+        });
     }
 
     /// Fuerza la vía de fichero: no intenta `-g`, descarga a la caché y emite
@@ -224,33 +301,19 @@ impl StreamResolver {
         duration_ms: u64,
         hint: Option<SourceHint>,
     ) {
-        self.enqueue(
-            key,
-            artist,
-            title,
-            duration_ms,
-            hint,
-            Strategy::DownloadOnly,
-        );
-    }
-
-    fn enqueue(
-        &self,
-        key: impl Into<String>,
-        artist: &str,
-        title: &str,
-        duration_ms: u64,
-        hint: Option<SourceHint>,
-        strategy: Strategy,
-    ) {
-        let _ = self.tx.send(Job {
+        self.enqueue(Job {
             key: key.into(),
             artist: artist.to_string(),
             title: title.to_string(),
             duration_ms,
             hint,
-            strategy,
+            strategy: Strategy::DownloadOnly,
+            generation: None,
         });
+    }
+
+    fn enqueue(&self, job: Job) {
+        let _ = self.tx.send(job);
     }
 
     /// Lee un evento sin bloquear.
@@ -259,52 +322,67 @@ impl StreamResolver {
     }
 }
 
-/// Bucle del worker: si la cola acumula varios trabajos de reproducción (el
-/// usuario saltó varias pistas), se queda con el más reciente y descarta los
-/// intermedios. Los prefetch (`DownloadOnly`) no se descartan: se procesan
-/// después en el orden en que llegaron. El trabajo elegido produce un evento;
-/// los errores se convierten en `Failed` y nunca terminan el hilo.
+/// Bucle del worker. Antes de un prefetch diferido se mira la cola: si hay una
+/// reproducción pendiente, manda ella. Un trabajo en vuelo se cancela cuando
+/// llega otra reproducción (`resolve` incrementa la generación), así que saltar
+/// de pista no espera a que termine un `yt-dlp` colgado.
 fn worker(
     jobs: Receiver<Job>,
     events: Sender<StreamEvent>,
     urls: UrlCache,
     files: FileCache,
+    generation: Arc<AtomicU64>,
     cache_dir: PathBuf,
 ) {
     let mut deferred: VecDeque<Job> = VecDeque::new();
 
     loop {
-        let mut job = match deferred.pop_front() {
-            Some(job) => job,
-            None => match jobs.recv() {
-                Ok(job) => job,
-                Err(_) => return,
-            },
-        };
-
-        // Si el usuario saltó varias pistas, el trabajo de reproducción más
-        // reciente manda. Un prefetch que llegue en medio se conserva.
-        if job.strategy == Strategy::StreamFirst {
-            while let Ok(newer) = jobs.try_recv() {
-                if newer.strategy == Strategy::StreamFirst {
-                    job = newer;
-                } else {
-                    deferred.push_back(newer);
-                }
+        // Vacía la cola: el trabajo de reproducción más reciente gana y los
+        // prefetch quedan aparcados, pero nunca por delante de una pista.
+        let mut newest_play: Option<Job> = None;
+        while let Ok(job) = jobs.try_recv() {
+            if job.strategy == Strategy::StreamFirst {
+                newest_play = Some(job);
+            } else {
+                deferred.push_back(job);
             }
         }
 
-        handle_job(job, &events, &urls, &files, &cache_dir);
+        let job = if let Some(job) = newest_play {
+            job
+        } else if let Some(job) = deferred.pop_front() {
+            job
+        } else {
+            match jobs.recv() {
+                // Un prefetch nunca debe adelantar a una reproducción que ya
+                // esté en la cola: se aparca y se vuelve a mirar arriba.
+                Ok(job) if job.strategy == Strategy::DownloadOnly => {
+                    deferred.push_back(job);
+                    continue;
+                }
+                Ok(job) => job,
+                Err(_) => {
+                    // Sin emisor no queda nadie escuchando: no se procesan
+                    // prefetch que ya no sirven a ninguna UI.
+                    return;
+                }
+            }
+        };
+
+        let cancel = Cancel::new(&generation, job.generation);
+        handle_job(job, &events, &urls, &files, &cache_dir, &cancel);
     }
 }
 
-/// Ejecuta un trabajo ya seleccionado y publica exactamente un evento.
+/// Ejecuta un trabajo ya seleccionado y publica como mucho un evento. Un
+/// trabajo cancelado no publica `Failed`: lo sustituyó otra pista.
 fn handle_job(
     job: Job,
     events: &Sender<StreamEvent>,
     urls: &UrlCache,
     files: &FileCache,
     cache_dir: &Path,
+    cancel: &Cancel,
 ) {
     // Para un stream normal, una URL viva es más barata que ir al disco.
     // Para un prefetch explícito, el fichero manda.
@@ -328,7 +406,11 @@ fn handle_job(
         return;
     }
 
-    match resolve_job(&job, cache_dir) {
+    if cancel.requested() {
+        return;
+    }
+
+    match resolve_job(&job, cache_dir, Some(cancel)) {
         Ok(Resolution::Url(source)) => {
             url_cache_store(urls, job.key.clone(), source.clone());
             let _ = events.send(StreamEvent::Resolved {
@@ -351,6 +433,7 @@ fn handle_job(
                 id,
             });
         }
+        Err(err) if is_cancelled(&err) => {}
         Err(err) => {
             let _ = events.send(StreamEvent::Failed {
                 key: job.key,
@@ -375,8 +458,9 @@ enum Resolution {
 ///
 /// Si `-g` falla por el motivo que sea (PO token, edad, formato, host raro),
 /// se intenta la descarga antes de devolver el error. Un hint válido nunca
-/// termina en `Failed` sin haber probado también la descarga.
-fn resolve_job(job: &Job, cache_dir: &Path) -> Result<Resolution> {
+/// termina en `Failed` sin haber probado también la descarga. Si el trabajo se
+/// cancela por una pista nueva, la cancelación gana a cualquier fallback.
+fn resolve_job(job: &Job, cache_dir: &Path, cancel: Option<&Cancel>) -> Result<Resolution> {
     // El `TrackRef` puede no traer duración, pero el hint suele conservarla.
     let wanted_duration = if job.duration_ms > 0 {
         job.duration_ms
@@ -387,7 +471,7 @@ fn resolve_job(job: &Job, cache_dir: &Path) -> Result<Resolution> {
     let (id, provider) = match hinted_video(job.hint.as_ref()) {
         Some((id, provider)) => (id, provider),
         None => {
-            let candidate = search(&job.artist, &job.title, wanted_duration)?;
+            let candidate = search(&job.artist, &job.title, wanted_duration, cancel)?;
             (candidate.id, "youtube".to_string())
         }
     };
@@ -402,14 +486,16 @@ fn resolve_job(job: &Job, cache_dir: &Path) -> Result<Resolution> {
     }
 
     if job.strategy == Strategy::DownloadOnly {
-        let path = download_audio(&id, &job.key, cache_dir)?;
+        let path = download_audio(&id, &job.key, cache_dir, cancel)?;
         return Ok(Resolution::File { path, provider, id });
     }
 
-    match resolve_media_url(&watch_url(&id)) {
+    match resolve_media_url(&watch_url(&id), cancel) {
         Ok(url) => Ok(Resolution::Url(StreamSource { url, provider, id })),
-        Err(stream_error) => match download_audio(&id, &job.key, cache_dir) {
+        Err(stream_error) if is_cancelled(&stream_error) => Err(stream_error),
+        Err(stream_error) => match download_audio(&id, &job.key, cache_dir, cancel) {
             Ok(path) => Ok(Resolution::File { path, provider, id }),
+            Err(download_error) if is_cancelled(&download_error) => Err(download_error),
             Err(download_error) => Err(combined_failure(stream_error, download_error)),
         },
     }
@@ -481,13 +567,19 @@ fn query_variants(artist: &str, title: &str) -> Vec<String> {
 /// Busca un vídeo para una pista y devuelve su ID. La usa el `Downloader`
 /// para no mantener un segundo matcher más laxo que el de reproducción.
 pub fn find_video_id(artist: &str, title: &str, duration_ms: u64) -> Result<String> {
-    search(artist, title, duration_ms).map(|candidate| candidate.id)
+    search(artist, title, duration_ms, None).map(|candidate| candidate.id)
 }
 
 /// Busca en YouTube probando las variantes y elige el mejor candidato. Si una
 /// variante da un match fuerte se corta ahí; si no, se acumulan resultados de
-/// todas y se decide al final. Un resultado dudoso no se acepta.
-fn search(artist: &str, title: &str, duration_ms: u64) -> Result<SearchCandidate> {
+/// todas y se decide al final. Un resultado dudoso no se acepta. `cancel` sólo
+/// lo pasa la reproducción: el `Downloader` no cancela sus búsquedas.
+fn search(
+    artist: &str,
+    title: &str,
+    duration_ms: u64,
+    cancel: Option<&Cancel>,
+) -> Result<SearchCandidate> {
     let queries = query_variants(artist, title);
     let Some(first_query) = queries.first() else {
         return Err(failure(
@@ -503,7 +595,10 @@ fn search(artist: &str, title: &str, duration_ms: u64) -> Result<SearchCandidate
     let mut any_search_succeeded = false;
 
     for query in &queries {
-        match search_once(query) {
+        if cancel.is_some_and(Cancel::requested) {
+            return Err(cancelled_error());
+        }
+        match search_once(query, cancel) {
             Ok(items) => {
                 any_search_succeeded = true;
                 for item in items {
@@ -526,6 +621,7 @@ fn search(artist: &str, title: &str, duration_ms: u64) -> Result<SearchCandidate
                     }
                 }
             }
+            Err(err) if is_cancelled(&err) => return Err(err),
             Err(err) => {
                 // Se conserva la etiqueta al principio del mensaje; la
                 // consulta se añade detrás para no romper ese prefijo.
@@ -545,7 +641,7 @@ fn search(artist: &str, title: &str, duration_ms: u64) -> Result<SearchCandidate
 }
 
 /// Una llamada a `ytsearchN:` con una única consulta.
-fn search_once(query: &str) -> Result<Vec<SearchCandidate>> {
+fn search_once(query: &str, cancel: Option<&Cancel>) -> Result<Vec<SearchCandidate>> {
     let args = vec![
         "--flat-playlist".to_string(),
         "--dump-single-json".to_string(),
@@ -558,7 +654,7 @@ fn search_once(query: &str) -> Result<Vec<SearchCandidate>> {
         "--".to_string(),
         format!("ytsearch{SEARCH_RESULTS}:{query}"),
     ];
-    let output = run_ytdlp(&args, COMMAND_TIMEOUT)?;
+    let output = run_ytdlp(&args, COMMAND_TIMEOUT, cancel)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_search_json(&stdout)
 }
@@ -1222,18 +1318,22 @@ fn deaccent(ch: char) -> char {
 
 /// Resuelve la URL de medios. Se prueba primero con los clientes embebidos y,
 /// si falla, una sola vez con los clientes web habituales.
-fn resolve_media_url(watch_url: &str) -> Result<String> {
+fn resolve_media_url(watch_url: &str, cancel: Option<&Cancel>) -> Result<String> {
     let mut last_error: Option<anyhow::Error> = None;
 
     for client in PLAYER_CLIENTS {
+        if cancel.is_some_and(Cancel::requested) {
+            return Err(cancelled_error());
+        }
         let args = stream_args(watch_url, client);
-        let result = run_ytdlp(&args, COMMAND_TIMEOUT).and_then(|output| {
+        let result = run_ytdlp(&args, COMMAND_TIMEOUT, cancel).and_then(|output| {
             let stdout = String::from_utf8_lossy(&output.stdout);
             parse_media_url(&stdout)
         });
 
         match result {
             Ok(url) => return Ok(url),
+            Err(err) if is_cancelled(&err) => return Err(err),
             Err(err) => last_error = Some(err),
         }
     }
@@ -1323,7 +1423,12 @@ fn is_allowed_media_url(url: &str) -> bool {
 /// Descarga el audio sin transcodificar a la caché. Reintenta con los clientes
 /// embebidos y luego con los web, igual que `-g`. No usa `-x` ni ffmpeg: el
 /// fichero queda en el formato nativo que sirva YouTube (`m4a`, `webm`, ...).
-fn download_audio(id: &str, key: &str, cache_dir: &Path) -> Result<PathBuf> {
+fn download_audio(
+    id: &str,
+    key: &str,
+    cache_dir: &Path,
+    cancel: Option<&Cancel>,
+) -> Result<PathBuf> {
     if !is_valid_video_id(id) {
         return Err(failure(
             FailureKind::Unavailable,
@@ -1343,9 +1448,13 @@ fn download_audio(id: &str, key: &str, cache_dir: &Path) -> Result<PathBuf> {
     let mut last_error: Option<anyhow::Error> = None;
 
     for client in PLAYER_CLIENTS {
+        if cancel.is_some_and(Cancel::requested) {
+            remove_download_artifacts(&base);
+            return Err(cancelled_error());
+        }
         remove_download_artifacts(&base);
         let args = download_args(&base, &watch, client);
-        match run_ytdlp(&args, DOWNLOAD_TIMEOUT) {
+        match run_ytdlp(&args, DOWNLOAD_TIMEOUT, cancel) {
             Ok(_) => match find_downloaded(&base) {
                 Some(path) => return Ok(path),
                 None => {
@@ -1355,6 +1464,12 @@ fn download_audio(id: &str, key: &str, cache_dir: &Path) -> Result<PathBuf> {
                     ));
                 }
             },
+            Err(err) if is_cancelled(&err) => {
+                // Un `.part` a medias no debe quedarse en la caché: la
+                // siguiente pista reutiliza el mismo nombre.
+                remove_download_artifacts(&base);
+                return Err(err);
+            }
             Err(err) => last_error = Some(err),
         }
     }
@@ -1442,12 +1557,19 @@ fn ytdlp_bin() -> String {
     "yt-dlp".to_string()
 }
 
-/// Ejecuta yt-dlp y convierte timeout, salida no cero y stderr en errores
-/// accionables.
-fn run_ytdlp(args: &[String], timeout: Duration) -> Result<CommandOutput> {
+/// Ejecuta yt-dlp y convierte timeout, cancelación, salida no cero y stderr en
+/// errores accionables.
+fn run_ytdlp(
+    args: &[String],
+    timeout: Duration,
+    cancel: Option<&Cancel>,
+) -> Result<CommandOutput> {
     let bin = ytdlp_bin();
-    let output = run_with_timeout(&bin, args, timeout)?;
+    let output = run_with_timeout(&bin, args, timeout, cancel)?;
 
+    if output.cancelled {
+        return Err(cancelled_error());
+    }
     if output.timed_out {
         return Err(failure(
             FailureKind::Timeout,
@@ -1462,9 +1584,15 @@ fn run_ytdlp(args: &[String], timeout: Duration) -> Result<CommandOutput> {
     Ok(output)
 }
 
-/// Ejecuta un proceso con timeout y captura stdout/stderr sin bloquear los
-/// pipes. Si expira se mata y se espera: no quedan hijos zombie.
-fn run_with_timeout(bin: &str, args: &[String], timeout: Duration) -> Result<CommandOutput> {
+/// Ejecuta un proceso con timeout/cancelación y captura stdout/stderr sin
+/// bloquear los pipes. Si expira o lo sustituye otra pista se mata y se espera:
+/// no quedan hijos zombie.
+fn run_with_timeout(
+    bin: &str,
+    args: &[String],
+    timeout: Duration,
+    cancel: Option<&Cancel>,
+) -> Result<CommandOutput> {
     let mut child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -1490,10 +1618,18 @@ fn run_with_timeout(bin: &str, args: &[String], timeout: Duration) -> Result<Com
 
     let started = Instant::now();
     let mut timed_out = false;
+    let mut cancelled = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
+                if cancel.is_some_and(Cancel::requested) {
+                    cancelled = true;
+                    let _ = child.kill();
+                    break child
+                        .wait()
+                        .with_context(|| format!("esperando a {bin} tras cancelarlo"))?;
+                }
                 if started.elapsed() >= timeout {
                     timed_out = true;
                     let _ = child.kill();
@@ -1519,6 +1655,7 @@ fn run_with_timeout(bin: &str, args: &[String], timeout: Duration) -> Result<Com
         stdout,
         stderr,
         timed_out,
+        cancelled,
     })
 }
 
@@ -1527,6 +1664,7 @@ struct CommandOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     timed_out: bool,
+    cancelled: bool,
 }
 
 fn read_pipe(mut pipe: impl Read) -> Vec<u8> {
@@ -2410,6 +2548,43 @@ mod tests {
         assert_eq!(
             url_expire_epoch("https://x.googlevideo.com/a?expire=abc"),
             None
+        );
+    }
+
+    #[test]
+    fn cancel_token_only_fires_when_generation_changes() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let token = Cancel::new(&generation, None);
+        assert!(!token.requested());
+        generation.fetch_add(1, Ordering::Relaxed);
+        assert!(token.requested());
+    }
+
+    #[test]
+    fn cancel_kills_the_child_promptly() {
+        let generation = Arc::new(AtomicU64::new(0));
+        let cancel = Cancel::new(&generation, None);
+        let bump = Arc::clone(&generation);
+        let trigger = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            bump.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let started = Instant::now();
+        let output = run_with_timeout(
+            "sleep",
+            &["5".to_string()],
+            Duration::from_secs(10),
+            Some(&cancel),
+        )
+        .expect("debe devolver la salida del hijo cancelado");
+        trigger.join().unwrap();
+
+        assert!(output.cancelled);
+        assert!(!output.timed_out);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "la cancelación debe ser inmediata, no esperar al timeout"
         );
     }
 

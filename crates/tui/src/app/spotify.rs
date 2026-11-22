@@ -47,6 +47,7 @@ impl App {
         self.pending_seek_ms = None;
         self.stream_autoplay = true;
         self.streaming = false;
+        self.stream_cache_pending = None;
         self.now.track = None;
         self.now.path = None;
         self.now.position_ms = 0;

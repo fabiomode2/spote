@@ -24,6 +24,7 @@ impl App {
             player.stop();
         }
         self.streaming = false;
+        self.stream_cache_pending = None;
         self.pending_stream = None;
         self.pending_play = None;
         self.pending_seek_ms = None;

@@ -3,7 +3,7 @@
 //! yt-dlp es un binario externo a propósito: rompe cada pocas semanas y se
 //! actualiza sin recompilar spote. Un solo worker evita los rate limits.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -192,6 +192,9 @@ pub struct Downloader {
     tx: Sender<Job>,
     events: Receiver<DownloadEvent>,
     children: Arc<Mutex<Vec<u32>>>,
+    /// Claves con un trabajo aceptado y todavía sin terminar. Evita descargar
+    /// dos veces la misma pista (stream cache + descarga explícita/cola).
+    inflight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Downloader {
@@ -200,14 +203,17 @@ impl Downloader {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let children: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::clone(&children);
+        let inflight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let worker_inflight = Arc::clone(&inflight);
         std::thread::Builder::new()
             .name("spote-downloader".into())
-            .spawn(move || worker(job_rx, event_tx, shared))
+            .spawn(move || worker(job_rx, event_tx, shared, worker_inflight))
             .expect("no se pudo arrancar el downloader");
         Self {
             tx: job_tx,
             events: event_rx,
             children,
+            inflight,
         }
     }
 
@@ -219,11 +225,21 @@ impl Downloader {
     }
 
     pub fn download(&self, key: &str, source: DownloadSource, out: PathBuf) {
-        let _ = self.tx.send(Job::Download {
-            key: key.to_string(),
-            source,
-            out,
-        });
+        let key = key.to_string();
+        if !begin_job(&self.inflight, &key) {
+            return;
+        }
+        if self
+            .tx
+            .send(Job::Download {
+                key: key.clone(),
+                source,
+                out,
+            })
+            .is_err()
+        {
+            finish_job(&self.inflight, &key);
+        }
     }
 
     /// Resuelve contra yt-dlp con matching estricto y descarga la mejor fuente.
@@ -237,13 +253,23 @@ impl Downloader {
         duration_ms: u64,
         out: PathBuf,
     ) {
-        let _ = self.tx.send(Job::Resolve {
-            key: key.to_string(),
-            artist: artist.to_string(),
-            title: title.to_string(),
-            duration_ms,
-            out,
-        });
+        let key = key.to_string();
+        if !begin_job(&self.inflight, &key) {
+            return;
+        }
+        if self
+            .tx
+            .send(Job::Resolve {
+                key: key.clone(),
+                artist: artist.to_string(),
+                title: title.to_string(),
+                duration_ms,
+                out,
+            })
+            .is_err()
+        {
+            finish_job(&self.inflight, &key);
+        }
     }
 
     pub fn update_ytdlp(&self) {
@@ -282,7 +308,26 @@ impl Drop for Downloader {
     }
 }
 
-fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mutex<Vec<u32>>>) {
+/// Marca una clave como descargándose. `false` = ya hay un trabajo para ella.
+fn begin_job(inflight: &Mutex<HashSet<String>>, key: &str) -> bool {
+    inflight
+        .lock()
+        .map(|mut keys| keys.insert(key.to_string()))
+        .unwrap_or(true)
+}
+
+fn finish_job(inflight: &Mutex<HashSet<String>>, key: &str) {
+    if let Ok(mut keys) = inflight.lock() {
+        keys.remove(key);
+    }
+}
+
+fn worker(
+    jobs: Receiver<Job>,
+    events: Sender<DownloadEvent>,
+    children: Arc<Mutex<Vec<u32>>>,
+    inflight: Arc<Mutex<HashSet<String>>>,
+) {
     let mut queue: VecDeque<Job> = VecDeque::new();
     loop {
         // Prioriza el trabajo en curso; recoge todo lo que haya.
@@ -315,6 +360,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
             }
             Job::Download { key, source, out } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
+                let done_key = key.clone();
                 match download(&key, &source, &out, &events, &children) {
                     Ok(path) => {
                         emit_progress(&events, &key, DownloadStage::Done, 100.0);
@@ -327,6 +373,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                         });
                     }
                 }
+                finish_job(&inflight, &done_key);
             }
             Job::Resolve {
                 key,
@@ -336,6 +383,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 out,
             } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
+                let done_key = key.clone();
                 // Mismo matcher estricto que la reproducción: variantes de
                 // consulta, rechazo de covers/directos y duración. Antes el
                 // Downloader aceptaba coincidencias que el stream rechazaba.
@@ -359,6 +407,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                         });
                     }
                 }
+                finish_job(&inflight, &done_key);
             }
             Job::Update => {
                 let output = Command::new("yt-dlp").arg("-U").output();
@@ -924,6 +973,16 @@ fn file_size(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inflight_keys_are_deduplicated_until_finished() {
+        let inflight = Mutex::new(HashSet::new());
+        assert!(begin_job(&inflight, "sha1:a"));
+        assert!(!begin_job(&inflight, "sha1:a"));
+        assert!(begin_job(&inflight, "sha1:b"));
+        finish_job(&inflight, "sha1:a");
+        assert!(begin_job(&inflight, "sha1:a"));
+    }
 
     #[test]
     fn splits_topic_channels() {

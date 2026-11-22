@@ -68,6 +68,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("w", "mini reproductor de escritorio"),
                 ("A", "ecualizador y normalizador"),
                 ("tab", "cambiar de vista"),
+                ("q", "salir de spote"),
             ],
         ),
         (

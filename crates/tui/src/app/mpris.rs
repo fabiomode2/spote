@@ -66,9 +66,17 @@ impl App {
                     }
                 }
                 MprisCommand::SeekRelative(us) => {
-                    let delta = us / 1_000;
-                    let target = (self.display_position_ms() as i64 + delta).max(0) as u64;
-                    self.seek_to(target);
+                    if self.follow_spotify {
+                        // El reproductor seguido mueve su propia posición; no
+                        // se recalcula desde el reloj local, que va con retraso.
+                        if let Some(worker) = &self.spotify_worker {
+                            worker.send(SystemCommand::SeekRelative(us));
+                        }
+                    } else {
+                        let delta = us / 1_000;
+                        let target = (self.display_position_ms() as i64 + delta).max(0) as u64;
+                        self.seek_to(target);
+                    }
                 }
                 MprisCommand::SetPosition(ms) => self.seek_to(ms),
                 MprisCommand::SetVolume(volume) => self.set_volume(volume.clamp(0.0, 1.0)),

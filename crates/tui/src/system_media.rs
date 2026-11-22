@@ -19,6 +19,7 @@ pub enum SystemCommand {
     Next,
     Previous,
     Stop,
+    SeekRelative(i64),
     SetPosition(u64),
     SetVolume(f32),
     SetShuffle(bool),
@@ -92,6 +93,9 @@ fn run(
                 }
                 SystemCommand::Stop => {
                     let _ = watcher.call("Stop");
+                }
+                SystemCommand::SeekRelative(offset_us) => {
+                    let _ = watcher.seek(offset_us);
                 }
                 SystemCommand::SetPosition(position) => {
                     if !last_key.is_empty() {

@@ -87,9 +87,12 @@ done
 
 say "compilando spote (release)"
 (cd "$ROOT" && cargo build --release --locked -p spote-tui -p spote-server)
+MINI_BUILT=0
 if [[ "$WITH_MINI" == 1 ]]; then
   say "compilando spote-mini (release)"
-  if ! (cd "$ROOT" && cargo build --release --locked -p spote-mini); then
+  if (cd "$ROOT" && cargo build --release --locked -p spote-mini); then
+    MINI_BUILT=1
+  else
     warn "spote-mini no compiló (¿faltan libs gráficas?); instala solo la TUI con --no-mini"
   fi
 fi
@@ -100,7 +103,7 @@ say "instalando binarios en $BIN_DIR"
 # install directo puede fallar con «text file busy».
 install -m 755 "$ROOT/target/release/spote" "$BIN_DIR/.spote.new"
 mv -f "$BIN_DIR/.spote.new" "$BIN_DIR/spote"
-if [[ -x "$ROOT/target/release/spote-mini" ]]; then
+if [[ "$MINI_BUILT" == 1 && -x "$ROOT/target/release/spote-mini" ]]; then
   install -m 755 "$ROOT/target/release/spote-mini" "$BIN_DIR/.spote-mini.new"
   mv -f "$BIN_DIR/.spote-mini.new" "$BIN_DIR/spote-mini"
 fi

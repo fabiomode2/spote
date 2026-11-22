@@ -1,5 +1,9 @@
 [workspace]
 members = ["crates/*"]
+# `spote-mini` necesita eframe/egui y libs gráficas. Queda fuera del build/test
+# por defecto (servidores, CI sin X11/Wayland); se compila con `-p spote-mini`
+# o con `--workspace`.
+default-members = ["crates/core", "crates/protocol", "crates/server", "crates/tui"]
 resolver = "2"
 
 [workspace.package]

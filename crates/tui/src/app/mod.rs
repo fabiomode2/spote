@@ -743,6 +743,9 @@ pub struct App {
     /// Fila seleccionada en el overlay de audio (0-9 bandas, 10 preamp…).
     pub audio_selected: usize,
     pub mini_hub: Option<crate::mini::MiniHub>,
+    /// Motivo por el que el socket del mini no se pudo abrir, para avisar al
+    /// usuario en vez de fingir que `w` funciona.
+    pub mini_error: Option<String>,
     pub mini_last_publish: Instant,
     pub mini_child: Option<std::process::Child>,
     /// Autoplay deseado mientras se resuelve un stream; el usuario puede
@@ -773,6 +776,9 @@ pub struct App {
     pub stream_resolver: StreamResolver,
     pub pending_stream: Option<String>,
     pub streaming: bool,
+    /// Copia local pendiente de un stream. Se lanza solo cuando la pista lleva
+    /// unos segundos sonando: saltar de canción no descarga el mundo.
+    pub stream_cache_pending: Option<(String, String)>,
     pub albums: Vec<spote_core::library::AlbumRow>,
     pub album_selected: usize,
     pub album_open: Option<spote_core::library::AlbumRow>,
@@ -939,6 +945,10 @@ impl App {
         } else {
             Some(Social::start(cfg.server.clone()))
         };
+        let (mini_hub, mini_error) = match crate::mini::MiniHub::start() {
+            Ok(hub) => (Some(hub), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
         let mut app = Self {
             name: cfg.app.name.clone(),
             center_focus: CenterFocus::Normal,
@@ -981,7 +991,8 @@ impl App {
             volume_before_mute: player_volume,
             muted: false,
             audio_selected: 0,
-            mini_hub: crate::mini::MiniHub::start().ok(),
+            mini_hub,
+            mini_error,
             mini_last_publish: Instant::now(),
             mini_child: None,
             stream_autoplay: true,
@@ -1008,6 +1019,7 @@ impl App {
             stream_resolver: StreamResolver::start_in(cfg.media_dir().join("stream")),
             pending_stream: None,
             streaming: false,
+            stream_cache_pending: None,
             albums: Vec::new(),
             album_selected: 0,
             album_open: None,
@@ -1392,6 +1404,7 @@ impl App {
         self.now.message.clear();
         self.pending_stream = None;
         self.streaming = false;
+        self.stream_cache_pending = None;
         if let Some(player) = &self.player {
             player.set_volume(self.now.volume);
             player.set_loop(self.repeat_mode == RepeatMode::One);
@@ -1470,6 +1483,7 @@ impl App {
         self.pending_play = None;
         self.pending_stream = Some(track.key.clone());
         self.streaming = true;
+        self.stream_cache_pending = None;
         // La pista anterior no debe seguir sonando mientras se resuelve.
         if let Some(player) = &self.player {
             player.set_loop(self.repeat_mode == RepeatMode::One);
@@ -1570,15 +1584,19 @@ impl App {
                     } else {
                         self.spectrum.stop();
                     }
-                    if self.cfg.player.stream_cache {
-                        let watch = format!("https://www.youtube.com/watch?v={}", source.id);
-                        self.downloader.download(
-                            &key,
-                            DownloadSource::Url(watch),
-                            self.cfg.media_dir(),
-                        );
-                    }
-                    self.set_status("▶ stream · descargando copia local");
+                    // La copia local no se lanza todavía: si el usuario salta
+                    // de pista en los primeros segundos, no se descarga una
+                    // canción entera para nada. `poll_stream_cache` la arranca
+                    // cuando de verdad se está escuchando.
+                    self.stream_cache_pending = if self.cfg.player.stream_cache {
+                        Some((
+                            key.clone(),
+                            format!("https://www.youtube.com/watch?v={}", source.id),
+                        ))
+                    } else {
+                        None
+                    };
+                    self.set_status("▶ stream");
                 }
                 StreamEvent::Downloaded {
                     key,
@@ -1598,6 +1616,7 @@ impl App {
                     }
                     self.pending_stream = None;
                     self.streaming = false;
+                    self.stream_cache_pending = None;
                     self.now.loading = false;
                     if let Some(track) = self.now.track.clone() {
                         let hint = if provider.trim().is_empty() {
@@ -1642,6 +1661,7 @@ impl App {
                     self.pending_seek_ms = None;
                     self.pending_seek_key = None;
                     self.streaming = false;
+                    self.stream_cache_pending = None;
                     self.now.loading = false;
                     self.now.playing = false;
                     self.toast(format!("stream no disponible: {message}"), ToastKind::Warn);
@@ -1661,6 +1681,44 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Lanza la copia local de un stream solo cuando la pista lleva unos
+    /// segundos sonando. Saltar de canción no dispara una descarga completa de
+    /// cada pista por la que se pasa.
+    fn poll_stream_cache(&mut self) {
+        const CACHE_AFTER_MS: u64 = 15_000;
+        let Some((key, url)) = self.stream_cache_pending.clone() else {
+            return;
+        };
+        let same_track = self
+            .now
+            .track
+            .as_ref()
+            .map(|track| track.key.as_str())
+            == Some(key.as_str());
+        if !same_track {
+            self.stream_cache_pending = None;
+            return;
+        }
+        if !self.now.playing || self.now.loading {
+            return;
+        }
+        // En pistas cortas no tiene sentido esperar 15 s: con la mitad de la
+        // duración ya se sabe que se está escuchando de verdad.
+        let threshold = if self.now.duration_ms > 0 {
+            CACHE_AFTER_MS.min(self.now.duration_ms / 2)
+        } else {
+            CACHE_AFTER_MS
+        };
+        let near_end = self.now.duration_ms > 0
+            && self.now.position_ms.saturating_add(1_500) >= self.now.duration_ms;
+        if self.now.position_ms < threshold && !near_end {
+            return;
+        }
+        self.stream_cache_pending = None;
+        self.downloader
+            .download(&key, DownloadSource::Url(url), self.cfg.media_dir());
     }
 
     /// Encola una pista: si no está descargada, lanza la descarga.
@@ -2773,6 +2831,7 @@ impl App {
 
         self.poll_player();
         self.poll_stream();
+        self.poll_stream_cache();
         self.poll_search();
         self.poll_downloads();
         self.poll_spotify_jobs();
@@ -2912,6 +2971,7 @@ impl App {
                 self.player = None;
                 self.player_events = None;
                 self.streaming = false;
+                self.stream_cache_pending = None;
                 self.now.playing = false;
                 self.now.loading = false;
                 self.spectrum.stop();
@@ -2983,6 +3043,7 @@ impl App {
                     self.toast(format!("mpv: {message}"), ToastKind::Error);
                     if self.streaming {
                         self.streaming = false;
+                        self.stream_cache_pending = None;
                         self.now.loading = false;
                         if let Some(track) = self.now.track.clone() {
                             self.start_resolve(&track);
@@ -2994,6 +3055,7 @@ impl App {
                     self.player = None;
                     self.player_events = None;
                     self.streaming = false;
+                    self.stream_cache_pending = None;
                     self.now.playing = false;
                     self.now.loading = false;
                     self.spectrum.stop();
@@ -3162,7 +3224,12 @@ impl App {
                         self.now.loading = false;
                     }
                     // Si el stream ya está sonando, esta descarga era solo la
-                    // copia de caché: su fallo no debe pausar la reproducción.
+                    // copia de caché: su fallo no debe pausar la reproducción
+                    // ni tapar la pista con un toast de error.
+                    let cache_only = !was_pending
+                        && self.streaming
+                        && self.now.track.as_ref().map(|track| track.key.as_str())
+                            == Some(key.as_str());
                     if was_pending
                         && !self.streaming
                         && self.now.track.as_ref().map(|track| track.key.as_str())
@@ -3174,7 +3241,11 @@ impl App {
                         self.lyrics_status = "descarga fallida".into();
                     }
                     self.finish_download(&key, true);
-                    self.toast(format!("descarga fallida: {message}"), ToastKind::Error);
+                    if cache_only {
+                        self.set_status("copia local fallida · sigue el stream");
+                    } else {
+                        self.toast(format!("descarga fallida: {message}"), ToastKind::Error);
+                    }
                 }
                 DownloadEvent::Message(message) => {
                     self.toast(message, ToastKind::Info);

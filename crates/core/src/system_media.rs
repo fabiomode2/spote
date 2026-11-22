@@ -18,8 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use spote_protocol::{SourceHint, TrackRef};
-use zbus::zvariant::OwnedObjectPath;
-use zbus::{OwnedVariant, Proxy};
+use zbus::{OwnedObjectPath, OwnedVariant, Proxy};
 
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
@@ -622,7 +621,7 @@ mod tests {
 
     #[test]
     fn trackid_accepts_object_path_and_string() {
-        use zbus::zvariant::ObjectPath;
+        use zbus::ObjectPath;
         let path = ObjectPath::try_from("/org/mpris/MediaPlayer2/TrackList/NoTrack").unwrap();
         let value = OwnedVariant::from(path);
         assert_eq!(
