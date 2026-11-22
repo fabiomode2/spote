@@ -243,9 +243,9 @@ pub(super) fn draw_audio(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: 
         buf,
         Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
         if chain.is_some() {
-            "↑↓ mover · ←→ ajustar · 0 reset banda · p preset · e on/off · r reset todo · esc cerrar"
+            "↑↓ mover · ←→ ±1 dB · 0 reset · p preset · e master · d bandas · r reset · esc"
         } else {
-            "EQ apagado · e activa · esc cerrar"
+            "procesado apagado · e activa · d bandas · esc"
         },
         Style::new().fg(color(pal.dim)),
         Alignment::Left,

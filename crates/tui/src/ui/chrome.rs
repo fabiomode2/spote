@@ -553,9 +553,11 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         };
         put(buf, track_x + i, y, ch, color(fg), None);
     }
-    // Zona clicable un poco más alta para que no haya que acertar la fila.
+    // La zona clicable no puede subir a la fila de progreso: en un transporte
+    // de dos filas se comía los clics de la barra de seek.
+    let hit_h = if controls_h >= 3 { 2 } else { 1 };
     app.hit.add(
-        Rect::new(track_x, y.saturating_sub(1), vol_w, 2.min(rect.height)),
+        Rect::new(track_x, y, vol_w, hit_h.min(rect.height)),
         Action::VolumeTrack,
     );
     let label = format!("{:>3.0}%", app.now.volume * 100.0);

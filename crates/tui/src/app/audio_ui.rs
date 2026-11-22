@@ -35,6 +35,10 @@ impl App {
                 self.cfg.audio.enabled = !self.cfg.audio.enabled;
                 self.audio_changed();
             }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.cfg.audio.eq_enabled = !self.cfg.audio.eq_enabled;
+                self.audio_changed();
+            }
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 self.cfg.audio.bands = [0.0; 10];
                 self.cfg.audio.preamp_db = 0.0;

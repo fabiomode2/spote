@@ -7,6 +7,8 @@ impl App {
             self.spotify_worker = Some(SystemMediaWorker::start());
         }
         self.follow_spotify = true;
+        self.cfg.ui.follow_spotify = true;
+        self.cfg.save().ok();
         self.spotify_warned = false;
         self.last_spotify_poll = Instant::now();
         // El modo acompañante manda: nada de audio local sonando por debajo,
@@ -28,6 +30,8 @@ impl App {
 
     pub fn disable_spotify(&mut self) {
         self.follow_spotify = false;
+        self.cfg.ui.follow_spotify = false;
+        self.cfg.save().ok();
         self.spotify_worker = None;
         self.spectrum.stop();
         // Vuelve el modo local limpio: fuera la pista remota.

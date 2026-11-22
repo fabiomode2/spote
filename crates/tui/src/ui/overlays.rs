@@ -7,6 +7,9 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         // Velo de fondo sólido: los overlays antiguos dejaban traslucir la
         // lista de debajo en terminales con celdas de fondo incompletas.
         fill_soft(buf, layout.full, pal.bg_deep, 0.88, pal.bg_deep);
+        // Un modal captura todo el ratón: sin esto, un clic fuera del panel
+        // podía activar la lista o el transporte que quedaban debajo.
+        app.hit.clear();
     }
     match overlay {
         Overlay::None => {}

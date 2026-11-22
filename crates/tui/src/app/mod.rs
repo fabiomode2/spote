@@ -745,6 +745,11 @@ pub struct App {
     pub mini_hub: Option<crate::mini::MiniHub>,
     pub mini_last_publish: Instant,
     pub mini_child: Option<std::process::Child>,
+    /// Autoplay deseado mientras se resuelve un stream; el usuario puede
+    /// pausarlo antes de que mpv tenga la URL.
+    pub stream_autoplay: bool,
+    /// Seek pedido durante la resolución; se aplica al cargar la URL/fichero.
+    pub pending_seek_ms: Option<u64>,
     pub mpris_server: Option<spote_core::mpris_server::MprisServer>,
     pub mpris_last_update: Instant,
     pub player_events: Option<tokio::sync::broadcast::Receiver<PlayerEvent>>,
@@ -977,6 +982,8 @@ impl App {
             mini_hub: crate::mini::MiniHub::start().ok(),
             mini_last_publish: Instant::now(),
             mini_child: None,
+            stream_autoplay: true,
+            pending_seek_ms: None,
             mpris_server: spote_core::mpris_server::MprisServer::start("spote").ok(),
             mpris_last_update: Instant::now(),
             player_events: None,
@@ -1230,16 +1237,14 @@ impl App {
             }
         }
         self.view = next;
-        if error.is_some() && self.view.is_empty() && !previous.is_empty() {
-            // Solo un error real de SQLite justifica rescatar la vista anterior.
-            // Un filtro vacío (favoritas, lista…) debe verse vacío, no con las
-            // canciones de otro filtro.
-            self.view = previous;
+        if let Some(error) = error {
+            // Un error real de SQLite nunca debe ser mudo: si además dejó la
+            // vista vacía, se conserva la anterior para no perder el contexto.
+            if self.view.is_empty() && !previous.is_empty() {
+                self.view = previous;
+            }
             self.toast(
-                format!(
-                    "no pude refrescar la biblioteca{}",
-                    error.map(|e| format!(": {e}")).unwrap_or_default()
-                ),
+                format!("no pude refrescar la biblioteca: {error}"),
                 ToastKind::Warn,
             );
         }
@@ -1283,7 +1288,7 @@ impl App {
 
     fn play_local_inner(
         &mut self,
-        track: TrackRef,
+        mut track: TrackRef,
         path: Option<PathBuf>,
         record_history: bool,
     ) {
@@ -1294,10 +1299,48 @@ impl App {
             );
             return;
         }
+        if self.room.is_some() && !self.applying_remote {
+            // En una sala manda el servidor: seleccionar una pista la encola,
+            // no arranca audio local por debajo de la reproducción compartida.
+            if let Some(social) = &self.social {
+                social.send(SocialCmd::QueueAdd(track.clone()));
+            }
+            self.toast(
+                format!("{} añadida a la cola de la sala", track.title),
+                ToastKind::Info,
+            );
+            return;
+        }
+        // Reutiliza la fila canónica si la misma canción ya está descargada
+        // con otra clave (búsqueda/álbum/ISRC). Evita duplicados y descargas.
+        let canonical = self.lib.canonical_key(&track);
+        if canonical != track.key {
+            if let Ok(Some(row)) = self.lib.track_by_key(&canonical) {
+                let mut canonical_track = row.track;
+                canonical_track.art_url = canonical_track.art_url.or(track.art_url.take());
+                if canonical_track.album.is_none() {
+                    canonical_track.album = track.album.take();
+                }
+                track = canonical_track;
+            }
+        }
+        // La historia se guarda antes de resolver el stream: las pistas que
+        // aún no tienen fichero también deben poder recuperarse con "anterior".
+        if record_history {
+            if let Some(current) = self.now.track.clone() {
+                if current.key != track.key {
+                    self.history.push((current, self.now.path.clone()));
+                    if self.history.len() > 100 {
+                        self.history.remove(0);
+                    }
+                }
+            }
+        }
         // Elegir otra pista cancela la reproducción que esperaba una descarga;
         // si no, al terminar esa descarga interrumpía lo que ya estaba sonando.
         self.pending_play = None;
         self.now.ended = false;
+        self.stream_autoplay = true;
         let Some(path) = path.or_else(|| self.lib.local_path(&track.key)) else {
             if self.cfg.player.streaming && self.tools.yt_dlp {
                 self.start_stream(track);
@@ -1318,16 +1361,6 @@ impl App {
             }
             return;
         }
-        if record_history {
-            if let Some(current) = self.now.track.clone() {
-                if current.key != track.key {
-                    self.history.push((current, self.now.path.clone()));
-                    if self.history.len() > 100 {
-                        self.history.remove(0);
-                    }
-                }
-            }
-        }
         // Recorte persistente: si el vídeo de YouTube trae intro/outro, se
         // salta solo sin tocar el fichero (reversible con Backspace).
         let (trim_start, trim_end) = self.lib.trim(&track.key).unwrap_or((0, None));
@@ -1336,9 +1369,10 @@ impl App {
         self.trim_end_ms = trim_end
             .filter(|end| *end > self.trim_start_ms + 500)
             .map(|end| end.min(duration));
+        let start_ms = self.pending_seek_ms.take().unwrap_or(self.trim_start_ms);
         self.now.track = Some(track.clone());
         self.now.path = Some(path.clone());
-        self.now.position_ms = self.trim_start_ms;
+        self.now.position_ms = start_ms;
         self.now.duration_ms = track.duration_ms;
         self.now.playing = true;
         self.now.loading = false;
@@ -1348,7 +1382,7 @@ impl App {
         if let Some(player) = &self.player {
             player.set_volume(self.now.volume);
             player.set_loop(self.repeat_mode == RepeatMode::One);
-            player.load(path.clone(), self.trim_start_ms as f64 / 1000.0);
+            player.load(path.clone(), start_ms as f64 / 1000.0);
         } else {
             self.set_status("mpv no disponible: modo visual");
         }
@@ -1381,19 +1415,8 @@ impl App {
         self.map_worker.request(track.key.clone(), path.clone());
         if !self.follow_spotify {
             self.spectrum
-                .decode_file(path, self.trim_start_ms as f64 / 1000.0);
+                .decode_file(path, start_ms as f64 / 1000.0);
             self.spectrum_at = Instant::now();
-        }
-        if !self.applying_remote && self.room.is_some() {
-            // En una sala manda el servidor: lo que pongas se anuncia a la cola
-            // compartida, no se reproduce por tu cuenta.
-            if let Some(social) = &self.social {
-                social.send(SocialCmd::QueueAdd(track.clone()));
-                self.toast(
-                    format!("{} añadida a la cola de la sala", track.title),
-                    ToastKind::Info,
-                );
-            }
         }
         self.set_status(format!("▶ {}", track.label()));
     }
@@ -1428,6 +1451,8 @@ impl App {
         self.now.playing = false;
         self.now.loading = true;
         self.now.ended = false;
+        self.stream_autoplay = true;
+        self.pending_seek_ms = None;
         self.now.message.clear();
         self.pending_play = None;
         self.pending_stream = Some(track.key.clone());
@@ -1488,8 +1513,9 @@ impl App {
                     self.pending_stream = None;
                     self.streaming = true;
                     self.now.loading = false;
-                    self.now.playing = true;
+                    self.now.playing = self.stream_autoplay;
                     self.now.path = None;
+                    let start_ms = self.pending_seek_ms.take().unwrap_or(self.trim_start_ms);
                     let provider = source.provider.clone();
                     let id = source.id.clone();
                     if let Some(track) = self.now.track.clone() {
@@ -1514,7 +1540,10 @@ impl App {
                         self.now.track = Some(track);
                     }
                     if let Some(player) = &self.player {
-                        player.load_url(source.url, self.trim_start_ms as f64 / 1000.0);
+                        player.load_url(source.url, start_ms as f64 / 1000.0);
+                        if !self.stream_autoplay {
+                            player.pause(true);
+                        }
                     }
                     if self.cfg.player.remote_viz == "system" && self.tools.parec {
                         self.spectrum.decode_system();
@@ -1571,7 +1600,15 @@ impl App {
                                 )
                                 .ok();
                         }
+                        let autoplay = self.stream_autoplay;
                         self.play_local(track, Some(path));
+                        self.stream_autoplay = autoplay;
+                        if !autoplay {
+                            if let Some(player) = &self.player {
+                                player.pause(true);
+                            }
+                            self.now.playing = false;
+                        }
                     } else {
                         self.set_status("audio descargado, pero no hay pista activa");
                     }
@@ -1587,6 +1624,7 @@ impl App {
                         continue;
                     }
                     self.pending_stream = None;
+                    self.pending_seek_ms = None;
                     self.streaming = false;
                     self.now.loading = false;
                     self.now.playing = false;
@@ -1717,6 +1755,16 @@ impl App {
                 worker.send(SystemCommand::PlayPause);
             }
             self.now.playing = !self.now.playing;
+            return;
+        }
+        if self.now.loading && self.pending_stream.is_some() {
+            self.stream_autoplay = !self.stream_autoplay;
+            self.now.playing = self.stream_autoplay;
+            self.set_status(if self.stream_autoplay {
+                "se reproducirá al resolver el stream"
+            } else {
+                "pausado; esperando al stream"
+            });
             return;
         }
         if self.now.ended {
@@ -2114,18 +2162,17 @@ impl App {
         }
         // Historial de sesión: «anterior» devuelve a la pista que sonaba de
         // verdad, aunque se haya puesto desde una lista, la cola o buscar.
-        while let Some((track, path)) = self.history.pop() {
+        if let Some((track, path)) = self.history.pop() {
+            // Aunque no haya fichero local, la pista puede reproducirse por
+            // stream; antes se descartaba y «anterior» se saltaba la historia.
             let path = path
                 .filter(|path| path.exists())
                 .or_else(|| self.lib.local_path(&track.key));
-            if path.is_some() {
-                // La pista que dejamos pasa a ser la primera de la cola: al
-                // dar a «siguiente» se vuelve a ella antes de continuar con
-                // lo que ya estaba encolado.
-                self.queue_current_for_back();
-                self.play_local_inner(track, path, false);
-                return;
-            }
+            // La pista que dejamos pasa a ser la primera de la cola: al dar a
+            // «siguiente» se vuelve a ella antes de continuar con lo encolado.
+            self.queue_current_for_back();
+            self.play_local_inner(track, path, false);
+            return;
         }
         if !self.play_context.is_empty() {
             let len = self.play_context.len();
@@ -2231,6 +2278,13 @@ impl App {
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetPosition(target));
             }
+            return;
+        }
+        if self.now.loading || self.pending_stream.is_some() {
+            // El stream aún no está cargado: se guarda el destino y se aplica
+            // al recibir la URL o el fichero descargado.
+            self.pending_seek_ms = Some(target);
+            self.now.position_ms = target;
             return;
         }
         if self.now.path.is_none() && !self.streaming {
@@ -2454,7 +2508,11 @@ impl App {
         let Some(track) = self.now.track.clone() else {
             return;
         };
-        let offset = line_start_ms as i64 - self.display_position_ms() as i64;
+        let offset = lyrics_offset_for_click(
+            line_start_ms,
+            self.lyrics_offset_ms,
+            self.display_position_ms(),
+        );
         self.lyrics_offset_ms = offset.clamp(-120_000, 120_000);
         if let Some(doc) = &mut self.lyrics {
             doc.offset_ms = self.lyrics_offset_ms;
@@ -2895,6 +2953,11 @@ impl App {
                 PlayerEvent::Disconnected => {
                     self.player = None;
                     self.player_events = None;
+                    self.streaming = false;
+                    self.now.playing = false;
+                    self.now.loading = false;
+                    self.spectrum.stop();
+                    self.set_status("mpv desconectado · reinicia spote para recuperar el audio");
                     self.toast("mpv desconectado; reinicia spote", ToastKind::Error);
                 }
                 _ => {}
@@ -3054,6 +3117,7 @@ impl App {
                     let was_pending = self.pending_play.as_deref() == Some(key.as_str());
                     if was_pending {
                         self.pending_play = None;
+                        self.pending_seek_ms = None;
                         self.now.loading = false;
                     }
                     // Si el stream ya está sonando, esta descarga era solo la
@@ -3334,6 +3398,7 @@ impl App {
                 spote_core::lyrics::LyricsSource::Estimated
                     | spote_core::lyrics::LyricsSource::Plain
                     | spote_core::lyrics::LyricsSource::Local
+                    | spote_core::lyrics::LyricsSource::Captions
             )
         {
             // Una letra estimada no tiene una rejilla fiable: desplazarla
@@ -3870,7 +3935,36 @@ impl App {
         }
     }
 
+    /// Algunas acciones (favorita, lista) llegan desde resultados remotos que
+    /// aún no están en SQLite. Se materializa la pista antes de tocar la BD.
+    pub(super) fn ensure_track_key(&mut self, key: &str) -> bool {
+        if self
+            .lib
+            .track_by_key(key)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return true;
+        }
+        if let Some(track) = self
+            .search
+            .results
+            .iter()
+            .find(|item| item.to_track().key == key)
+            .map(|item| item.to_track())
+            .or_else(|| self.now.track.clone().filter(|track| track.key == key))
+        {
+            return self.lib.upsert_track(&track).is_ok();
+        }
+        false
+    }
+
     fn toggle_favorite_key(&mut self, key: &str) {
+        if !self.ensure_track_key(key) {
+            self.toast("no encuentro esa pista en la biblioteca", ToastKind::Warn);
+            return;
+        }
         if let Ok(value) = self.lib.toggle_favorite(key) {
             self.toast(
                 if value {
@@ -4242,6 +4336,12 @@ impl Tab {
 /// Puntos de una pista del catálogo contra la consulta escrita. Es una
 /// heurística local: el proveedor ya filtró, aquí solo se desempata para que
 /// la canción exacta no quede debajo de álbumes y homónimos.
+/// Offset nuevo al sincronizar una línea. `seek_ms` viene del hitbox ya
+/// corregido con el offset actual; hay que deshacerlo antes de comparar.
+fn lyrics_offset_for_click(seek_ms: u64, current_offset: i64, position_ms: u64) -> i64 {
+    seek_ms as i64 + current_offset - position_ms as i64
+}
+
 fn catalog_match_score(query: &str, title: &str, artist: &str) -> i32 {
     let q = spote_core::util::normalize(query);
     let t = spote_core::util::normalize(title);
@@ -4313,6 +4413,15 @@ mod tests {
         assert_eq!(Tab::Settings.next(), Tab::Now);
         assert_eq!(Tab::Now.prev(), Tab::Settings);
         assert_eq!(Tab::Settings.prev(), Tab::Room);
+    }
+
+    #[test]
+    fn lyrics_click_does_not_accumulate_the_old_offset() {
+        // La línea empieza en 10 s, el offset actual es +1 s y el hitbox de
+        // seek lleva 9 s. El nuevo offset debe ser 10 s - 5 s = +5 s, no
+        // 9 s - 5 s = +4 s.
+        assert_eq!(lyrics_offset_for_click(9_000, 1_000, 5_000), 5_000);
+        assert_eq!(lyrics_offset_for_click(10_000, 0, 5_000), 5_000);
     }
 
     #[test]
