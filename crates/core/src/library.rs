@@ -970,6 +970,16 @@ impl Library {
         Ok(())
     }
 
+    /// Borra la letra cacheada de una pista (para volver a buscarla).
+    pub fn delete_lyrics(&mut self, key: &str) -> Result<()> {
+        let Some(row) = self.track_by_key(key)? else {
+            return Ok(());
+        };
+        self.conn
+            .execute("DELETE FROM lyrics WHERE track_id = ?1", params![row.id])?;
+        Ok(())
+    }
+
     pub fn set_lyrics_offset(&mut self, key: &str, offset_ms: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE lyrics SET offset_ms = ?1 WHERE track_id = (SELECT id FROM track WHERE key = ?2)",

@@ -712,8 +712,9 @@ fn run_tui(args: Args) -> Result<()> {
     result
 }
 
-/// Ritmo del bucle cuando nada anima (efectos en pausa incluidos).
-const IDLE_POLL: Duration = Duration::from_millis(100);
+/// Ritmo del bucle cuando nada anima (efectos en pausa incluidos). 50 ms
+/// mantiene los comandos del mini y del socket al día sin repintar de más.
+const IDLE_POLL: Duration = Duration::from_millis(50);
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,

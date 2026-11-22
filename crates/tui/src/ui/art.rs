@@ -83,6 +83,9 @@ pub(super) fn badges(app: &App, pal: &Palette) -> Vec<(String, Rgb)> {
     if app.lyrics_offset_ms != 0 {
         out.push((format!("offset {:+}ms", app.lyrics_offset_ms), pal.warn));
     }
+    if !app.lyrics_follow {
+        out.push(("letra manual".into(), pal.warn));
+    }
     if app.trim_start_ms > 0 || app.trim_end_ms.is_some() {
         let start = if app.trim_start_ms > 0 {
             spote_core::util::format_ms(app.trim_start_ms)

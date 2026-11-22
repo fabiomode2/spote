@@ -29,6 +29,16 @@ impl App {
                 2 => "grande".to_string(),
                 _ => "normal".to_string(),
             },
+            SettingRow::NormalizeTracks => onoff(self.cfg.audio.normalize_tracks),
+            SettingRow::MosaicMotion => match self.cfg.ui.fx.mosaic_motion.as_str() {
+                "rows" => "filas",
+                "columns" => "columnas",
+                "rotate" => "giro",
+                _ => "deriva",
+            }
+            .to_string(),
+            SettingRow::MosaicSpeed => format!("{} / 10", self.cfg.ui.fx.mosaic_speed.clamp(1, 10)),
+            SettingRow::MosaicBeat => onoff(self.cfg.ui.fx.mosaic_beat),
             SettingRow::LayoutEditor => "E".to_string(),
             SettingRow::VizBackground => onoff(self.viz_background),
             SettingRow::Cards => onoff(self.list_cards),
@@ -85,8 +95,9 @@ impl App {
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
             }
             SettingRow::Ambient => {
-                const AMBIENTS: [&str; 7] =
-                    ["off", "void", "aurora", "neural", "glitch", "lyrics", "cover"];
+                const AMBIENTS: [&str; 8] = [
+                    "off", "void", "aurora", "neural", "glitch", "lyrics", "cover", "mosaic",
+                ];
                 let current = AMBIENTS
                     .iter()
                     .position(|name| *name == self.cfg.ui.fx.ambient)
@@ -97,11 +108,23 @@ impl App {
             }
             SettingRow::AmbientOpacity => {
                 self.cfg.ui.fx.ambient_opacity =
-                    (self.cfg.ui.fx.ambient_opacity as i32 + delta * 2).clamp(0, 40) as u8;
+                    (self.cfg.ui.fx.ambient_opacity as i32 + delta * 2).clamp(5, 50) as u8;
             }
             SettingRow::LyricsSize => {
-                self.cfg.ui.lyrics_size =
-                    (self.cfg.ui.lyrics_size as i32 + delta).clamp(0, 2) as u8;
+                self.adjust_lyrics_size(delta);
+            }
+            SettingRow::MosaicMotion => {
+                const MOTIONS: [&str; 4] = ["drift", "rows", "columns", "rotate"];
+                let current = MOTIONS
+                    .iter()
+                    .position(|name| *name == self.cfg.ui.fx.mosaic_motion)
+                    .unwrap_or(0) as i32;
+                let next = (current + delta).rem_euclid(MOTIONS.len() as i32) as usize;
+                self.cfg.ui.fx.mosaic_motion = MOTIONS[next].to_string();
+            }
+            SettingRow::MosaicSpeed => {
+                self.cfg.ui.fx.mosaic_speed =
+                    (self.cfg.ui.fx.mosaic_speed as i32 + delta).clamp(1, 10) as u8;
             }
             SettingRow::Thumb => {
                 let next = if delta > 0 {
@@ -166,6 +189,11 @@ impl App {
             SettingRow::CleanSpill => self.cfg.ui.fx.clean_spill = !self.cfg.ui.fx.clean_spill,
             SettingRow::GlitchPanels => {
                 self.cfg.ui.fx.glitch_panels = !self.cfg.ui.fx.glitch_panels
+            }
+            SettingRow::MosaicBeat => self.cfg.ui.fx.mosaic_beat = !self.cfg.ui.fx.mosaic_beat,
+            SettingRow::NormalizeTracks => {
+                self.cfg.audio.normalize_tracks = !self.cfg.audio.normalize_tracks;
+                self.apply_audio_fx();
             }
             SettingRow::LayoutEditor => {
                 self.overlay = Overlay::Layout;

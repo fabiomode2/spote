@@ -92,6 +92,11 @@ pub struct AudioCfg {
     pub normalizer: NormalizerMode,
     /// Intensidad del normalizador dinámico. Rango 0..1.
     pub normalizer_strength: f32,
+    /// Iguala el volumen entre pistas. Para ficheros locales se usa la
+    /// ganancia medida en el análisis completo de la canción; para streams o
+    /// mientras se mide, un nivelador en directo como respaldo.
+    #[serde(default = "default_true")]
+    pub normalize_tracks: bool,
     /// Limitador de picos al final de la cadena.
     pub limiter: bool,
 }
@@ -105,6 +110,7 @@ impl Default for AudioCfg {
             preamp_db: 0.0,
             normalizer: NormalizerMode::Off,
             normalizer_strength: 0.5,
+            normalize_tracks: true,
             // Neutro por defecto: el limitador es opt-in, no se aplica a todo
             // el audio sin que el usuario lo pida.
             limiter: false,
@@ -126,21 +132,34 @@ impl AudioCfg {
     /// Cadena de filtros para la propiedad `af` de mpv, o `None` si no hay
     /// nada que aplicar.
     ///
-    /// Orden: preamp → EQ → normalizador → limitador. Las ganancias usan punto
-    /// decimal (nunca coma, que separa filtros) y los valores no finitos se
-    /// neutralizan.
+    /// Orden: preamp/ganancia de pista → EQ → nivelador en directo →
+    /// normalizador manual → limitador. Las ganancias usan punto decimal
+    /// (nunca coma, que separa filtros) y los valores no finitos se neutralizan.
     pub fn filter_chain(&self) -> Option<String> {
+        self.filter_chain_with_gain(0.0, true)
+    }
+
+    /// Variante para la pista actual: `track_gain_db` es la compensación
+    /// medida por el analizador (0 si aún no hay medida) y `live_fallback`
+    /// añade un nivelador en directo mientras no existe esa medida (streams o
+    /// primeros segundos de una pista local).
+    pub fn filter_chain_with_gain(&self, track_gain_db: f32, live_fallback: bool) -> Option<String> {
         if !self.enabled {
             return None;
         }
 
-        let mut filters: Vec<String> = Vec::with_capacity(13);
+        let mut filters: Vec<String> = Vec::with_capacity(16);
 
-        let preamp = round2(clamp_db(self.preamp_db));
-        if preamp != 0.0 {
+        let track_gain = if track_gain_db.is_finite() {
+            track_gain_db.clamp(-18.0, 18.0)
+        } else {
+            0.0
+        };
+        let trim = round2(clamp_db(self.preamp_db) + track_gain);
+        if trim != 0.0 {
             filters.push(format!(
                 "volume=volume={}dB:precision=double",
-                fmt_num(preamp, 2)
+                fmt_num(trim, 2)
             ));
         }
 
@@ -158,6 +177,17 @@ impl AudioCfg {
         }
 
         let strength = round2(clamp01(self.normalizer_strength));
+        if self.normalize_tracks && live_fallback && self.normalizer == NormalizerMode::Off {
+            // Mismo objetivo para todas las pistas mientras no hay ganancia
+            // medida. Ventana amplia para no bombear con cada golpe.
+            let g = 15.0 + strength * 20.0;
+            let p = 0.86 + strength * 0.08;
+            filters.push(format!(
+                "dynaudnorm=f=500:g={}:p={}:m=20",
+                fmt_num(g, 2),
+                fmt_num(p, 3)
+            ));
+        }
         match self.normalizer {
             NormalizerMode::Off => {}
             // `g` (ventana gaussiana) y `p` (pico) crecen con la intensidad.
@@ -192,6 +222,10 @@ impl AudioCfg {
 
 fn default_bands() -> [f32; 10] {
     [0.0; 10]
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn deserialize_bands<'de, D>(deserializer: D) -> Result<[f32; 10], D::Error>
@@ -273,14 +307,27 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_neutral() {
-        assert_eq!(AudioCfg::default().filter_chain(), None);
+    fn defaults_level_every_track() {
+        assert_eq!(
+            AudioCfg::default().filter_chain().as_deref(),
+            Some("dynaudnorm=f=500:g=25:p=0.9:m=20")
+        );
+    }
+
+    #[test]
+    fn normalization_can_be_turned_off() {
+        let cfg = AudioCfg {
+            normalize_tracks: false,
+            ..AudioCfg::default()
+        };
+        assert_eq!(cfg.filter_chain(), None);
     }
 
     #[test]
     fn flat_without_extras_has_no_chain() {
         let cfg = AudioCfg {
             limiter: false,
+            normalize_tracks: false,
             ..AudioCfg::default()
         };
         assert_eq!(cfg.filter_chain(), None);
@@ -301,6 +348,7 @@ mod tests {
     fn one_band() {
         let mut cfg = AudioCfg {
             limiter: false,
+            normalize_tracks: false,
             ..AudioCfg::default()
         };
         cfg.bands[5] = 6.0;
@@ -311,6 +359,7 @@ mod tests {
     fn several_bands_keep_frequency_order() {
         let mut cfg = AudioCfg {
             limiter: false,
+            normalize_tracks: false,
             ..AudioCfg::default()
         };
         cfg.bands[0] = 4.0;
@@ -329,6 +378,7 @@ mod tests {
         let cfg = AudioCfg {
             eq_enabled: false,
             limiter: false,
+            normalize_tracks: false,
             preamp_db: -2.5,
             ..AudioCfg::default()
         };
@@ -395,6 +445,7 @@ mod tests {
     fn preamp_comes_before_eq() {
         let mut cfg = AudioCfg {
             limiter: false,
+            normalize_tracks: false,
             preamp_db: 3.0,
             ..AudioCfg::default()
         };
@@ -476,6 +527,7 @@ mod tests {
         assert_eq!(cfg.bands, [0.0; 10]);
         assert_eq!(cfg.normalizer, NormalizerMode::Off);
         assert_eq!(cfg.normalizer_strength, 0.5);
+        assert!(cfg.normalize_tracks);
         assert!(!cfg.limiter);
     }
 }

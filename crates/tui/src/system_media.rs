@@ -72,6 +72,7 @@ fn run(
     let mut watcher = SystemMediaWatcher::new();
     let mut last_key = String::new();
     let mut sent_empty = false;
+    let mut empty_polls = 0u8;
     while active.load(Ordering::Relaxed) {
         // Primero los comandos: el usuario espera respuesta inmediata.
         while let Ok(command) = commands.try_recv() {
@@ -113,20 +114,33 @@ fn run(
                 }
             }
         }
-        let state = watcher.poll().unwrap_or_default();
+        let state = match watcher.poll() {
+            Some(state) => state,
+            None => SystemMediaState::default(),
+        };
         let empty = state.track.is_none();
+        if empty {
+            empty_polls = empty_polls.saturating_add(1);
+        } else {
+            empty_polls = 0;
+        }
         if let Some(track) = &state.track {
             last_key = track.key.clone();
             sent_empty = false;
         }
-        // Un estado vacío también es información: si el reproductor cierra,
-        // la UI/mini/MPRIS no deben seguir mostrando la última canción.
-        if !empty || !sent_empty {
+        // Un cierre real del reproductor se anuncia, pero un fallo puntual de
+        // D-Bus no debe vaciar la pantalla durante 120 ms: se exige que el
+        // vacío se repita antes de mandarlo.
+        if !empty || (empty_polls >= 3 && !sent_empty) {
             sent_empty = empty;
             if states.send(state).is_err() {
                 return;
             }
         }
-        thread::sleep(Duration::from_millis(400));
+        // Un sondeo frecuente mantiene la UI pegada a los botones: antes los
+        // 400 ms se notaban como si la pausa o el cambio de pista llegasen
+        // tarde. El estado optimista de la app evita el rebote mientras el
+        // reproductor externo publica el cambio.
+        thread::sleep(Duration::from_millis(120));
     }
 }

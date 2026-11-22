@@ -337,6 +337,7 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
     if rect.height < 3 || rect.width < 10 {
         return;
     }
+    app.lyrics_area = rect;
     let Some(doc) = &app.lyrics else {
         let message = if app.lyrics_status.is_empty() {
             "sin letra".to_string()
@@ -362,6 +363,22 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         );
         return;
     }
+
+    // Barra de controles de la letra: zoom, ajuste fino del offset (motor de
+    // sync real, persistido por pista), scroll manual y vuelta a la línea
+    // actual. Solo ocupa una fila.
+    let toolbar_h = if rect.height >= 8 && rect.width >= 34 { 1 } else { 0 };
+    if toolbar_h > 0 {
+        let bar = Rect::new(rect.x, rect.y, rect.width, 1);
+        draw_lyrics_toolbar(app, buf, bar, pal);
+    }
+    let rect = Rect::new(
+        rect.x,
+        rect.y + toolbar_h,
+        rect.width,
+        rect.height.saturating_sub(toolbar_h),
+    );
+    let doc = app.lyrics.as_ref().expect("la letra estaba cargada");
     // Tamaño: no se puede cambiar la fuente de la terminal, pero sí el ancho
     // de columna y el aire entre líneas. "Grande" = menos palabras por línea,
     // más altura y negrita, que es lo que se percibe como letra grande.
@@ -525,6 +542,133 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         }
         app.lyrics_debug_last = index.map(|i| (i, word_progress));
     }
+}
+
+/// Barra de mini-controles de la letra. Todo pasa por el estado real de la app:
+/// el zoom cambia `lyrics_size`, los ±ms llaman al offset persistido por pista
+/// y el scroll solo mueve la vista, sin inventar tiempos.
+fn draw_lyrics_toolbar(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
+    fill_soft(buf, rect, pal.bg_deep, 0.62, pal.bg_deep);
+    let mut x = rect.x + 1;
+    let right = (rect.x + rect.width).saturating_sub(1);
+
+    lyric_chip(app, buf, pal, &mut x, right, rect.y, "A−", Action::LyricsZoom(-1));
+    lyric_chip(app, buf, pal, &mut x, right, rect.y, "A+", Action::LyricsZoom(1));
+    if x + 1 < right {
+        put(buf, x, rect.y, "│", color(pal.border_dim), None);
+        x += 2;
+    }
+    for (label, delta) in [("−250", -250i64), ("−100", -100), ("+100", 100), ("+250", 250)] {
+        if x >= right {
+            break;
+        }
+        lyric_chip(
+            app,
+            buf,
+            pal,
+            &mut x,
+            right,
+            rect.y,
+            label,
+            Action::LyricsSync(delta),
+        );
+    }
+    if x + 1 < right {
+        put(buf, x, rect.y, "│", color(pal.border_dim), None);
+        x += 2;
+    }
+    lyric_chip(
+        app,
+        buf,
+        pal,
+        &mut x,
+        right,
+        rect.y,
+        "↑",
+        Action::LyricsScroll(-1),
+    );
+    lyric_chip(
+        app,
+        buf,
+        pal,
+        &mut x,
+        right,
+        rect.y,
+        "↓",
+        Action::LyricsScroll(1),
+    );
+    if !app.lyrics_follow {
+        lyric_chip(
+            app,
+            buf,
+            pal,
+            &mut x,
+            right,
+            rect.y,
+            "⟲",
+            Action::LyricsFollow,
+        );
+    }
+    if app.now.track.is_some() {
+        lyric_chip(
+            app,
+            buf,
+            pal,
+            &mut x,
+            right,
+            rect.y,
+            "⟳",
+            Action::LyricsRefetch,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lyric_chip(
+    app: &mut App,
+    buf: &mut Buffer,
+    pal: &Palette,
+    x: &mut u16,
+    right: u16,
+    y: u16,
+    label: &str,
+    action: Action,
+) {
+    let width = label.chars().count() as u16 + 2;
+    if *x + width > right {
+        return;
+    }
+    let rect = Rect::new(*x, y, width, 1);
+    let hover = app.hover == Some(action.clone());
+    let active = app.lyrics_offset_ms != 0 && matches!(&action, Action::LyricsSyncReset);
+    fill(
+        buf,
+        rect,
+        if active {
+            mix(pal.surface, pal.warn, 0.32)
+        } else if hover {
+            pal.surface_alt
+        } else {
+            pal.surface
+        },
+    );
+    text_at(
+        buf,
+        rect,
+        label.to_string(),
+        Style::new()
+            .fg(color(if active {
+                pal.warn
+            } else if hover {
+                pal.text
+            } else {
+                pal.muted
+            }))
+            .add_modifier(Modifier::BOLD),
+        Alignment::Center,
+    );
+    app.hit.add(rect, action);
+    *x += width + 1;
 }
 
 /// Pinta la línea activa palabra a palabra. Los tiempos salen de

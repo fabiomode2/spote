@@ -2,13 +2,29 @@
 use super::*;
 
 impl App {
+    fn point_in_lyrics(&self, x: u16, y: u16) -> bool {
+        let rect = self.lyrics_area;
+        rect.width > 0
+            && x >= rect.x
+            && x < rect.x + rect.width
+            && y >= rect.y
+            && y < rect.y + rect.height
+    }
+
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Moved => {
                 self.hover = self.hit.hit(mouse.column, mouse.row).cloned();
             }
             MouseEventKind::ScrollDown => {
+                if self.point_in_lyrics(mouse.column, mouse.row) {
+                    self.scroll_lyrics(1);
+                    return;
+                }
                 if let Some(Action::AudioBand(index)) = self.hover {
+                    self.audio_selected = index;
+                    self.adjust_audio(-1);
+                } else if let Some(Action::AudioBandSet(index)) = self.hover {
                     self.audio_selected = index;
                     self.adjust_audio(-1);
                 } else if self.hover == Some(Action::VolumeTrack) {
@@ -18,7 +34,14 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
+                if self.point_in_lyrics(mouse.column, mouse.row) {
+                    self.scroll_lyrics(-1);
+                    return;
+                }
                 if let Some(Action::AudioBand(index)) = self.hover {
+                    self.audio_selected = index;
+                    self.adjust_audio(1);
+                } else if let Some(Action::AudioBandSet(index)) = self.hover {
                     self.audio_selected = index;
                     self.adjust_audio(1);
                 } else if self.hover == Some(Action::VolumeTrack) {
@@ -76,6 +99,21 @@ impl App {
                     Action::SearchPlay(index) => {
                         self.search.selected = (*index).min(self.search_len().saturating_sub(1));
                         self.activate_search_selection();
+                        return;
+                    }
+                    Action::AudioBandSet(index) => {
+                        let index = (*index).min(9);
+                        self.audio_selected = index;
+                        if let Some(rect) = self.hit.rect_for(&action) {
+                            if rect.height > 2 {
+                                let half = rect.height as f32 / 2.0;
+                                let zero = rect.y as f32 + half;
+                                let gain = ((zero - mouse.row as f32) / half * 12.0)
+                                    .clamp(-12.0, 12.0);
+                                self.cfg.audio.bands[index] = gain.round();
+                                self.audio_changed();
+                            }
+                        }
                         return;
                     }
                     Action::QueueRemove(index) => {
@@ -261,11 +299,16 @@ impl App {
             Action::SeekTo(ms) => self.seek_to(ms),
             Action::SeekLyrics(ms) => {
                 self.seek_to(ms);
+                self.lyrics_follow = true;
                 if let Some(doc) = &self.lyrics {
                     if let Some(index) = doc.index_at(ms) {
+                        self.lyrics_scroll_index = Some(index);
+                        self.lyrics_scroll.value = index as f32;
+                        self.lyrics_scroll.velocity = 0.0;
                         self.lyrics_scroll.set_target(index as f32);
                     }
                 }
+                self.needs_redraw = true;
             }
             Action::Volume(volume) => self.set_volume(volume),
             Action::VolumeTrack => {
@@ -287,12 +330,15 @@ impl App {
                 self.cfg.save().ok();
             }
             Action::AudioBand(_)
+            | Action::AudioBandSet(_)
             | Action::AudioPreamp
             | Action::AudioNormalizer
             | Action::AudioStrength
             | Action::AudioLimiter
             | Action::AudioPreset(_)
-            | Action::AudioToggle => self.handle_audio_action(action),
+            | Action::AudioToggle
+            | Action::AudioEqToggle
+            | Action::AudioNormalize => self.handle_audio_action(action),
             Action::VizPreset(index) => {
                 self.show_viz = true;
                 self.viz.set_preset(index);
@@ -387,6 +433,12 @@ impl App {
                     CenterFocus::Lyrics
                 };
             }
+            Action::LyricsZoom(delta) => self.adjust_lyrics_size(delta),
+            Action::LyricsSync(delta) => self.nudge_lyrics_offset(delta),
+            Action::LyricsSyncReset => self.reset_lyrics_offset(),
+            Action::LyricsScroll(delta) => self.scroll_lyrics(delta),
+            Action::LyricsFollow => self.follow_current_lyric(),
+            Action::LyricsRefetch => self.refetch_lyrics(),
             Action::Help => self.overlay = Overlay::Help,
             Action::Effects => self.overlay = Overlay::Effects,
             Action::CloseOverlay => self.overlay = Overlay::None,

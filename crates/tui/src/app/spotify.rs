@@ -88,10 +88,51 @@ impl App {
         self.ambient_art_key.clear();
         self.song_map = None;
         self.song_map_key.clear();
+        self.track_gain_db = None;
         self.spectrum.stop();
     }
 
-    pub(super) fn apply_spotify(&mut self, state: SystemMediaState) {
+    /// Registra la intención de una orden MPRIS para que el siguiente sondeo
+    /// (que aún puede traer el estado viejo) no haga parpadear la UI.
+    pub(super) fn expect_follow_playing(&mut self, playing: bool) {
+        self.follow_expect_mut().playing = Some(playing);
+    }
+
+    pub(super) fn expect_follow_volume(&mut self, volume: f32) {
+        self.follow_expect_mut().volume = Some(volume.clamp(0.0, 1.0));
+    }
+
+    pub(super) fn expect_follow_shuffle(&mut self, on: bool) {
+        self.follow_expect_mut().shuffle = Some(on);
+    }
+
+    pub(super) fn expect_follow_repeat(&mut self, mode: RepeatMode) {
+        self.follow_expect_mut().repeat = Some(mode);
+    }
+
+    pub(super) fn expect_follow_position(&mut self, position_ms: u64) {
+        self.follow_expect_mut().position = Some((position_ms, Instant::now()));
+    }
+
+    /// Reutiliza el margen vivo o arranca uno nuevo si caducó.
+    fn follow_expect_mut(&mut self) -> &mut FollowExpect {
+        let stale = self
+            .follow_expect
+            .as_ref()
+            .is_none_or(|expect| !expect.live());
+        if stale {
+            self.follow_expect = Some(FollowExpect::new());
+        } else if let Some(expect) = self.follow_expect.as_mut() {
+            // Cada orden renueva el margen: pausar justo después de un seek
+            // debe seguir teniendo sus 1,5 s de protección.
+            expect.at = Instant::now();
+        }
+        self.follow_expect
+            .as_mut()
+            .expect("follow_expect acaba de crearse")
+    }
+
+    pub(super) fn apply_spotify(&mut self, mut state: SystemMediaState) {
         if state.track.is_none() {
             if self.now.track.is_some() {
                 self.clear_followed_track();
@@ -100,6 +141,69 @@ impl App {
             self.spotify = Some(state);
             return;
         }
+
+        // El reproductor externo puede tardar en publicar el resultado de la
+        // última orden. Durante ese margen se conserva lo que pidió el usuario
+        // en los campos afectados; pista, carátula y posición siguen llegando.
+        let mut expect = self.follow_expect.take();
+        if expect.as_ref().is_some_and(|expect| !expect.live()) {
+            expect = None;
+        }
+        if let Some(expect) = &mut expect {
+            if let Some(want) = expect.playing {
+                if state.playing == want {
+                    expect.playing = None;
+                } else {
+                    state.playing = want;
+                }
+            }
+            if let Some(want) = expect.volume {
+                if state
+                    .volume
+                    .is_some_and(|value| (value - want).abs() < 0.02)
+                {
+                    expect.volume = None;
+                } else {
+                    state.volume = Some(want);
+                }
+            }
+            if let Some(want) = expect.shuffle {
+                if state.shuffle == Some(want) {
+                    expect.shuffle = None;
+                } else {
+                    state.shuffle = Some(want);
+                }
+            }
+            if let Some(want) = expect.repeat {
+                if repeat_from_mpris(state.repeat.as_deref()) == Some(want) {
+                    expect.repeat = None;
+                } else {
+                    state.repeat = Some(
+                        match want {
+                            RepeatMode::One => "Track",
+                            RepeatMode::All => "Playlist",
+                            RepeatMode::Off => "None",
+                        }
+                        .to_string(),
+                    );
+                }
+            }
+            if let Some((target, at)) = expect.position {
+                if at.elapsed() < FollowExpect::GRACE {
+                    let elapsed = if state.playing {
+                        at.elapsed().as_millis() as u64
+                    } else {
+                        0
+                    };
+                    state.position_ms = target.saturating_add(elapsed);
+                    state.position_known = true;
+                } else {
+                    expect.position = None;
+                }
+            }
+        }
+        self.follow_expect = expect.filter(|expect| !expect.empty());
+
         if let Some(mut track) = state.track.clone() {
             // Si la pista está descargada, usa SU clave (y su portada local):
             // MPRIS da otro id y si no, la letra/arte no encuentran nada.
@@ -184,11 +288,7 @@ impl App {
             self.shuffle_on = shuffle;
         }
         if let Some(repeat) = &state.repeat {
-            self.repeat_mode = match repeat.as_str() {
-                "Track" | "track" | "one" => RepeatMode::One,
-                "Playlist" | "playlist" | "all" => RepeatMode::All,
-                _ => RepeatMode::Off,
-            };
+            self.repeat_mode = repeat_from_mpris(Some(repeat)).unwrap_or(RepeatMode::Off);
             self.loop_file = self.repeat_mode == RepeatMode::One;
         }
         self.spotify = Some(state);
@@ -201,7 +301,14 @@ impl App {
             return;
         }
         if let Some(worker) = &self.spotify_worker {
-            if let Some(state) = worker.try_recv() {
+            // Drena la cola y aplica solo el estado más reciente: si el hilo
+            // de MPRIS publica más rápido que la UI, aplicar uno antiguo justo
+            // después de una orden hacía rebotar play/pausa y pista.
+            let mut latest = None;
+            while let Some(state) = worker.try_recv() {
+                latest = Some(state);
+            }
+            if let Some(state) = latest {
                 self.apply_spotify(state);
                 self.last_spotify_poll = Instant::now();
             }
@@ -240,5 +347,15 @@ impl App {
         } else {
             self.enable_spotify();
         }
+    }
+}
+
+/// Traduce el `LoopStatus` de MPRIS al modo interno.
+fn repeat_from_mpris(value: Option<&str>) -> Option<RepeatMode> {
+    match value? {
+        "Track" | "track" | "one" => Some(RepeatMode::One),
+        "Playlist" | "playlist" | "all" => Some(RepeatMode::All),
+        "None" | "none" | "off" => Some(RepeatMode::Off),
+        _ => None,
     }
 }

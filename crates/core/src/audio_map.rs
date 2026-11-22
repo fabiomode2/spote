@@ -110,12 +110,25 @@ pub struct SongSection {
     pub energy: f32,
 }
 
+/// Nivel objetivo (RMS aproximado) para igualar el volumen entre pistas.
+/// No es un LUFS certificado, pero sí un mismo punto de referencia para todo
+/// lo que analiza el reproductor.
+pub const TARGET_RMS_DB: f32 = -16.0;
+/// Margen de pico que se deja libre al subir una pista floja.
+pub const TARGET_PEAK_DB: f32 = -1.5;
+
 /// Mapa precalculado de una canción.
 #[derive(Debug, Clone, Default)]
 pub struct SongMap {
     pub duration_ms: u64,
     pub buckets: Vec<SongBucket>,
     pub sections: Vec<SongSection>,
+    /// dB de RMS medido en la pista completa (aproximación de sonoridad).
+    pub rms_db: f32,
+    /// dB del pico absoluto de la pista.
+    pub peak_db: f32,
+    /// Ganancia recomendada para dejar esta pista al mismo nivel que las demás.
+    pub loudness_gain_db: f32,
 }
 
 impl SongMap {
@@ -135,6 +148,9 @@ impl SongMap {
             duration_ms,
             buckets,
             sections,
+            rms_db: 0.0,
+            peak_db: 0.0,
+            loudness_gain_db: 0.0,
         }
     }
 
@@ -272,6 +288,9 @@ struct Collector {
     frames: usize,
     beat: bool,
     last: AudioFrame,
+    sum_sq: f64,
+    peak: f32,
+    samples: u64,
 }
 
 impl Collector {
@@ -282,11 +301,21 @@ impl Collector {
             frames: 0,
             beat: false,
             last: AudioFrame::default(),
+            sum_sq: 0.0,
+            peak: 0.0,
+            samples: 0,
         }
     }
 
     /// Acepta cualquier longitud; lo que no complete frame queda en el analizador.
     fn push(&mut self, samples: &[f32]) {
+        for &sample in samples {
+            if sample.is_finite() {
+                self.sum_sq += f64::from(sample) * f64::from(sample);
+                self.peak = self.peak.max(sample.abs());
+                self.samples += 1;
+            }
+        }
         for chunk in samples.chunks(HOP) {
             if !self.analyzer.push(chunk) {
                 continue; // todavía no hay frame completo
@@ -314,7 +343,35 @@ impl Collector {
             self.close();
         }
         let duration_ms = total_samples * 1000 / RATE as u64;
-        SongMap::from_buckets(duration_ms, self.buckets)
+        let mut map = SongMap::from_buckets(duration_ms, self.buckets);
+        if self.samples > 0 {
+            let rms = (self.sum_sq / self.samples as f64).sqrt() as f32;
+            map.rms_db = db(rms);
+            map.peak_db = db(self.peak);
+            // Ganancia para igualar el nivel, sin subir el pico por encima del
+            // margen: primero se respeta el headroom y luego el objetivo. Un
+            // fichero en silencio no se amplifica.
+            if map.rms_db > -60.0 {
+                let target = TARGET_RMS_DB - map.rms_db;
+                let headroom = TARGET_PEAK_DB - map.peak_db;
+                map.loudness_gain_db = target.min(headroom).clamp(-18.0, 18.0);
+            } else {
+                map.loudness_gain_db = 0.0;
+            }
+            if !map.loudness_gain_db.is_finite() {
+                map.loudness_gain_db = 0.0;
+            }
+        }
+        map
+    }
+}
+
+/// dBFS de una amplitud lineal 0..1 (silencio incluido).
+fn db(amplitude: f32) -> f32 {
+    if amplitude <= 1e-7 {
+        -90.0
+    } else {
+        20.0 * amplitude.log10()
     }
 }
 
@@ -648,5 +705,26 @@ mod tests {
         assert!(map.buckets.iter().all(|b| (0.0..=1.0).contains(&b.energy)));
         assert!(map.buckets.windows(2).all(|w| w[0].at_ms < w[1].at_ms));
         assert!(!map.sections.is_empty());
+    }
+
+    #[test]
+    fn quiet_tracks_get_a_positive_leveling_gain() {
+        let quiet: Vec<f32> = (0..RATE as usize)
+            .map(|i| (std::f32::consts::TAU * 220.0 * i as f32 / RATE as f32).sin() * 0.05)
+            .collect();
+        let map = analyze_samples(&quiet);
+        assert!(
+            map.loudness_gain_db > 3.0,
+            "gain {} (rms {})",
+            map.loudness_gain_db,
+            map.rms_db
+        );
+        assert!(map.loudness_gain_db <= 18.0);
+    }
+
+    #[test]
+    fn silence_is_not_amplified() {
+        let map = analyze_samples(&vec![0.0f32; RATE as usize]);
+        assert_eq!(map.loudness_gain_db, 0.0);
     }
 }

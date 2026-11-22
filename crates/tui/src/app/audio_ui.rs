@@ -11,9 +11,61 @@ const MASTER: usize = 15;
 
 impl App {
     pub fn open_audio(&mut self) {
-        self.overlay = Overlay::Audio;
+        self.overlay = Overlay::None;
+        self.tab = Tab::Audio;
         self.audio_selected = 0;
+        self.focus = Pane::Center;
         self.needs_redraw = true;
+    }
+
+    /// Teclas de la pestaña de audio. Devuelve `true` si la tecla era suya:
+    /// así espacio (play) y el resto de atajos globales siguen funcionando.
+    pub fn handle_audio_tab_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.tab = Tab::Now;
+                self.needs_redraw = true;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.audio_selected = (self.audio_selected + 15) % 16;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.audio_selected = (self.audio_selected + 1) % 16;
+            }
+            KeyCode::Left | KeyCode::Char('h') => self.adjust_audio(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.adjust_audio(1),
+            KeyCode::Enter => self.toggle_audio_control(),
+            KeyCode::Char('0') => self.reset_audio_control(),
+            KeyCode::Char('p') => self.cycle_audio_preset(1),
+            KeyCode::Char('P') => self.cycle_audio_preset(-1),
+            KeyCode::Char('e') | KeyCode::Char('E') => {
+                self.cfg.audio.enabled = !self.cfg.audio.enabled;
+                self.audio_changed();
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.cfg.audio.eq_enabled = !self.cfg.audio.eq_enabled;
+                self.audio_changed();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => self.toggle_normalize_tracks(),
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.cfg.audio.bands = [0.0; 10];
+                self.cfg.audio.preamp_db = 0.0;
+                self.audio_changed();
+            }
+            _ => return false,
+        }
+        self.needs_redraw = true;
+        true
+    }
+
+    pub fn toggle_normalize_tracks(&mut self) {
+        self.cfg.audio.normalize_tracks = !self.cfg.audio.normalize_tracks;
+        self.audio_changed();
+        self.set_status(if self.cfg.audio.normalize_tracks {
+            "nivelación entre pistas: on"
+        } else {
+            "nivelación entre pistas: off"
+        });
     }
 
     pub(super) fn handle_audio_key(&mut self, key: KeyEvent) {
@@ -133,13 +185,19 @@ impl App {
     }
 
     pub fn apply_audio_fx(&mut self) {
-        let chain = self.cfg.audio.filter_chain();
+        let gain = if self.cfg.audio.normalize_tracks {
+            self.track_gain_db.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let fallback = self.track_gain_db.is_none();
+        let chain = self.cfg.audio.filter_chain_with_gain(gain, fallback);
         if let Some(player) = &self.player {
             player.set_audio_filters(chain.as_deref());
         }
     }
 
-    fn audio_changed(&mut self) {
+    pub(super) fn audio_changed(&mut self) {
         self.apply_audio_fx();
         self.cfg.save().ok();
         self.needs_redraw = true;
@@ -147,7 +205,7 @@ impl App {
 
     pub(super) fn handle_audio_action(&mut self, action: Action) {
         match action {
-            Action::AudioBand(index) => {
+            Action::AudioBand(index) | Action::AudioBandSet(index) => {
                 self.audio_selected = index.min(BANDS - 1);
             }
             Action::AudioPreamp => self.audio_selected = PREAMP,
@@ -170,6 +228,11 @@ impl App {
                 self.cfg.audio.enabled = !self.cfg.audio.enabled;
                 self.audio_changed();
             }
+            Action::AudioEqToggle => {
+                self.cfg.audio.eq_enabled = !self.cfg.audio.eq_enabled;
+                self.audio_changed();
+            }
+            Action::AudioNormalize => self.toggle_normalize_tracks(),
             _ => {}
         }
     }

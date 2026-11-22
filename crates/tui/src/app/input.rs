@@ -163,6 +163,12 @@ impl App {
             }
         }
 
+        // La pestaña de audio tiene su propio teclado (bandas, preamp,
+        // normalización). Las teclas globales que no consuma siguen abajo.
+        if self.tab == Tab::Audio && self.handle_audio_tab_key(key) {
+            return;
+        }
+
         let upper = key.modifiers.contains(KeyModifiers::SHIFT)
             || matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
         match key.code {
@@ -299,6 +305,10 @@ impl App {
                     self.settings_selected = self.settings_selected.saturating_sub(1);
                     return;
                 }
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.scroll_lyrics(-1);
+                    return;
+                }
                 if upper {
                     self.move_queue(-1);
                 } else if self.focus == Pane::Side {
@@ -317,6 +327,10 @@ impl App {
                         (self.settings_selected + 1).min(SettingRow::ALL.len() - 1);
                     return;
                 }
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.scroll_lyrics(1);
+                    return;
+                }
                 if upper {
                     self.move_queue(1);
                 } else if self.focus == Pane::Side {
@@ -329,8 +343,20 @@ impl App {
                     self.move_selection(1);
                 }
             }
-            KeyCode::PageUp => self.move_selection(-8),
-            KeyCode::PageDown => self.move_selection(8),
+            KeyCode::PageUp => {
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.scroll_lyrics(-6);
+                } else {
+                    self.move_selection(-8);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.scroll_lyrics(6);
+                } else {
+                    self.move_selection(8);
+                }
+            }
             KeyCode::Home if self.tab == Tab::Now => self.trim_start_here(),
             KeyCode::End if self.tab == Tab::Now => self.trim_end_here(),
             KeyCode::Backspace => self.clear_trim(),
@@ -429,12 +455,20 @@ impl App {
             }
             KeyCode::Char('t') => self.toggle_spotify(),
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                let volume = (self.now.volume + 0.05).min(1.0);
-                self.set_volume(volume);
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.adjust_lyrics_size(1);
+                } else {
+                    let volume = (self.now.volume + 0.05).min(1.0);
+                    self.set_volume(volume);
+                }
             }
             KeyCode::Char('-') => {
-                let volume = (self.now.volume - 0.05).max(0.0);
-                self.set_volume(volume);
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.adjust_lyrics_size(-1);
+                } else {
+                    let volume = (self.now.volume - 0.05).max(0.0);
+                    self.set_volume(volume);
+                }
             }
             KeyCode::Char('n') => self.next_track(),
             KeyCode::Char('p') => self.prev_track(),

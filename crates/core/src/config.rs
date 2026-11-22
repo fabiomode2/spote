@@ -292,10 +292,17 @@ impl LayoutCfg {
 #[serde(default)]
 pub struct FxCfg {
     /// `off`, `void`, `aurora`, `neural`, `glitch`, `cover` (portada en
-    /// bandas braille) o `lyrics` (letra en bandas).
+    /// bandas braille), `lyrics` (letra en bandas) o `mosaic` (portada en
+    /// mosaico detrás de toda la interfaz).
     pub ambient: String,
-    /// Opacidad del fondo ambiental (0-40 %).
+    /// Opacidad del fondo ambiental (0-50 %).
     pub ambient_opacity: u8,
+    /// Movimiento del mosaico de portada: `drift`, `rows`, `columns`, `rotate`.
+    pub mosaic_motion: String,
+    /// Velocidad del mosaico (1-10).
+    pub mosaic_speed: u8,
+    /// El mosaico salta al compás del bombo.
+    pub mosaic_beat: bool,
     /// Los bordes laten con bombo/caja/charles/voz.
     pub instrument_borders: bool,
     /// Llama/brasa en el borde inferior.
@@ -313,6 +320,9 @@ impl Default for FxCfg {
         Self {
             ambient: "cover".into(),
             ambient_opacity: 16,
+            mosaic_motion: "drift".into(),
+            mosaic_speed: 4,
+            mosaic_beat: true,
             instrument_borders: true,
             edge_flame: true,
             bloom_play: true,
@@ -475,9 +485,13 @@ mod tests {
         assert_eq!(cfg.ui.art_mode, "plain");
         assert!(!cfg.server.url.is_empty() || cfg.server.url.is_empty());
         assert!(cfg.player.volume > 0.0);
-        // El audio por defecto no procesa nada: el limitador es opt-in.
+        // Por defecto no hay limitador ni EQ, pero sí nivelación entre pistas.
         assert!(!cfg.audio.limiter);
-        assert_eq!(cfg.audio.filter_chain(), None);
+        assert!(cfg.audio.normalize_tracks);
+        assert_eq!(
+            cfg.audio.filter_chain().as_deref(),
+            Some("dynaudnorm=f=500:g=25:p=0.9:m=20")
+        );
     }
 
     #[test]
@@ -487,6 +501,12 @@ mod tests {
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.ui.art_mode, cfg.ui.art_mode);
         assert_eq!(back.ui.fps, cfg.ui.fps);
+    }
+
+    #[test]
+    fn old_audio_section_gets_leveling_enabled() {
+        let cfg: Config = toml::from_str("[audio]\nnormalizer = \"off\"\n").unwrap();
+        assert!(cfg.audio.normalize_tracks, "la nivelación debe venir activa");
     }
 
     #[test]

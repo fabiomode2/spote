@@ -585,6 +585,12 @@ fn acceptable_for(best: &Candidate, target: &MatchTarget) -> bool {
     }
 
     let known = target.duration_ms > 0 && best.duration.is_finite() && best.duration > 0.0;
+    // Un título genérico ("Regular", "Love", "Halo") con una versión de la que
+    // no sabemos la duración es una moneda al aire: puede ser otro máster del
+    // mismo artista. Mejor no enseñar nada que una letra de otra canción.
+    if target.duration_ms > 0 && !known && is_generic_title(&target.title) {
+        return false;
+    }
     if !known {
         return true;
     }
@@ -1168,6 +1174,13 @@ async fn genius_get(
 }
 
 fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Option<&'a GeniusSong> {
+    // Genius no publica duración: para títulos de una sola palabra no hay
+    // forma de distinguir dos canciones homónimas del mismo artista. Es
+    // exactamente el caso de «Regular» (dos versiones de Biberon), así que se
+    // prefiere no arriesgar una letra ajena.
+    if target.duration_ms > 0 && is_generic_title(&target.title) {
+        return None;
+    }
     let mut best: Option<(f64, &GeniusSong)> = None;
     for section in &search.response.sections {
         for hit in &section.hits {

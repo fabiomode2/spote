@@ -30,9 +30,15 @@ la propia TUI.
   `braille` y `stage`; `v` cicla y `V` los pone a pantalla completa.
 - **Letras**: LRCLIB, lrcmux, Genius y ASR local. lrcmux añade cobertura
   sincronizada; LRCLIB y Genius siguen como respaldo. Un LRC sincronizado bueno
-  no se toca; el estimado se afina solo con el audio.
+  no se toca; el estimado se afina solo con el audio. La barra de la letra
+  permite zoom (`A−`/`A+`), ajuste fino de ±100/±250 ms por pista, scroll
+  manual con rueda o flechas y volver a la línea actual. `⟳` descarta la caché
+  y busca otra letra si la que había no era la canción.
 - **Karaoke**: palabra a palabra, frases largas en dos filas y la última palabra
   se llena antes de cambiar de línea.
+- **Fondo mosaico**: la portada de la pista actual repetida en mosaico detrás
+  de toda la interfaz, con opacidad de 5–50 %, movimiento en deriva, filas,
+  columnas o giro, velocidad ajustable y saltos al compás del bombo.
 - **Búsqueda y reproducción**: Spotify y Deezer como catálogo, sin cuenta. El
   audio sale de `yt-dlp`. Si una pista no está descargada, se resuelve una URL
   y suena al momento mientras se guarda la copia local. `I` importa playlists y
@@ -46,9 +52,10 @@ la propia TUI.
 - **Mini reproductor**: `w` abre `spote-mini`, una ventana pequeña siempre
   encima con portada, espectro, progreso y controles. También se lanza con
   `spote mini`.
-- **Audio ajustable**: `A` abre el ecualizador de 10 bandas, preamp,
-  normalizador (`dynaudnorm`/`loudnorm`) y limitador. Todo se aplica en caliente
-  y se guarda en `config.toml`.
+- **Audio ajustable**: pestaña `♫ audio` con ecualizador gráfico de 10 bandas,
+  preamp, normalizador en directo y limitador. La nivelación entre pistas mide
+  el audio completo y deja todas las canciones al mismo volumen; se aplica en
+  caliente y se puede apagar desde la propia pestaña o desde ajustes.
 - **Salas**: `spoted` añade presencia, chat y cola compartida.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.
@@ -65,7 +72,7 @@ la propia TUI.
 | `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
 | `E` | editor de diseño | `Esc` | limpiar búsqueda |
-| `A` | ecualizador / dinámica | `w` | mini reproductor |
+| `A` | pestaña de audio | `w` | mini reproductor |
 | `t` | seguir el sistema (MPRIS) | `?` | ayuda |
 | `q` | salir de spote | | |
 
@@ -88,7 +95,11 @@ fps = 60               # frames de la UI (20-60)
 fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
 
 [ui.fx]
-ambient = "cover"      # off | void | aurora | neural | glitch | lyrics | cover
+ambient = "mosaic"     # off | void | aurora | neural | glitch | lyrics | cover | mosaic
+ambient_opacity = 35   # 0-50 %
+mosaic_motion = "drift" # drift | rows | columns | rotate
+mosaic_speed = 4       # 1-10
+mosaic_beat = true     # salta con el bombo
 
 [player]
 streaming = true       # resuelve YouTube y suena mientras descarga
@@ -103,8 +114,9 @@ enabled = true
 eq_enabled = true
 bands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # dB, 31 Hz … 16 kHz
 preamp_db = 0
-normalizer = "off"     # off | dynamic | loudnorm
+normalizer = "off"     # off | dynamic | loudnorm (respaldo en directo)
 normalizer_strength = 0.5
+normalize_tracks = true # iguala el volumen de todas las pistas
 limiter = false
 
 [lyrics]

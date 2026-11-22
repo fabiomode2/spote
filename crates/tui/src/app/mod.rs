@@ -52,6 +52,7 @@ pub enum Tab {
     Now,
     Search,
     Library,
+    Audio,
     Albums,
     Room,
     Settings,
@@ -83,10 +84,11 @@ impl Tab {
     // Álbumes ya no es una pestaña: los álbumes se abren desde la búsqueda,
     // la biblioteca o un artista. Se mantiene el variante interno para el
     // tracklist antiguo, pero no aparece en la navegación.
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Now,
         Tab::Search,
         Tab::Library,
+        Tab::Audio,
         Tab::Room,
         Tab::Settings,
     ];
@@ -96,6 +98,7 @@ impl Tab {
             Self::Now => "ahora",
             Self::Search => "buscar",
             Self::Library => "librería",
+            Self::Audio => "audio",
             Self::Albums => "álbumes",
             Self::Room => "sala",
             Self::Settings => "ajustes",
@@ -107,6 +110,7 @@ impl Tab {
             Self::Now => "◉",
             Self::Search => "/",
             Self::Library => "≡",
+            Self::Audio => "♫",
             Self::Albums => "▤",
             Self::Room => "◎",
             Self::Settings => "✧",
@@ -118,10 +122,11 @@ impl Tab {
             Self::Now => 0,
             Self::Search => 1,
             Self::Library => 2,
+            Self::Audio => 3,
             // `Albums` es interno y ya no está en `ALL`; se ancla a Library.
             Self::Albums => 2,
-            Self::Room => 3,
-            Self::Settings => 4,
+            Self::Room => 4,
+            Self::Settings => 5,
         }
     }
 }
@@ -178,6 +183,8 @@ pub enum Overlay {
     /// Editor de recorte de intro/outro.
     Trim,
     /// Ecualizador, preamp, normalizador y limitador.
+    /// Se conserva para el overlay antiguo; la entrada normal es la pestaña.
+    #[allow(dead_code)]
     Audio,
     /// Hay una versión nueva en GitHub.
     Update,
@@ -239,12 +246,15 @@ pub enum Action {
     VizPreset(usize),
     VizLayer(usize),
     AudioBand(usize),
+    AudioBandSet(usize),
     AudioPreamp,
     AudioNormalizer,
     AudioStrength,
     AudioLimiter,
     AudioPreset(usize),
     AudioToggle,
+    AudioEqToggle,
+    AudioNormalize,
     VizFullscreen,
     VizToggle,
     ArtMode,
@@ -273,6 +283,18 @@ pub enum Action {
     Focus(Pane),
     CenterArt,
     CenterLyrics,
+    /// Zoom de la letra: -1 compacta, +1 grande.
+    LyricsZoom(i32),
+    /// Ajuste fino del offset de la letra; va al motor de sync real.
+    LyricsSync(i64),
+    /// Devuelve el offset manual a cero.
+    LyricsSyncReset,
+    /// Scroll manual de la letra (positivo = hacia abajo).
+    LyricsScroll(i32),
+    /// Vuelve a seguir la línea que suena.
+    LyricsFollow,
+    /// Borra la caché de la letra de esta pista y la busca de nuevo.
+    LyricsRefetch,
     Help,
     Effects,
     CloseOverlay,
@@ -394,6 +416,49 @@ impl Default for NowPlaying {
     }
 }
 
+/// Estado optimista tras mandar una orden al reproductor MPRIS.
+///
+/// El sondeo del reproductor externo puede devolver durante unos cientos de
+/// milisegundos el estado *anterior* a la orden (pausa → play → pausa). Mientras
+/// este margen esté vivo se conserva lo que pidió el usuario y se aplica el
+/// resto de campos del sondeo (pista, posición, carátula) con normalidad.
+#[derive(Debug, Clone)]
+pub struct FollowExpect {
+    pub at: Instant,
+    pub playing: Option<bool>,
+    pub volume: Option<f32>,
+    pub shuffle: Option<bool>,
+    pub repeat: Option<RepeatMode>,
+    pub position: Option<(u64, Instant)>,
+}
+
+impl FollowExpect {
+    pub const GRACE: Duration = Duration::from_millis(1_500);
+
+    fn new() -> Self {
+        Self {
+            at: Instant::now(),
+            playing: None,
+            volume: None,
+            shuffle: None,
+            repeat: None,
+            position: None,
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.at.elapsed() < Self::GRACE
+    }
+
+    fn empty(&self) -> bool {
+        self.playing.is_none()
+            && self.volume.is_none()
+            && self.shuffle.is_none()
+            && self.repeat.is_none()
+            && self.position.is_none()
+    }
+}
+
 /// Entrada aplanada de la búsqueda mixta (artistas, álbumes y pistas).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEntry {
@@ -467,14 +532,6 @@ pub enum SettingRow {
     RotateOff,
     ArtMode,
     VizPreset,
-    Ambient,
-    AmbientOpacity,
-    InstrumentBorders,
-    EdgeFlame,
-    BloomPlay,
-    CleanSpill,
-    GlitchPanels,
-    LyricsSize,
     VizBackground,
     Cards,
     Vcenter,
@@ -483,6 +540,18 @@ pub enum SettingRow {
     ProgressInViz,
     BarWidth,
     ButtonPad,
+    Ambient,
+    AmbientOpacity,
+    MosaicMotion,
+    MosaicSpeed,
+    MosaicBeat,
+    InstrumentBorders,
+    EdgeFlame,
+    BloomPlay,
+    CleanSpill,
+    GlitchPanels,
+    LyricsSize,
+    NormalizeTracks,
     Audio,
     Spotify,
     LayoutEditor,
@@ -490,20 +559,12 @@ pub enum SettingRow {
 }
 
 impl SettingRow {
-    pub const ALL: [SettingRow; 25] = [
+    pub const ALL: [SettingRow; 29] = [
         Self::Rotate,
         Self::RotateSecs,
         Self::RotateOff,
         Self::ArtMode,
         Self::VizPreset,
-        Self::Ambient,
-        Self::AmbientOpacity,
-        Self::InstrumentBorders,
-        Self::EdgeFlame,
-        Self::BloomPlay,
-        Self::CleanSpill,
-        Self::GlitchPanels,
-        Self::LyricsSize,
         Self::VizBackground,
         Self::Cards,
         Self::Vcenter,
@@ -512,11 +573,86 @@ impl SettingRow {
         Self::ProgressInViz,
         Self::BarWidth,
         Self::ButtonPad,
+        Self::Ambient,
+        Self::AmbientOpacity,
+        Self::MosaicMotion,
+        Self::MosaicSpeed,
+        Self::MosaicBeat,
+        Self::InstrumentBorders,
+        Self::EdgeFlame,
+        Self::BloomPlay,
+        Self::CleanSpill,
+        Self::GlitchPanels,
+        Self::LyricsSize,
+        Self::NormalizeTracks,
         Self::Audio,
         Self::Spotify,
         Self::LayoutEditor,
         Self::Save,
     ];
+
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::Rotate | Self::RotateSecs | Self::RotateOff | Self::ArtMode => "arte",
+            Self::VizPreset
+            | Self::VizBackground
+            | Self::Cards
+            | Self::Vcenter
+            | Self::Zen
+            | Self::Thumb
+            | Self::ProgressInViz
+            | Self::BarWidth
+            | Self::ButtonPad => "interfaz",
+            Self::Ambient
+            | Self::AmbientOpacity
+            | Self::MosaicMotion
+            | Self::MosaicSpeed
+            | Self::MosaicBeat => "fondo",
+            Self::InstrumentBorders
+            | Self::EdgeFlame
+            | Self::BloomPlay
+            | Self::CleanSpill
+            | Self::GlitchPanels => "efectos",
+            Self::LyricsSize | Self::NormalizeTracks | Self::Audio => "letra y audio",
+            Self::Spotify | Self::LayoutEditor => "sistema",
+            Self::Save => "guardar",
+        }
+    }
+
+    /// Texto corto que explica qué hace el ajuste seleccionado.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Rotate => "cambia el modo de la portada cada pocos segundos",
+            Self::RotateSecs => "cada cuánto rota el modo de arte",
+            Self::RotateOff => "incluye el modo apagado en la rotación",
+            Self::ArtMode => "pixel, braille, degradado o sin portada",
+            Self::VizPreset => "efecto de la franja inferior y del fondo",
+            Self::VizBackground => "el visualizador ocupa toda la pantalla de fondo",
+            Self::Cards => "filas con tarjeta o lista compacta",
+            Self::Vcenter => "centra el bloque de paneles en vertical",
+            Self::Zen => "oculta portada y letra; deja solo el efecto",
+            Self::Thumb => "paleta, foto fiel o miniaturas apagadas",
+            Self::ProgressInViz => "la barra de progreso vive en la franja del efecto",
+            Self::BarWidth => "ancho de la barra de progreso",
+            Self::ButtonPad => "tamaño de los botones del transporte",
+            Self::Ambient => "fondo: mosaico, aurora, glitch, letra…",
+            Self::AmbientOpacity => "fuerza del fondo ambiental (5-50 %)",
+            Self::MosaicMotion => "movimiento del mosaico: deriva, filas, columnas, giro",
+            Self::MosaicSpeed => "velocidad del mosaico",
+            Self::MosaicBeat => "el mosaico salta al compás del bombo",
+            Self::InstrumentBorders => "los bordes laten con bombo, caja, charles y voz",
+            Self::EdgeFlame => "brasa que respira en el borde del efecto",
+            Self::BloomPlay => "halo del color de la portada detrás del play",
+            Self::CleanSpill => "la onda puede subir por encima de los paneles",
+            Self::GlitchPanels => "trama de glitch dentro de los paneles",
+            Self::LyricsSize => "tamaño de la letra: compacta, normal o grande",
+            Self::NormalizeTracks => "igualar el volumen de todas las canciones",
+            Self::Audio => "ecualizador, preamp, normalizador y limitador",
+            Self::Spotify => "seguir el reproductor MPRIS del sistema",
+            Self::LayoutEditor => "abrir el editor de paneles y tamaños",
+            Self::Save => "escribir la configuración ahora",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -525,14 +661,6 @@ impl SettingRow {
             Self::RotateOff => "rotación incluye off",
             Self::ArtMode => "modo de arte",
             Self::VizPreset => "efecto inferior",
-            Self::Ambient => "fondo ambiental",
-            Self::AmbientOpacity => "opacidad ambiental",
-            Self::InstrumentBorders => "bordes con instrumentos",
-            Self::EdgeFlame => "llama en el borde",
-            Self::BloomPlay => "bloom en el play",
-            Self::CleanSpill => "clean sobre paneles",
-            Self::GlitchPanels => "glitch en paneles",
-            Self::LyricsSize => "tamaño de letra",
             Self::VizBackground => "visualizador de fondo",
             Self::Cards => "tarjetas",
             Self::Vcenter => "centrar paneles",
@@ -541,6 +669,18 @@ impl SettingRow {
             Self::ProgressInViz => "barra en el visualizador",
             Self::BarWidth => "ancho de la barra",
             Self::ButtonPad => "tamaño de controles",
+            Self::Ambient => "fondo ambiental",
+            Self::AmbientOpacity => "opacidad ambiental",
+            Self::MosaicMotion => "movimiento del mosaico",
+            Self::MosaicSpeed => "velocidad del mosaico",
+            Self::MosaicBeat => "mosaico al compás",
+            Self::InstrumentBorders => "bordes con instrumentos",
+            Self::EdgeFlame => "llama en el borde",
+            Self::BloomPlay => "bloom en el play",
+            Self::CleanSpill => "clean sobre paneles",
+            Self::GlitchPanels => "glitch en paneles",
+            Self::LyricsSize => "tamaño de letra",
+            Self::NormalizeTracks => "igualar volumen entre pistas",
             Self::Audio => "ecualizador / normalizador (A)",
             Self::Spotify => "seguir sistema (MPRIS)",
             Self::LayoutEditor => "editor de diseño (E)",
@@ -556,10 +696,34 @@ impl SettingRow {
                 | Self::VizPreset
                 | Self::Ambient
                 | Self::AmbientOpacity
+                | Self::MosaicMotion
+                | Self::MosaicSpeed
                 | Self::LyricsSize
                 | Self::Thumb
                 | Self::BarWidth
                 | Self::ButtonPad
+        )
+    }
+
+    /// Interruptor booleano: la UI lo marca con ◉/○.
+    pub fn toggle(self) -> bool {
+        matches!(
+            self,
+            Self::Rotate
+                | Self::RotateOff
+                | Self::VizBackground
+                | Self::Cards
+                | Self::Vcenter
+                | Self::Zen
+                | Self::ProgressInViz
+                | Self::MosaicBeat
+                | Self::InstrumentBorders
+                | Self::EdgeFlame
+                | Self::BloomPlay
+                | Self::CleanSpill
+                | Self::GlitchPanels
+                | Self::NormalizeTracks
+                | Self::Spotify
         )
     }
 
@@ -721,6 +885,9 @@ pub struct App {
     pub map_worker: SongMapWorker,
     pub song_map: Option<SongMap>,
     pub song_map_key: String,
+    /// Ganancia de nivelación medida para la pista actual. `None` = aún sin
+    /// medir (o stream): se usa el nivelador en directo como respaldo.
+    pub track_gain_db: Option<f32>,
     pub song_intensity: f32,
     pub song_section: Option<spote_core::audio_map::SongSectionKind>,
     pub artist: Option<spote_core::spotify_api::ArtistProfile>,
@@ -746,6 +913,9 @@ pub struct App {
     pub name: String,
     pub center_focus: CenterFocus,
     pub now: NowPlaying,
+    /// Último toggle de play/pausa: evita que el autorepeat del terminal
+    /// mande pausa → play → pausa al mantener la barra espaciadora.
+    pub play_toggle_at: Instant,
     pub volume_before_mute: f32,
     /// `true` mientras el silencio es temporal; no se persiste como volumen 0.
     pub muted: bool,
@@ -831,6 +1001,13 @@ pub struct App {
     pub lyrics_scroll: Spring,
     /// Índice que marcó el último salto de scroll (para hacer snap, no easing).
     pub lyrics_scroll_index: Option<usize>,
+    /// `false` mientras el usuario explora la letra a mano; la reproducción
+    /// no le roba el scroll hasta que pulse «volver a la letra actual».
+    pub lyrics_follow: bool,
+    /// Zona de la letra en pantalla, para que la rueda sepa dónde hacer scroll.
+    pub lyrics_area: Rect,
+    /// Estado optimista del modo MPRIS (ver [`FollowExpect`]).
+    pub follow_expect: Option<FollowExpect>,
     /// Overlay temporal con la base temporal de la letra (tecla `D`).
     pub lyrics_debug: bool,
     /// (índice, progreso) del frame anterior, para avisar de cambios prematuros.
@@ -901,6 +1078,9 @@ pub struct App {
     pub viz_fx: FxClock,
     pub pulse: Pulse,
     pub intro: f32,
+    /// Reloj propio del fondo mosaico: sigue aunque el visualizador esté
+    /// apagado, para que el fondo nunca se congele.
+    pub mosaic_time: f32,
     pub hit: HitMap,
     pub hover: Option<Action>,
     pub last_click: Option<(Instant, usize)>,
@@ -973,6 +1153,7 @@ impl App {
             map_worker: SongMapWorker::start(),
             song_map: None,
             song_map_key: String::new(),
+            track_gain_db: None,
             song_intensity: 0.0,
             song_section: None,
             artist: None,
@@ -997,6 +1178,9 @@ impl App {
                 position_at: Instant::now(),
                 ..Default::default()
             },
+            play_toggle_at: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
             volume_before_mute: player_volume,
             muted: false,
             audio_selected: 0,
@@ -1060,6 +1244,9 @@ impl App {
             trim_end_ms: None,
             lyrics_scroll: Spring::new(0.0),
             lyrics_scroll_index: None,
+            lyrics_follow: true,
+            lyrics_area: Rect::default(),
+            follow_expect: None,
             lyrics_debug: false,
             lyrics_debug_last: None,
             ambient: Viz::from_preset(&cfg.ui.fx.ambient),
@@ -1115,6 +1302,7 @@ impl App {
             viz_fx: FxClock::new(fx_fps),
             pulse: Pulse::default(),
             intro: 0.0,
+            mosaic_time: 0.0,
             hit: HitMap::default(),
             hover: None,
             last_click: None,
@@ -1227,7 +1415,7 @@ impl App {
                     Vec::new()
                 }
             }
-            Tab::Search | Tab::Room | Tab::Settings => Vec::new(),
+            Tab::Search | Tab::Audio | Tab::Room | Tab::Settings => Vec::new(),
         };
         if self.tab == Tab::Library && !self.lib_query.trim().is_empty() {
             // FTS5 busca en toda la biblioteca, no solo en las primeras 500
@@ -1460,6 +1648,8 @@ impl App {
         self.load_lyrics(&track);
         self.song_map = None;
         self.song_map_key.clear();
+        self.track_gain_db = None;
+        self.apply_audio_fx();
         self.song_intensity = 0.0;
         self.song_section = None;
         self.map_worker.request(track.key.clone(), path.clone());
@@ -1540,6 +1730,8 @@ impl App {
         self.ambient_art_key.clear();
         self.song_map = None;
         self.song_map_key.clear();
+        self.track_gain_db = None;
+        self.apply_audio_fx();
         self.song_section = None;
         self.spectrum.stop();
         self.load_lyrics(&track);
@@ -1876,11 +2068,19 @@ impl App {
     }
 
     pub fn toggle_play(&mut self) {
+        // Autorepeat del teclado: el terminal puede mandar varias pulsaciones
+        // de espacio al mantener la tecla. Sin esta puerta, la pausa rebota
+        // (pausa → play → pausa) y parece que va con retraso.
+        if self.play_toggle_at.elapsed() < Duration::from_millis(180) {
+            return;
+        }
+        self.play_toggle_at = Instant::now();
         if self.follow_spotify {
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::PlayPause);
             }
             self.now.playing = !self.now.playing;
+            self.expect_follow_playing(self.now.playing);
             return;
         }
         if self.now.loading && self.pending_stream.is_some() {
@@ -1951,6 +2151,7 @@ impl App {
     fn reset_lyrics_view(&mut self) {
         self.lyrics_scroll = Spring::new(0.0);
         self.lyrics_scroll_index = None;
+        self.lyrics_follow = true;
         self.lyrics_debug_last = None;
     }
 
@@ -2088,6 +2289,7 @@ impl App {
         if self.follow_spotify {
             // El repeat es del reproductor externo: se reenvía, pero no se
             // guarda como preferencia local ni se aplica al mpv de spote.
+            self.expect_follow_repeat(mode);
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetRepeat(
                     match mode {
@@ -2117,6 +2319,7 @@ impl App {
         if self.follow_spotify {
             // Igual que repeat: manda en el reproductor seguido, no en la
             // configuración local.
+            self.expect_follow_shuffle(self.shuffle_on);
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetShuffle(self.shuffle_on));
             }
@@ -2199,6 +2402,7 @@ impl App {
     pub fn next_track(&mut self) {
         if self.follow_spotify {
             self.now.position_ms = 0;
+            self.expect_follow_position(0);
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::Next);
             }
@@ -2259,6 +2463,8 @@ impl App {
                 self.ambient_art_key.clear();
                 self.song_map = None;
                 self.song_map_key.clear();
+                self.track_gain_db = None;
+                self.apply_audio_fx();
                 self.spectrum.stop();
                 if let Some(player) = &self.player {
                     player.stop();
@@ -2289,6 +2495,7 @@ impl App {
     pub fn prev_track(&mut self) {
         if self.follow_spotify {
             self.now.position_ms = 0;
+            self.expect_follow_position(0);
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::Previous);
             }
@@ -2419,6 +2626,7 @@ impl App {
         if self.follow_spotify {
             // El transporte manda al reproductor MPRIS del sistema.
             self.now.position_ms = target;
+            self.expect_follow_position(target);
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetPosition(target));
             }
@@ -2474,6 +2682,7 @@ impl App {
             // El volumen del reproductor externo no es el volumen local de
             // spote: no se guarda, ni se aplica a mpv, ni se arrastra al
             // desactivar el modo acompañante.
+            self.expect_follow_volume(self.now.volume);
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetVolume(self.now.volume));
             }
@@ -2706,6 +2915,77 @@ impl App {
         );
     }
 
+    /// Botones A−/A+ de la letra. No es un zoom artificial del dibujo: cambia
+    /// el tamaño tipográfico de la letra (ancho de columna y aire entre líneas)
+    /// y se guarda en la config.
+    pub fn adjust_lyrics_size(&mut self, delta: i32) {
+        let size = (i32::from(self.cfg.ui.lyrics_size) + delta).clamp(0, 2) as u8;
+        self.cfg.ui.lyrics_size = size;
+        self.cfg.save().ok();
+        self.set_status(match size {
+            0 => "letra compacta",
+            2 => "letra grande",
+            _ => "letra normal",
+        });
+    }
+
+    /// Devuelve el ajuste manual a cero (también en SQLite).
+    pub fn reset_lyrics_offset(&mut self) {
+        self.lyrics_offset_ms = 0;
+        if let Some(doc) = self.lyrics.as_mut() {
+            doc.offset_ms = 0;
+        }
+        if let Some(track) = &self.now.track {
+            self.lib.set_lyrics_offset(&track.key, 0).ok();
+        }
+        self.set_status("offset de letra a 0 ms");
+    }
+
+    /// Scroll manual de la letra. Desactiva el seguimiento automático para que
+    /// la canción no devuelva la vista al verso actual mientras se explora.
+    pub fn scroll_lyrics(&mut self, delta: i32) {
+        let Some(doc) = &self.lyrics else { return };
+        if doc.lines.is_empty() {
+            return;
+        }
+        let max = doc.lines.len().saturating_sub(1) as f32;
+        self.lyrics_follow = false;
+        let base = self.lyrics_scroll.target.round();
+        let next = (base + delta as f32).clamp(0.0, max);
+        self.lyrics_scroll.set_target(next);
+        self.needs_redraw = true;
+    }
+
+    /// Vuelve a la línea que suena y reactiva el seguimiento.
+    pub fn follow_current_lyric(&mut self) {
+        self.lyrics_follow = true;
+        let index = self.lyrics_scroll_index.unwrap_or(0);
+        self.lyrics_scroll.value = index as f32;
+        self.lyrics_scroll.velocity = 0.0;
+        self.lyrics_scroll.set_target(index as f32);
+        self.needs_redraw = true;
+    }
+
+    /// Descarta la letra cacheada (p. ej. una coincidencia equivocada de
+    /// otro máster) y vuelve a preguntar a los proveedores.
+    pub fn refetch_lyrics(&mut self) {
+        let Some(track) = self.now.track.clone() else {
+            self.toast("no hay nada sonando", ToastKind::Warn);
+            return;
+        };
+        self.lib.delete_lyrics(&track.key).ok();
+        self.lib.set_lyrics_offset(&track.key, 0).ok();
+        self.lyrics = None;
+        self.lyrics_key.clear();
+        self.lyrics_status = "buscando otra letra…".into();
+        self.lyrics_loading = false;
+        self.lyrics_offset_ms = 0;
+        self.lyrics_retry.remove(&track.key);
+        self.reset_lyrics_view();
+        self.load_lyrics(&track);
+        self.toast("caché de letra borrada · buscando de nuevo", ToastKind::Info);
+    }
+
     /// Refina los tiempos de palabra estimados con el mapa de energía de la
     /// canción: las palabras caen donde hay voz/energía real, no repartidas a
     /// ciegas. Solo toca líneas sin tags LRC de palabra (`words_exact`).
@@ -2825,6 +3105,7 @@ impl App {
             self.now.position_at = Instant::now();
         }
         self.intro = (self.intro + dt * 2.5).min(1.0);
+        self.mosaic_time += dt;
         let fps = self.fps.tick();
         self.frame_ms = if fps > 0.1 { 1000.0 / fps } else { 0.0 };
         self.pulse.update(dt);
@@ -2886,15 +3167,22 @@ impl App {
         }
         if let Some(doc) = &self.lyrics {
             if let Some(index) = doc.index_at(self.display_position_ms()) {
-                if self.lyrics_scroll_index != Some(index) {
+                if self.lyrics_follow {
+                    if self.lyrics_scroll_index != Some(index) {
+                        self.lyrics_scroll_index = Some(index);
+                        // El resaltado cambia al instante: si el muelle persigue
+                        // el índice, la línea nueva se pintaba mientras la
+                        // anterior seguía en el centro y se percibía como cambio
+                        // a destiempo.
+                        self.lyrics_scroll.value = index as f32;
+                        self.lyrics_scroll.velocity = 0.0;
+                    }
+                    self.lyrics_scroll.set_target(index as f32);
+                } else {
+                    // Guarda por dónde va la canción para poder volver con un
+                    // clic, pero sin mover la vista del usuario.
                     self.lyrics_scroll_index = Some(index);
-                    // El resaltado cambia al instante: si el muelle persigue el
-                    // índice, la línea nueva se pintaba mientras la anterior
-                    // seguía en el centro y se percibía como cambio a destiempo.
-                    self.lyrics_scroll.value = index as f32;
-                    self.lyrics_scroll.velocity = 0.0;
                 }
-                self.lyrics_scroll.set_target(index as f32);
             }
         }
         self.lyrics_scroll.update(dt);
@@ -2952,6 +3240,7 @@ impl App {
             || !self.lyrics_scroll.settled()
             || self.pulse.value > 0.0
             || (self.art_rotate && self.now.track.is_some())
+            || self.cfg.ui.fx.ambient == "mosaic"
             || self.downloads.iter().any(DownloadInfo::active)
             || self.search.loading
             || self.album_page_loading
@@ -3455,8 +3744,10 @@ impl App {
                     }
                     self.song_intensity = map.intensity_at(self.now.position_ms);
                     self.song_section = map.section_at(self.now.position_ms).map(|s| s.kind);
+                    self.track_gain_db = Some(map.loudness_gain_db);
                     self.song_map = Some(map);
                     self.song_map_key = key;
+                    self.apply_audio_fx();
                     self.apply_auto_lyrics_offset();
                     self.refine_lyrics_words();
                 }
@@ -4182,7 +4473,7 @@ impl App {
                 Some(row) => self.toggle_favorite_key(&row.track.key),
                 None => self.toast("no hay ninguna pista seleccionada", ToastKind::Warn),
             },
-            Tab::Room | Tab::Settings => self.toast(
+            Tab::Audio | Tab::Room | Tab::Settings => self.toast(
                 "favorita: selecciona una pista en buscar o librería",
                 ToastKind::Warn,
             ),
@@ -4713,11 +5004,13 @@ mod tests {
     #[test]
     fn tab_cycles_in_both_directions() {
         assert_eq!(Tab::Now.next(), Tab::Search);
-        assert_eq!(Tab::Library.next(), Tab::Room);
+        assert_eq!(Tab::Library.next(), Tab::Audio);
+        assert_eq!(Tab::Audio.next(), Tab::Room);
         assert_eq!(Tab::Room.next(), Tab::Settings);
         assert_eq!(Tab::Settings.next(), Tab::Now);
         assert_eq!(Tab::Now.prev(), Tab::Settings);
         assert_eq!(Tab::Settings.prev(), Tab::Room);
+        assert_eq!(Tab::Room.prev(), Tab::Audio);
     }
 
     #[test]

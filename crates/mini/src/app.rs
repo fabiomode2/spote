@@ -44,6 +44,10 @@ pub struct MiniApp {
     seek_preview: Option<u64>,
     seek_sent_at: f64,
 
+    /// Estado de play/pausa optimista mientras llega el siguiente snapshot.
+    play_hold_until: f64,
+    play_local: bool,
+
     volume_local: f32,
     volume_hold_until: f64,
     volume_sent_at: f64,
@@ -74,6 +78,8 @@ impl MiniApp {
             last_frame: 0.0,
             seek_preview: None,
             seek_sent_at: 0.0,
+            play_hold_until: 0.0,
+            play_local: false,
             volume_local,
             volume_hold_until: 0.0,
             volume_sent_at: 0.0,
@@ -102,12 +108,20 @@ impl MiniApp {
             self.smooth = [0.0; MINI_BAND_COUNT];
             self.peaks = [0.0; MINI_BAND_COUNT];
             self.seek_preview = None;
+            self.play_hold_until = 0.0;
         }
         self.snapshot_at = now;
+        let optimistic_play = now < self.play_hold_until;
         if now >= self.volume_hold_until {
             self.volume_local = clean_volume(snapshot.volume);
         }
+        let local_playing = self.play_local;
         self.snapshot = snapshot;
+        if optimistic_play {
+            self.snapshot.playing = local_playing;
+        } else {
+            self.play_local = self.snapshot.playing;
+        }
     }
 
     fn ensure_art(&mut self, ctx: &egui::Context) {
@@ -646,6 +660,10 @@ impl MiniApp {
             })
             .clicked()
         {
+            self.play_local = !self.snapshot.playing;
+            self.play_hold_until = now + 0.9;
+            self.snapshot.playing = self.play_local;
+            self.snapshot_at = now;
             self.link.send(MiniCommand::PlayPause);
         }
 

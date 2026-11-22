@@ -60,7 +60,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             // el alto disponible. La lista conserva su columna a la izquierda.
             Tab::Search => 10,
             Tab::Library | Tab::Room => 3,
-            Tab::Albums | Tab::Settings => 0,
+            Tab::Audio | Tab::Albums | Tab::Settings => 0,
         }
     };
     let layout = Layout::compute(
@@ -89,13 +89,18 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         app.audio.kick_pulse,
         app.song_intensity,
     );
+    // Mosaico de portada: va detrás de absolutamente todo. Se pinta antes que
+    // los paneles para que estos solo lo dejen entrever con su transparencia.
+    if app.cfg.ui.fx.ambient == "mosaic" {
+        draw_mosaic_cover(app, buf, area, &pal);
+    }
     // Fondo ambiental: un efecto ruidoso (void/neural/glitch/aurora) a baja
     // opacidad detrás de los paneles. Los paneles son translúcidos, así que se
     // lee a través de ellos sin quitar legibilidad.
-    let fx_opacity = app.cfg.ui.fx.ambient_opacity.min(40) as f32 / 100.0;
+    let fx_opacity = app.cfg.ui.fx.ambient_opacity.min(50) as f32 / 100.0;
     if fx_opacity > 0.001 && !viz_fullscreen {
         match app.cfg.ui.fx.ambient.as_str() {
-            "off" | "cover" | "lyrics" => {}
+            "off" | "cover" | "lyrics" | "mosaic" => {}
             _ => {
                 let w = (area.width / 2).max(12);
                 let h = (area.height / 2).max(6);
@@ -160,6 +165,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         Tab::Now => draw_now(app, buf, &layout, &pal),
         Tab::Search => draw_search(app, buf, &layout, &pal),
         Tab::Library => draw_library(app, buf, &layout, &pal),
+        Tab::Audio => draw_audio_tab(app, buf, &layout, &pal),
         Tab::Albums => draw_albums(app, buf, &layout, &pal),
         Tab::Room => draw_room(app, buf, &layout, &pal),
         Tab::Settings => draw_settings(app, buf, &layout, &pal),
@@ -196,6 +202,35 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     }
     draw_toasts(app, buf, &layout, &pal);
     draw_overlay(app, buf, &layout, &pal);
+    seal_frame(buf, &pal);
+}
+
+/// Cierra el frame: rellena cualquier celda que se haya quedado con el estilo
+/// por defecto y fuerza el diff de los bordes. Algunos terminales dejan un
+/// píxel/celda sin pintar en la primera fila tras limpiar o mover imágenes
+/// Kitty; forzar esa fila evita el hueco persistente.
+fn seal_frame(buf: &mut Buffer, pal: &Palette) {
+    let area = *buf.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let bg = color(pal.bg_deep);
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            if matches!(cell.bg, Color::Reset) {
+                cell.set_bg(bg);
+            }
+            if matches!(cell.fg, Color::Reset) {
+                cell.set_fg(bg);
+            }
+            if y == area.y || y == area.y + area.height - 1 || x == area.x || x == area.x + area.width - 1 {
+                cell.diff_option = ratatui::buffer::CellDiffOption::AlwaysUpdate;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +514,113 @@ fn text_at(buf: &mut Buffer, rect: Rect, text: impl Into<String>, s: Style, alig
     line_at(buf, rect, vec![Span::styled(text.into(), s)], align);
 }
 
+/// Portada en mosaico detrás de toda la interfaz. Cada celda muestrea la
+/// portada repetida; la opacidad, el movimiento y el salto al bombo salen de
+/// `[ui.fx]`. Se pinta antes de los paneles, así que cualquier texto sigue
+/// encima y legible.
+fn draw_mosaic_cover(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
+    let opacity = (app.cfg.ui.fx.ambient_opacity.clamp(5, 50) as f32 / 100.0).clamp(0.05, 0.50);
+    if app.art_size_hint.0 < 4 || app.art_size_hint.1 < 2 {
+        // En pestañas sin portada grande (biblioteca, ajustes) no hay quien
+        // fije el tamaño; el mosaico pide su propia miniatura.
+        app.set_art_size_hint(48, 24);
+    }
+    app.ensure_art();
+    let Some(art) = app.art.as_ref().or(app.ambient_art.as_ref()) else {
+        return;
+    };
+    if art.is_empty() {
+        return;
+    }
+    let area_buf = *buf.area();
+    let clip = area.intersection(area_buf);
+    if clip.width == 0 || clip.height == 0 {
+        return;
+    }
+    let speed = app.cfg.ui.fx.mosaic_speed.clamp(1, 10) as f32 * 0.11;
+    let t = app.mosaic_time * speed;
+    let motion = app.cfg.ui.fx.mosaic_motion.as_str();
+    let beat = if app.cfg.ui.fx.mosaic_beat {
+        app.audio.kick_pulse.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // Al compás el mosaico da un salto entero de celda; entre golpes sigue
+    // desplazándose poco a poco.
+    let jump_x = (beat * 2.5).round() as i32;
+    let jump_y = (beat * 1.4).round() as i32;
+    let tile_h = (clip.height as f32 / 4.5).clamp(5.0, 12.0);
+    let tile_w = tile_h * 2.0;
+    let cx = clip.x as f32 + clip.width as f32 / 2.0;
+    let cy = clip.y as f32 + clip.height as f32 / 2.0;
+    let angle = if motion == "rotate" {
+        0.025 + t * 0.055
+    } else {
+        0.0
+    };
+    let (sin, cos) = angle.sin_cos();
+    let width = area_buf.width as usize;
+    let alpha = (opacity * (1.0 + beat * 0.55)).min(0.58);
+
+    for y in clip.y..clip.y + clip.height {
+        let start = (y - area_buf.y) as usize * width + (clip.x - area_buf.x) as usize;
+        for (offset, cell) in buf.content[start..start + clip.width as usize]
+            .iter_mut()
+            .enumerate()
+        {
+            let x = clip.x + offset as u16;
+            let mut gx = x as f32;
+            let mut gy = y as f32;
+            if angle != 0.0 {
+                let dx = gx - cx;
+                let dy = gy - cy;
+                gx = cx + dx * cos - dy * sin;
+                gy = cy + dx * sin + dy * cos;
+            }
+            let mut u = gx / tile_w;
+            let mut v = gy / tile_h;
+            match motion {
+                "rows" => {
+                    let row = (gy / tile_h).floor() as i32;
+                    u += t * (0.45 + (row.rem_euclid(3) as f32) * 0.35)
+                        * if row.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
+                    v += t * 0.08;
+                }
+                "columns" => {
+                    let column = (gx / tile_w).floor() as i32;
+                    v += t * (0.45 + (column.rem_euclid(3) as f32) * 0.30)
+                        * if column.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
+                    u += t * 0.06;
+                }
+                "rotate" => {
+                    u += t * 0.10;
+                    v += t * 0.06;
+                }
+                _ => {
+                    u += t * 0.34;
+                    v += t * 0.13;
+                }
+            }
+            u += jump_x as f32 / tile_w;
+            v += jump_y as f32 / tile_h;
+            let sx = ((u.rem_euclid(1.0)) * art.w as f32) as u16;
+            let sy = ((v.rem_euclid(1.0)) * art.h as f32) as u16;
+            let Some(src) = art.cell(sx.min(art.w.saturating_sub(1)), sy.min(art.h.saturating_sub(1))) else {
+                continue;
+            };
+            let under = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => pal.bg_deep,
+            };
+            let toned = mix_oklab(src.fg, pal.primary, 0.18);
+            let mixed = mix(under, toned, alpha);
+            cell.set_symbol(" ");
+            cell.set_fg(color(mixed));
+            cell.set_bg(color(mixed));
+        }
+    }
+}
+
 fn background(
     buf: &mut Buffer,
     area: Rect,
@@ -546,7 +688,7 @@ fn ambient_tint(app: &App, buf: &mut Buffer, rect: Rect, strength: f32) {
     if layer.w == 0 || layer.h == 0 || strength <= 0.0 {
         return;
     }
-    let opacity = app.cfg.ui.fx.ambient_opacity.min(40) as f32 / 40.0;
+    let opacity = app.cfg.ui.fx.ambient_opacity.min(50) as f32 / 50.0;
     if opacity <= 0.0 {
         return;
     }
@@ -608,16 +750,19 @@ fn panel(
         None
     };
     if opaque {
+        let under = app
+            .map(|app| app.cfg.ui.fx.ambient.as_str() == "mosaic")
+            .unwrap_or(false);
         fill_soft(
             buf,
             rect,
             fill_color,
-            if soft_background(pal) { 0.92 } else { 1.0 },
+            if under { 0.86 } else if soft_background(pal) { 0.92 } else { 1.0 },
             pal.bg,
         );
         if let Some(app) = app {
             let mode = app.cfg.ui.fx.ambient.as_str();
-            if !matches!(mode, "off" | "cover" | "lyrics") {
+            if !matches!(mode, "off" | "cover" | "lyrics" | "mosaic") {
                 let strength = if app.cfg.ui.fx.glitch_panels {
                     0.08
                 } else {
@@ -808,5 +953,19 @@ mod tests {
         put(&mut buf, 2, 0, "hola", Color::Red, None);
         assert_eq!(buf[(2, 0)].symbol(), "h");
         assert_eq!(buf[(3, 0)].symbol(), "o");
+    }
+
+    #[test]
+    fn seal_frame_leaves_no_default_cells() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 6, 3));
+        seal_frame(&mut buf, &Palette::dark());
+        for y in 0..3 {
+            for x in 0..6 {
+                assert!(
+                    !matches!(buf[(x, y)].bg, Color::Reset),
+                    "celda {x},{y} sin fondo"
+                );
+            }
+        }
     }
 }
