@@ -3,7 +3,7 @@
 //! yt-dlp es un binario externo a propósito: rompe cada pocas semanas y se
 //! actualiza sin recompilar spote. Un solo worker evita los rate limits.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -16,6 +16,7 @@ use serde::Deserialize;
 use spote_protocol::TrackRef;
 
 use crate::library::{Library, SourceStatus};
+use crate::stream::ytdlp_bin;
 use crate::util;
 
 #[derive(Debug, Clone)]
@@ -192,6 +193,10 @@ pub struct Downloader {
     tx: Sender<Job>,
     events: Receiver<DownloadEvent>,
     children: Arc<Mutex<Vec<u32>>>,
+    /// Claves con una descarga directa aceptada y todavía sin terminar. Evita
+    /// descargar dos veces la misma pista (stream cache + descarga explícita).
+    /// Los `Resolve` no se deduplican: son el fallback si la fuente falló.
+    inflight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Downloader {
@@ -200,14 +205,17 @@ impl Downloader {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let children: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::clone(&children);
+        let inflight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let worker_inflight = Arc::clone(&inflight);
         std::thread::Builder::new()
             .name("spote-downloader".into())
-            .spawn(move || worker(job_rx, event_tx, shared))
+            .spawn(move || worker(job_rx, event_tx, shared, worker_inflight))
             .expect("no se pudo arrancar el downloader");
         Self {
             tx: job_tx,
             events: event_rx,
             children,
+            inflight,
         }
     }
 
@@ -219,11 +227,21 @@ impl Downloader {
     }
 
     pub fn download(&self, key: &str, source: DownloadSource, out: PathBuf) {
-        let _ = self.tx.send(Job::Download {
-            key: key.to_string(),
-            source,
-            out,
-        });
+        let key = key.to_string();
+        if !begin_job(&self.inflight, &key) {
+            return;
+        }
+        if self
+            .tx
+            .send(Job::Download {
+                key: key.clone(),
+                source,
+                out,
+            })
+            .is_err()
+        {
+            finish_job(&self.inflight, &key);
+        }
     }
 
     /// Resuelve contra yt-dlp con matching estricto y descarga la mejor fuente.
@@ -237,6 +255,9 @@ impl Downloader {
         duration_ms: u64,
         out: PathBuf,
     ) {
+        // Un `Resolve` busca una fuente nueva y no se deduplica: si la copia
+        // de caché de un stream está en vuelo y mpv falla, este trabajo es el
+        // fallback que debe ejecutarse igualmente.
         let _ = self.tx.send(Job::Resolve {
             key: key.to_string(),
             artist: artist.to_string(),
@@ -282,15 +303,40 @@ impl Drop for Downloader {
     }
 }
 
-fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mutex<Vec<u32>>>) {
+/// Marca una clave como descargándose. `false` = ya hay un trabajo para ella.
+fn begin_job(inflight: &Mutex<HashSet<String>>, key: &str) -> bool {
+    inflight
+        .lock()
+        .map(|mut keys| keys.insert(key.to_string()))
+        .unwrap_or(true)
+}
+
+fn finish_job(inflight: &Mutex<HashSet<String>>, key: &str) {
+    if let Ok(mut keys) = inflight.lock() {
+        keys.remove(key);
+    }
+}
+
+fn worker(
+    jobs: Receiver<Job>,
+    events: Sender<DownloadEvent>,
+    children: Arc<Mutex<Vec<u32>>>,
+    inflight: Arc<Mutex<HashSet<String>>>,
+) {
     let mut queue: VecDeque<Job> = VecDeque::new();
     loop {
-        // Prioriza el trabajo en curso; recoge todo lo que haya.
+        // Prioriza el trabajo en curso; recoge todo lo que haya. `Quit` corta
+        // de inmediato: al cerrar no se procesan descargas pendientes ni se
+        // spawnean yt-dlp nuevos después de matar los hijos.
         while let Ok(job) = jobs.try_recv() {
+            if matches!(job, Job::Quit) {
+                return;
+            }
             queue.push_back(job);
         }
         let Some(job) = queue.pop_front() else {
             match jobs.recv_timeout(std::time::Duration::from_millis(80)) {
+                Ok(Job::Quit) => return,
                 Ok(job) => queue.push_back(job),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => return,
@@ -315,6 +361,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
             }
             Job::Download { key, source, out } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
+                let done_key = key.clone();
                 match download(&key, &source, &out, &events, &children) {
                     Ok(path) => {
                         emit_progress(&events, &key, DownloadStage::Done, 100.0);
@@ -327,6 +374,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                         });
                     }
                 }
+                finish_job(&inflight, &done_key);
             }
             Job::Resolve {
                 key,
@@ -336,35 +384,15 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 out,
             } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
-                // yt-dlp falla a menudo con "artista título" cuando el artista
-                // usa un alias o el título lleva una falta; se prueban las
-                // variantes de más a menos específica antes de rendirse.
-                let mut queries = vec![format!("{artist} {title}")];
-                if !title.trim().is_empty() {
-                    queries.push(title.trim().to_string());
-                }
-                if !artist.trim().is_empty() && !title.trim().is_empty() {
-                    queries.push(format!("{title} {artist}"));
-                }
-                queries.dedup();
-                let mut best = None;
-                for query in queries {
-                    match search(&query) {
-                        Ok(items) => {
-                            if let Some(item) =
-                                crate::catalog::pick_best(&items, &artist, &title, duration_ms)
-                            {
-                                best = Some(item.clone());
-                                break;
-                            }
-                        }
-                        Err(_) => {}
-                    }
-                }
-                let result = best
-                    .ok_or_else(|| anyhow!("sin match fiable para «{artist} {title}»"))
-                    .and_then(|best| {
-                        let source = DownloadSource::Url(best.url.clone());
+                // Mismo matcher estricto que la reproducción: variantes de
+                // consulta, rechazo de covers/directos y duración. Antes el
+                // Downloader aceptaba coincidencias que el stream rechazaba.
+                let result = crate::stream::find_video_id(&artist, &title, duration_ms)
+                    .map_err(|err| anyhow!("{err:#}"))
+                    .and_then(|id| {
+                        let source = DownloadSource::Url(format!(
+                            "https://www.youtube.com/watch?v={id}"
+                        ));
                         download(&key, &source, &out, &events, &children)
                     });
                 match result {
@@ -381,7 +409,7 @@ fn worker(jobs: Receiver<Job>, events: Sender<DownloadEvent>, children: Arc<Mute
                 }
             }
             Job::Update => {
-                let output = Command::new("yt-dlp").arg("-U").output();
+                let output = Command::new(ytdlp_bin()).arg("-U").output();
                 let message = match output {
                     Ok(output) => {
                         let text = String::from_utf8_lossy(&output.stdout).to_string()
@@ -422,14 +450,17 @@ struct SearchEntry {
 }
 
 fn search(query: &str) -> Result<Vec<SearchItem>> {
-    let output = Command::new("yt-dlp")
+    let output = Command::new(ytdlp_bin())
         .args([
             "--flat-playlist",
             "--dump-single-json",
             "--no-warnings",
             "--no-playlist",
+            "--socket-timeout",
+            "15",
             "--extractor-args",
             "youtube:player_client=default,web_safari",
+            "--",
             &format!("ytsearch12:{query}"),
         ])
         .stdin(Stdio::null())
@@ -569,11 +600,14 @@ fn download(
     let name = util::slug(key, 80);
     let name = if name.is_empty() { "track".to_string() } else { name };
     let target = out_dir.join(name);
+    // El `media_dir` del usuario puede contener `%`: yt-dlp lo interpreta
+    // como plantilla. Se escapa el prefijo y se deja solo el `%(ext)s` real.
+    let template_base = target.display().to_string().replace('%', "%%");
 
-    let mut command = Command::new("yt-dlp");
+    let mut command = Command::new(ytdlp_bin());
     command
         .arg("-f")
-        .arg("bestaudio")
+        .arg("bestaudio/best")
         .arg("-x")
         .arg("--audio-format")
         .arg("opus")
@@ -582,6 +616,8 @@ fn download(
         .arg("--no-playlist")
         .arg("--newline")
         .arg("--no-warnings")
+        .arg("--socket-timeout")
+        .arg("15")
         .arg("--embed-metadata")
         .arg("--write-thumbnail")
         .arg("--convert-thumbnails")
@@ -594,9 +630,12 @@ fn download(
              %(progress.total_bytes_estimate)s %(progress.total_bytes)s",
         )
         .arg("-o")
-        .arg(format!("{}.%(ext)s", target.display()))
+        .arg(format!("{template_base}.%(ext)s"))
         .arg("-o")
-        .arg(format!("thumbnail:{}.%(ext)s", target.display()))
+        .arg(format!("thumbnail:{template_base}.%(ext)s"))
+        // `--` corta las opciones: una URL que empiece por `-` no puede
+        // convertirse en un flag de yt-dlp.
+        .arg("--")
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -941,6 +980,16 @@ fn file_size(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inflight_keys_are_deduplicated_until_finished() {
+        let inflight = Mutex::new(HashSet::new());
+        assert!(begin_job(&inflight, "sha1:a"));
+        assert!(!begin_job(&inflight, "sha1:a"));
+        assert!(begin_job(&inflight, "sha1:b"));
+        finish_job(&inflight, "sha1:a");
+        assert!(begin_job(&inflight, "sha1:a"));
+    }
 
     #[test]
     fn splits_topic_channels() {

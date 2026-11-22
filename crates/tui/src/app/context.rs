@@ -3,6 +3,51 @@
 use super::*;
 
 impl App {
+    /// Detiene la pista si es la actual y, en cualquier caso, la saca de
+    /// contexto, cola e historial. Antes una pista no actual seguía viva en
+    /// esas listas y podía volver a descargarse al pulsar siguiente.
+    fn stop_current_if_key(&mut self, key: &str) {
+        let is_current = self.now.track.as_ref().map(|track| track.key.as_str()) == Some(key);
+        self.play_context.retain(|entry| entry.track.key != key);
+        self.queue.retain(|entry| entry.track.key != key);
+        self.history.retain(|(track, _)| track.key != key);
+        if self.context_index >= self.play_context.len() {
+            self.context_index = self.play_context.len().saturating_sub(1);
+        }
+        if self.queue_selected >= self.queue.len() {
+            self.queue_selected = self.queue.len().saturating_sub(1);
+        }
+        if !is_current {
+            return;
+        }
+        if let Some(player) = &self.player {
+            player.stop();
+        }
+        self.streaming = false;
+        self.stream_cache_pending = None;
+        self.stream_resolver.cancel();
+        self.pending_stream = None;
+        self.pending_play = None;
+        self.pending_seek_ms = None;
+        self.pending_seek_key = None;
+        self.now.track = None;
+        self.now.path = None;
+        self.now.position_ms = 0;
+        self.now.position_unknown = false;
+        self.now.duration_ms = 0;
+        self.now.stream_duration_ms = 0;
+        self.now.playing = false;
+        self.now.loading = false;
+        self.now.ended = false;
+        self.lyrics = None;
+        self.lyrics_key.clear();
+        self.lyrics_status.clear();
+        self.lyrics_loading = false;
+        self.art = None;
+        self.art_key.clear();
+        self.spectrum.stop();
+    }
+
     pub(super) fn open_context(&mut self, action: &Action) {
         let menu = match action {
             Action::SelectRow(index) => self
@@ -227,12 +272,8 @@ impl App {
             ContextAction::RemoveLibrary => {
                 match self.lib.delete_track(&menu.key) {
                     Ok(_) => {
+                        self.stop_current_if_key(&menu.key);
                         self.toast("pista quitada de la biblioteca", ToastKind::Ok);
-                        if self.now.track.as_ref().is_some_and(|t| t.key == menu.key) {
-                            self.now.track = None;
-                            self.now.path = None;
-                            self.art = None;
-                        }
                         self.refresh_library();
                     }
                     Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
@@ -245,6 +286,7 @@ impl App {
                         Ok(()) => {
                             let cover = path.with_extension("jpg");
                             let _ = std::fs::remove_file(cover);
+                            self.stop_current_if_key(&menu.key);
                             self.lib.delete_track(&menu.key).ok();
                             self.toast("audio borrado del disco", ToastKind::Ok);
                             self.refresh_library();

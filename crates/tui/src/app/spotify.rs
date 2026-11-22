@@ -1,61 +1,114 @@
-//! Modo acompañante de Spotify por MPRIS.
+//! Modo acompañante de cualquier reproductor MPRIS del sistema.
 use super::*;
 
 impl App {
     pub fn enable_spotify(&mut self) {
         if self.spotify_worker.is_none() {
-            self.spotify_worker = Some(SpotifyWorker::start());
+            self.spotify_worker = Some(SystemMediaWorker::start());
         }
         self.follow_spotify = true;
+        self.cfg.ui.follow_spotify = true;
+        self.cfg.save().ok();
         self.spotify_warned = false;
         self.last_spotify_poll = Instant::now();
-        // El modo acompañante manda: nada de audio local sonando por debajo.
+        // El modo acompañante manda: nada de audio local sonando por debajo,
+        // ni streams/descargas pendientes que puedan arrancarlo después.
+        self.clear_followed_track();
         if let Some(player) = &self.player {
-            player.pause(true);
+            player.stop();
         }
-        self.now.playing = false;
         self.spectrum.decode_system();
         self.toast(
-            "siguiendo Spotify (transporte y audio del cliente oficial)",
+            "siguiendo el reproductor MPRIS del sistema",
             ToastKind::Info,
         );
     }
 
     pub fn disable_spotify(&mut self) {
         self.follow_spotify = false;
+        self.cfg.ui.follow_spotify = false;
+        self.cfg.save().ok();
         self.spotify_worker = None;
         self.spectrum.stop();
-        // Vuelve el modo local limpio: fuera la pista remota.
+        // Vuelve el modo local limpio: fuera la pista remota y fuera el
+        // volumen/shuffle/repeat que impuso el reproductor seguido.
         self.spotify = None;
-        self.now.track = None;
-        self.now.path = None;
-        self.now.position_ms = 0;
-        self.now.playing = false;
-        self.lyrics = None;
-        self.lyrics_key.clear();
-        self.lyrics_status.clear();
-        self.art = None;
-        self.art_key.clear();
-        self.art_variants.clear();
-        if let Some(row) = self.selected_row().cloned() {
-            if let Some(path) = row.path {
-                self.play_local(row.track, Some(path));
-            }
+        self.clear_followed_track();
+        self.now.volume = self.cfg.player.volume.clamp(0.0, 1.0);
+        self.muted = false;
+        self.shuffle_on = self.cfg.playback.shuffle;
+        self.repeat_mode = match self.cfg.playback.repeat.as_str() {
+            "all" => RepeatMode::All,
+            "one" => RepeatMode::One,
+            _ => RepeatMode::Off,
+        };
+        self.loop_file = self.repeat_mode == RepeatMode::One;
+        if let Some(player) = &self.player {
+            player.set_volume(self.now.volume);
+            player.set_loop(self.loop_file);
         }
         self.toast(
-            "modo Spotify desactivado · vuelve el modo local",
+            "modo sistema desactivado · vuelve el modo local",
             ToastKind::Info,
         );
     }
 
-    pub(super) fn apply_spotify(&mut self, state: SpotifyState) {
+    /// Deja la UI vacía cuando el reproductor seguido cierra o pierde la
+    /// pista. Mantiene `follow_spotify` activo para que el worker reconecte.
+    fn clear_followed_track(&mut self) {
+        self.pending_stream = None;
+        self.pending_play = None;
+        self.pending_seek_ms = None;
+        self.stream_autoplay = true;
+        self.streaming = false;
+        self.stream_cache_pending = None;
+        self.stream_resolver.cancel();
+        self.now.track = None;
+        self.now.path = None;
+        self.now.position_ms = 0;
+        self.now.duration_ms = 0;
+        self.now.position_unknown = false;
+        self.now.stream_duration_ms = 0;
+        self.now.playing = false;
+        self.now.loading = false;
+        self.now.ended = false;
+        self.now.message.clear();
+        self.lyrics = None;
+        self.lyrics_key.clear();
+        self.lyrics_status.clear();
+        self.lyrics_loading = false;
+        self.lyrics_auto_offset = None;
+        self.reset_lyrics_view();
+        self.art = None;
+        self.art_key.clear();
+        self.art_variants.clear();
+        self.art_png = None;
+        self.art_png_key.clear();
+        self.ambient_art = None;
+        self.ambient_art_key.clear();
+        self.song_map = None;
+        self.song_map_key.clear();
+        self.spectrum.stop();
+    }
+
+    pub(super) fn apply_spotify(&mut self, state: SystemMediaState) {
+        if state.track.is_none() {
+            if self.now.track.is_some() {
+                self.clear_followed_track();
+                self.spectrum.stop();
+            }
+            self.spotify = Some(state);
+            return;
+        }
         if let Some(mut track) = state.track.clone() {
             // Si la pista está descargada, usa SU clave (y su portada local):
             // MPRIS da otro id y si no, la letra/arte no encuentran nada.
+            let mut matched_local = false;
             if let Ok(Some(row)) =
                 self.lib
                     .find_by_meta(&track.artist, &track.title, track.duration_ms)
             {
+                matched_local = true;
                 track.key = row.track.key.clone();
                 if track.album.is_none() {
                     track.album = row.track.album.clone();
@@ -71,21 +124,37 @@ impl App {
             // cada sondeo, la posición retrocede y la letra se queda clavada.
             // Solo se resincroniza cuando la deriva es de verdad.
             let drift = state.position_ms as i64 - self.now.position_ms as i64;
-            if changed || drift.abs() > 1500 || drift < -700 {
+            let was_unknown = self.now.position_unknown;
+            let was_playing = self.now.playing;
+            if changed
+                || (state.position_known && (was_unknown || was_playing != state.playing))
+            {
+                self.now.position_ms = state.position_ms;
+                self.now.position_seen_ms = state.position_ms;
+                self.now.position_at = Instant::now();
+            } else if state.position_known && (drift.abs() > 1500 || drift < -700) {
                 self.now.position_ms = state.position_ms;
                 self.now.position_seen_ms = state.position_ms;
                 self.now.position_at = Instant::now();
             }
             self.now.playing = state.playing;
+            self.now.position_unknown = !state.position_known;
             self.now.path = None;
             if changed {
                 self.lyrics = None;
                 self.lyrics_status.clear();
                 self.lyrics_key.clear();
+                // Una petición de la pista anterior no debe bloquear la nueva:
+                // el worker descarta por key y el flag se queda colgado.
+                self.lyrics_loading = false;
+                self.lyrics_auto_offset = None;
+                self.reset_lyrics_view();
                 self.art = None;
                 self.art_key.clear();
                 self.lyrics_offset_ms = self.lib.lyrics_offset(&track.key).unwrap_or(0);
-                self.lib.upsert_track(&track).ok();
+                if !matched_local {
+                    self.lib.upsert_track(&track).ok();
+                }
                 let has_local = self
                     .lib
                     .art_path(&track.key)
@@ -105,6 +174,23 @@ impl App {
                 self.load_lyrics(&track);
             }
         }
+        if let Some(volume) = state.volume {
+            self.now.volume = volume.clamp(0.0, 1.0);
+        }
+        // El estado de shuffle/repeat lo manda el reproductor externo. Se
+        // refleja en la UI/mini/MPRIS, pero no se guarda como preferencia
+        // local: al desactivar follow se restaura la de spote.
+        if let Some(shuffle) = state.shuffle {
+            self.shuffle_on = shuffle;
+        }
+        if let Some(repeat) = &state.repeat {
+            self.repeat_mode = match repeat.as_str() {
+                "Track" | "track" | "one" => RepeatMode::One,
+                "Playlist" | "playlist" | "all" => RepeatMode::All,
+                _ => RepeatMode::Off,
+            };
+            self.loop_file = self.repeat_mode == RepeatMode::One;
+        }
         self.spotify = Some(state);
     }
 
@@ -120,26 +206,31 @@ impl App {
                 self.last_spotify_poll = Instant::now();
             }
         }
-        if self.spotify.is_none()
+        // El reloj de follow se integra frame a frame; `display_position_ms`
+        // ya no suma `elapsed` en este modo. Al pausar se queda donde estaba
+        // (no salta al último sondeo ni a 0:00).
+        if self.now.playing && dt > 0.0 {
+            self.now.position_ms = self
+                .now
+                .position_ms
+                .saturating_add((dt * 1000.0) as u64);
+            if self.now.duration_ms > 0 {
+                self.now.position_ms = self.now.position_ms.min(self.now.duration_ms);
+            }
+        }
+        if self
+            .spotify
+            .as_ref()
+            .map(|state| state.player.is_empty())
+            .unwrap_or(true)
             && !self.spotify_warned
             && self.last_spotify_poll.elapsed() > Duration::from_secs(4)
         {
             self.spotify_warned = true;
             self.toast(
-                "Spotify no responde por MPRIS: abre el cliente oficial",
+                "ningún reproductor MPRIS activo · abre Spotify, SoundCloud o VLC",
                 ToastKind::Warn,
             );
-        }
-        // Interpola la posición entre sondeos de MPRIS.
-        // MPRIS solo informa de la posición cada ~400 ms; entre sondeos el
-        // reloj lo lleva spote. Antes se cortaba a los 3 s y la letra se
-        // quedaba congelada.
-        if self.now.playing {
-            self.now.position_ms = self
-                .now
-                .position_ms
-                .saturating_add((dt * 1000.0) as u64)
-                .min(self.now.duration_ms.max(self.now.position_ms));
         }
     }
 

@@ -8,14 +8,20 @@ impl App {
                 self.hover = self.hit.hit(mouse.column, mouse.row).cloned();
             }
             MouseEventKind::ScrollDown => {
-                if self.hover == Some(Action::VolumeTrack) {
+                if let Some(Action::AudioBand(index)) = self.hover {
+                    self.audio_selected = index;
+                    self.adjust_audio(-1);
+                } else if self.hover == Some(Action::VolumeTrack) {
                     self.set_volume(self.now.volume - 0.03);
                 } else {
                     self.move_selection(1);
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.hover == Some(Action::VolumeTrack) {
+                if let Some(Action::AudioBand(index)) = self.hover {
+                    self.audio_selected = index;
+                    self.adjust_audio(1);
+                } else if self.hover == Some(Action::VolumeTrack) {
                     self.set_volume(self.now.volume + 0.03);
                 } else {
                     self.move_selection(-1);
@@ -56,7 +62,7 @@ impl App {
                     }
                     Action::SeekTo(_) => {
                         self.dragging_seek = true;
-                        if let Some(rect) = self.hit.rect_for(&Action::SeekTo(0)) {
+                        if let Some(rect) = self.hit.rect_for(&action) {
                             if rect.width > 0 {
                                 let ratio = ((mouse.column.saturating_sub(rect.x)) as f32
                                     / rect.width as f32)
@@ -198,6 +204,9 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.dragging_volume {
+                    self.persist_volume();
+                }
                 self.dragging_seek = false;
                 self.dragging_volume = false;
                 self.resize_drag = None;
@@ -232,6 +241,7 @@ impl App {
             Action::ToggleZen => self.set_zen(!self.zen),
             Action::Tab(tab) => {
                 self.tab = tab;
+                self.lib_search_focus = false;
                 self.needs_redraw = true;
                 if tab != Tab::Library {
                     self.lib_filter = LibFilter::All;
@@ -246,6 +256,8 @@ impl App {
             Action::Next => self.next_track(),
             Action::Prev => self.prev_track(),
             Action::LoopToggle => self.toggle_loop(),
+            Action::CycleRepeat => self.cycle_repeat(),
+            Action::ToggleShuffle => self.toggle_shuffle(),
             Action::SeekTo(ms) => self.seek_to(ms),
             Action::SeekLyrics(ms) => {
                 self.seek_to(ms);
@@ -261,15 +273,7 @@ impl App {
                 self.focus = Pane::Transport;
             }
             Action::FocusTransport => self.focus = Pane::Transport,
-            Action::Mute => {
-                if self.now.volume > 0.0 {
-                    self.volume_before_mute = self.now.volume;
-                    self.set_volume(0.0);
-                } else {
-                    let volume = self.volume_before_mute.max(0.2);
-                    self.set_volume(volume);
-                }
-            }
+            Action::Mute => self.toggle_mute(),
             Action::VizNext => {
                 self.show_viz = true;
                 self.viz.next_preset();
@@ -279,6 +283,19 @@ impl App {
             Action::VizPrev => {
                 self.show_viz = true;
                 self.viz.prev_preset();
+                self.cfg.ui.viz = self.viz.preset_name().to_string();
+                self.cfg.save().ok();
+            }
+            Action::AudioBand(_)
+            | Action::AudioPreamp
+            | Action::AudioNormalizer
+            | Action::AudioStrength
+            | Action::AudioLimiter
+            | Action::AudioPreset(_)
+            | Action::AudioToggle => self.handle_audio_action(action),
+            Action::VizPreset(index) => {
+                self.show_viz = true;
+                self.viz.set_preset(index);
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
                 self.cfg.save().ok();
             }
@@ -396,6 +413,17 @@ impl App {
             Action::StartSearch => {
                 self.tab = Tab::Search;
                 self.search.query.clear();
+                self.search.results.clear();
+                self.search.albums.clear();
+                self.search.artists.clear();
+                self.search.last_query_id = self.search.last_query_id.wrapping_add(1);
+                self.search.loading = false;
+            }
+            Action::LibrarySearch => {
+                self.tab = Tab::Library;
+                self.lib_search_focus = true;
+                self.focus = Pane::Center;
+                self.needs_redraw = true;
             }
             Action::NewPlaylist => self.open_playlist_form(),
             Action::ImportPlaylist => self.open_import_playlist(),
@@ -433,7 +461,10 @@ impl App {
             Action::AlbumPageClose => self.close_album_page(),
             Action::RefreshLibrary => self.refresh_library(),
             Action::NavMenu | Action::QueueMenu => {}
-            Action::Quit => self.should_quit = true,
+            Action::Quit => {
+                self.persist_volume();
+                self.should_quit = true;
+            }
         }
     }
 

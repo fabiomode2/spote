@@ -14,7 +14,7 @@ git clone https://github.com/fabiomode2/spote && cd spote
 spote
 ```
 
-Hacen falta Rust 1.82+, `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
+Hacen falta Rust 1.82+ para la TUI (1.85+ si compilas `spote-mini`), `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
 deja los binarios en `~/.local/bin`, crea el venv con `faster-whisper` y copia
 los scripts. Las letras no necesitan nada más: LRCLIB, Genius, captions de
 YouTube y ASR van dentro.
@@ -26,15 +26,29 @@ la propia TUI.
 
 - **Arte**: portada en half-block, dither, braille o imagen real en Kitty. La
   paleta del tema sale de la carátula.
-- **Letras**: LRCLIB, Genius y ASR local. Lee la canción completa, relee la cola
-  con 15 s de contexto y alinea la letra en Rust. Un LRC sincronizado bueno no
-  se toca; el estimado se afina solo.
+- **Visuales**: `clean`, `aurora`, `bloom`, `inferno`, `crt`, `lcd`, `rack`,
+  `braille` y `stage`; `v` cicla y `V` los pone a pantalla completa.
+- **Letras**: LRCLIB, lrcmux, Genius y ASR local. lrcmux añade cobertura
+  sincronizada; LRCLIB y Genius siguen como respaldo. Un LRC sincronizado bueno
+  no se toca; el estimado se afina solo con el audio.
 - **Karaoke**: palabra a palabra, frases largas en dos filas y la última palabra
   se llena antes de cambiar de línea.
-- **Búsqueda**: Spotify y Deezer como catálogo, sin cuenta. El audio sale de
-  `yt-dlp`. `I` importa playlists y álbumes.
+- **Búsqueda y reproducción**: Spotify y Deezer como catálogo, sin cuenta. El
+  audio sale de `yt-dlp`. Si una pista no está descargada, se resuelve una URL
+  y suena al momento mientras se guarda la copia local. `I` importa playlists y
+  álbumes.
 - **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
-  locales. `z` alterna tarjetas con portada y lista compacta.
+  locales. `z` alterna tarjetas con portada y lista compacta. `/` en la
+  biblioteca abre un filtro inline por título, artista o álbum.
+- **Media del sistema**: MPRIS bidireccional. spote aparece como reproductor
+  en el escritorio (teclas multimedia, OSD, widgets) y `t` sigue lo que suene
+  en Spotify, SoundCloud, VLC o cualquier otro reproductor MPRIS.
+- **Mini reproductor**: `w` abre `spote-mini`, una ventana pequeña siempre
+  encima con portada, espectro, progreso y controles. También se lanza con
+  `spote mini`.
+- **Audio ajustable**: `A` abre el ecualizador de 10 bandas, preamp,
+  normalizador (`dynaudnorm`/`loudnorm`) y limitador. Todo se aplica en caliente
+  y se guarda en `config.toml`.
 - **Salas**: `spoted` añade presencia, chat y cola compartida.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.
@@ -46,10 +60,14 @@ la propia TUI.
 | `space` | play/pausa | `a` | encolar |
 | `n` / `p` | siguiente / anterior | `f` | favorita |
 | `←` `→` | seek ±5 s | `g` | artista |
-| `/` | buscar | `T` | recortar intro/outro |
+| `/` | buscar · filtro en biblioteca | `T` | recortar intro/outro |
 | `u` | bucle de la pista | `F` | portada a pantalla completa |
+| `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
-| `E` | editor de diseño | `?` | ayuda |
+| `E` | editor de diseño | `Esc` | limpiar búsqueda |
+| `A` | ecualizador / dinámica | `w` | mini reproductor |
+| `t` | seguir el sistema (MPRIS) | `?` | ayuda |
+| `q` | salir de spote | | |
 
 ## Cómo funciona
 
@@ -65,12 +83,29 @@ Config, datos y caché en XDG (`~/.config/spote`, `~/.local/share/spote`,
 ```toml
 [ui]
 art_mode = "default"   # default | half | pixel | braille | off
-viz = "clean"          # clean | aurora | bloom | inferno
+viz = "clean"          # clean | aurora | bloom | inferno | crt | lcd | rack | braille | stage
 fps = 60               # frames de la UI (20-60)
 fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
 
 [ui.fx]
 ambient = "cover"      # off | void | aurora | neural | glitch | lyrics | cover
+
+[player]
+streaming = true       # resuelve YouTube y suena mientras descarga
+stream_cache = true    # guarda la copia local al terminar (tras unos segundos de escucha)
+
+[playback]
+repeat = "off"         # off | all | one
+shuffle = false
+
+[audio]
+enabled = true
+eq_enabled = true
+bands = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]   # dB, 31 Hz … 16 kHz
+preamp_db = 0
+normalizer = "off"     # off | dynamic | loudnorm
+normalizer_strength = 0.5
+limiter = false
 
 [lyrics]
 asr = true

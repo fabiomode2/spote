@@ -1,13 +1,15 @@
 //! Trabajos en segundo plano que nunca deben bloquear el render: portada,
 //! letra y sondeo de MPRIS.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 
 use spote_core::artwork::{decode_image, render_cover, ArtMode, CoverArt, Palette};
 use spote_core::config;
 use spote_core::lyrics::{LyricsDoc, LyricsService};
-use spote_core::spotify::{SpotifyState, SpotifyWatcher};
 use spote_core::spotify_api;
 use spote_core::util;
 use spote_protocol::TrackRef;
@@ -327,14 +329,20 @@ pub struct LyricsRequest {
 }
 
 pub struct LyricsWorker {
-    requests: Sender<LyricsRequest>,
+    requests: Sender<(u64, LyricsRequest)>,
+    /// Generación global: cada petición la incrementa. Un trabajo en curso
+    /// compara su generación con esta para cancelar el ASR si el usuario ya
+    /// cambió de pista.
+    generation: Arc<AtomicU64>,
     responses: Receiver<LyricsMsg>,
 }
 
 impl LyricsWorker {
     pub fn start(cfg: spote_core::config::LyricsCfg) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<LyricsRequest>();
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, LyricsRequest)>();
         let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(0));
+        let worker_generation = Arc::clone(&generation);
         std::thread::Builder::new()
             .name("spote-lyrics".into())
             .spawn(move || {
@@ -345,28 +353,73 @@ impl LyricsWorker {
                     return;
                 };
                 let service = LyricsService::from_config(&cfg);
-                while let Ok(request) = rx.recv() {
-                    let track = request.track;
-                    let result = runtime.block_on(service.fetch_with_audio(
-                        &track,
-                        request.audio.as_deref(),
+                // Una pista solo intenta el ASR una vez por sesión: si falló o
+                // tardó, no se repite cada vez que suena. La letra cacheada se
+                // sigue mostrando.
+                let mut asr_attempted: HashSet<String> = HashSet::new();
+                while let Ok((mut my_generation, mut request)) = rx.recv() {
+                    // Si hay varias peticiones en cola (el usuario saltó de
+                    // pista), solo interesa la última. Se conserva su `id` como
+                    // generación propia: cargarla después del drenado podía
+                    // hacer que el trabajo viejo no se cancelara.
+                    while let Ok((newer_id, newer)) = rx.try_recv() {
+                        my_generation = newer_id;
+                        request = newer;
+                    }
+                    let key = request.track.key.clone();
+                    let audio = match request.audio.take() {
+                        Some(audio) if asr_attempted.insert(key.clone()) => Some(audio),
+                        _ => None,
+                    };
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let done = Arc::new(AtomicBool::new(false));
+                    // Vigilante: al llegar una petición nueva, activa `cancel`.
+                    // El ASR lo consulta entre lecturas y mata el proceso.
+                    let watcher = {
+                        let generation = Arc::clone(&worker_generation);
+                        let watcher_cancel = Arc::clone(&cancel);
+                        let watcher_done = Arc::clone(&done);
+                        std::thread::Builder::new()
+                            .name("spote-lyrics-cancel".into())
+                            .spawn(move || {
+                                while !watcher_done.load(Ordering::Relaxed) {
+                                    if generation.load(Ordering::Relaxed) != my_generation {
+                                        watcher_cancel.store(true, Ordering::Relaxed);
+                                        return;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(80));
+                                }
+                            })
+                            .ok()
+                    };
+                    let result = runtime.block_on(service.fetch_with_audio_cancellable(
+                        &request.track,
+                        audio.as_deref(),
                         request.force_align,
+                        Some(cancel.as_ref()),
                     ));
+                    done.store(true, Ordering::Relaxed);
+                    // Un intento cancelado no cuenta: la pista volverá a tener
+                    // su oportunidad cuando se reproduzca de nuevo.
+                    if cancel.load(Ordering::Relaxed) {
+                        asr_attempted.remove(&key);
+                    }
+                    drop(watcher);
                     let message = match result {
                         Ok(Some(doc)) => LyricsMsg::Loaded {
-                            key: track.key.clone(),
+                            key: request.track.key.clone(),
                             lrc: Some(doc_to_lrc(&doc)),
                             doc: Some(doc),
                             error: None,
                         },
                         Ok(None) => LyricsMsg::Loaded {
-                            key: track.key.clone(),
+                            key: request.track.key.clone(),
                             doc: None,
                             lrc: None,
                             error: None,
                         },
                         Err(err) => LyricsMsg::Loaded {
-                            key: track.key.clone(),
+                            key: request.track.key.clone(),
                             doc: None,
                             lrc: None,
                             error: Some(err.to_string()),
@@ -380,16 +433,24 @@ impl LyricsWorker {
             .ok();
         Self {
             requests: tx,
+            generation,
             responses: response_rx,
         }
     }
 
     pub fn request(&self, track: TrackRef, audio: Option<PathBuf>, force_align: bool) {
-        let _ = self.requests.send(LyricsRequest {
-            track,
-            audio,
-            force_align,
-        });
+        // La generación se incrementa en el hilo llamante para que el trabajo
+        // en curso vea la cancelación aunque este hilo aún no haya recibido la
+        // petición.
+        let id = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.requests.send((
+            id,
+            LyricsRequest {
+                track,
+                audio,
+                force_align,
+            },
+        ));
     }
 
     pub fn try_recv(&self) -> Option<LyricsMsg> {
@@ -398,17 +459,19 @@ impl LyricsWorker {
 }
 
 /// Serializa de vuelta a LRC para cachear y para el `.lrc` junto al audio.
+///
+/// El `[offset:]` del proveedor ya viene horneado en los tiempos al parsear, y
+/// el ajuste manual vive en la tabla de la librería; escribir un `[offset:]`
+/// aquí haría que al recargar se aplicara dos veces.
 pub fn doc_to_lrc(doc: &LyricsDoc) -> String {
     let mut out = String::new();
-    // Sin esto, recargar la caché perdía el `[offset:]` del LRC original y
-    // habilitaba el auto-ajuste sobre una letra que ya estaba bien.
-    if doc.offset_ms != 0 {
-        out.push_str(&format!("[offset:{}]\n", doc.offset_ms));
-    }
     for line in &doc.lines {
         let minutes = line.start_ms / 60_000;
         let seconds = (line.start_ms % 60_000) as f32 / 1000.0;
-        if line.words.is_empty() {
+        // Solo se escriben tags de palabra si son reales (LRC mejorado o ASR).
+        // Serializar las palabras sintetizadas las convertía en "exactas" al
+        // recargar y la UI dejaba de refinarlas con el mapa de audio.
+        if line.words.is_empty() || !line.words_exact {
             out.push_str(&format!("[{minutes:02}:{seconds:05.2}] {}\n", line.text));
         } else {
             let mut body = String::new();
@@ -430,50 +493,41 @@ pub fn doc_to_lrc(doc: &LyricsDoc) -> String {
 // Spotify (MPRIS)
 // ---------------------------------------------------------------------------
 
-pub struct SpotifyWorker {
-    states: Receiver<SpotifyState>,
-    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl SpotifyWorker {
-    pub fn start() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let flag = std::sync::Arc::clone(&active);
-        std::thread::Builder::new()
-            .name("spote-spotify".into())
-            .spawn(move || {
-                let mut watcher = SpotifyWatcher::new();
-                while flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Some(state) = watcher.poll() {
-                        // Se manda SIEMPRE, también cuando solo cambia la
-                        // posición: de esto depende la letra sincronizada.
-                        if tx.send(state).is_err() {
-                            return;
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                }
-            })
-            .ok();
-        Self { states: rx, active }
-    }
-
-    pub fn try_recv(&self) -> Option<SpotifyState> {
-        self.states.try_recv().ok()
-    }
-}
-
-impl Drop for SpotifyWorker {
-    fn drop(&mut self) {
-        self.active
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lrc_roundtrip_keeps_times_and_drops_offsets() {
+        // El proveedor hornea su offset en las líneas; el ajuste de usuario se
+        // guarda aparte. Serializar un `[offset:]` lo aplicaría otra vez al
+        // recargar la caché.
+        let doc = spote_core::lyrics::parse_lrc("[offset:+500]\n[00:10.00]hola\n[00:12.50]adios");
+        assert_eq!(doc.lines[0].start_ms, 9_500);
+        let text = doc_to_lrc(&doc);
+        assert!(!text.contains("[offset:"), "{text}");
+        let reloaded = spote_core::lyrics::parse_lrc(&text);
+        let starts: Vec<u64> = reloaded.lines.iter().map(|line| line.start_ms).collect();
+        assert_eq!(starts, vec![9_500, 12_000]);
+        assert_eq!(reloaded.offset_ms, 0);
+        assert!(
+            reloaded.lines.iter().all(|line| !line.words_exact),
+            "las palabras sintetizadas no deben volverse exactas al cachear"
+        );
+    }
+
+    #[test]
+    fn lrc_roundtrip_keeps_real_word_timings() {
+        let doc = spote_core::lyrics::parse_lrc(
+            "[00:10.00]<00:10.00>hola <00:10.50>mundo\n[00:15.00]fin",
+        );
+        assert!(doc.lines[0].words_exact);
+        let text = doc_to_lrc(&doc);
+        assert!(text.contains("<00:10.00>"), "{text}");
+        let reloaded = spote_core::lyrics::parse_lrc(&text);
+        assert!(reloaded.lines[0].words_exact);
+        assert_eq!(reloaded.lines[0].words[0].start_ms, 10_000);
+    }
 
     #[test]
     fn art_worker_outputs_png_for_big_plain_cover() {

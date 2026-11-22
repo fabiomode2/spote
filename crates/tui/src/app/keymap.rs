@@ -16,6 +16,8 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
             vec![
                 ("space", "play / pausa"),
                 ("n / p", "siguiente / anterior"),
+                ("S", "aleatorio on/off"),
+                ("o", "bucle: off / todo / una"),
                 ("u", "bucle de la pista"),
                 ("← →", "seek ±5 s (shift ±30 s)"),
                 ("↑ ↓", "volumen en ahora; selección en listas"),
@@ -43,7 +45,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
         (
             "biblioteca / búsqueda",
             vec![
-                ("/", "buscar (en buscar ya escribes)"),
+                ("/", "buscar en la biblioteca (inline)"),
                 ("enter", "reproducir / buscar"),
                 ("↑ ↓", "mover selección"),
                 ("a", "añadir a la cola"),
@@ -62,8 +64,11 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("V", "visualización a pantalla completa"),
                 ("b", "visualizador de fondo"),
                 ("z", "lista compacta / tarjetas"),
-                ("t", "seguir spotify (MPRIS)"),
+                ("t", "seguir el sistema (MPRIS)"),
+                ("w", "mini reproductor de escritorio"),
+                ("A", "ecualizador y normalizador"),
                 ("tab", "cambiar de vista"),
+                ("q", "salir de spote"),
             ],
         ),
         (

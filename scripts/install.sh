@@ -20,6 +20,7 @@ BIN_DIR="${SPOTE_BIN_DIR:-$HOME/.local/bin}"
 VENV="${SPOTE_VENV:-$DATA_DIR/venv}"
 ASR=1
 UPDATE=0
+WITH_MINI=1
 
 usage() {
   cat <<EOF
@@ -27,6 +28,7 @@ uso: scripts/install.sh [opciones]
 
   --update              git pull --ff-only antes de compilar
   --no-asr              no instala faster-whisper
+  --no-mini             no compila/instala spote-mini (servidores sin GUI)
   --bin-dir <ruta>      destino de los binarios (defecto: ~/.local/bin)
   --venv <ruta>         venv de Python (defecto: $DATA_DIR/venv)
   -y, --yes             sin preguntas (lo usa el auto-actualizador)
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --update) UPDATE=1 ;;
     --no-asr) ASR=0 ;;
+    --no-mini) WITH_MINI=0 ;;
     --bin-dir)
       BIN_DIR="${2:?falta la ruta de binarios}"
       shift
@@ -84,6 +87,15 @@ done
 
 say "compilando spote (release)"
 (cd "$ROOT" && cargo build --release --locked -p spote-tui -p spote-server)
+MINI_BUILT=0
+if [[ "$WITH_MINI" == 1 ]]; then
+  say "compilando spote-mini (release)"
+  if (cd "$ROOT" && cargo build --release --locked -p spote-mini); then
+    MINI_BUILT=1
+  else
+    warn "spote-mini no compiló (¿faltan libs gráficas?); instala solo la TUI con --no-mini"
+  fi
+fi
 
 install -d "$BIN_DIR"
 say "instalando binarios en $BIN_DIR"
@@ -91,6 +103,10 @@ say "instalando binarios en $BIN_DIR"
 # install directo puede fallar con «text file busy».
 install -m 755 "$ROOT/target/release/spote" "$BIN_DIR/.spote.new"
 mv -f "$BIN_DIR/.spote.new" "$BIN_DIR/spote"
+if [[ "$MINI_BUILT" == 1 && -x "$ROOT/target/release/spote-mini" ]]; then
+  install -m 755 "$ROOT/target/release/spote-mini" "$BIN_DIR/.spote-mini.new"
+  mv -f "$BIN_DIR/.spote-mini.new" "$BIN_DIR/spote-mini"
+fi
 if [[ -x "$ROOT/target/release/spoted" ]]; then
   install -m 755 "$ROOT/target/release/spoted" "$BIN_DIR/.spoted.new"
   mv -f "$BIN_DIR/.spoted.new" "$BIN_DIR/spoted"
@@ -122,6 +138,11 @@ case ":$PATH:" in
   *) warn "añade $BIN_DIR al PATH para lanzar «spote» desde cualquier sitio" ;;
 esac
 
-say "listo · lanza: spote"
-say "letras: LRCLIB + Genius + captions de YouTube"
+if [[ "$WITH_MINI" == 1 && "$MINI_BUILT" == 0 ]]; then
+  say "listo (sin mini) · lanza: spote"
+  warn "spote-mini no se instaló; usa --no-mini si no tienes libs gráficas"
+else
+  say "listo · lanza: spote"
+fi
+say "letras: LRCLIB + lrcmux + Genius + captions de YouTube"
 [[ "$ASR" == 1 ]] && say "timings: ASR local con faster-whisper"

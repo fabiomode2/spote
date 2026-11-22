@@ -8,6 +8,7 @@ use spote_protocol::TrackRef;
 
 mod align;
 mod asr;
+mod lrcmux;
 mod remote;
 mod text;
 mod youtube;
@@ -29,8 +30,8 @@ pub struct LyricLine {
     pub end_ms: u64,
     pub text: String,
     pub words: Vec<Word>,
-    /// `true` si los tiempos de palabra vienen de tags LRC mejorados; `false`
-    /// si se repartieron por sílabas (la UI puede refinarlos con el audio).
+    /// `true` si los tiempos de palabra son fiables (tags LRC mejorados o
+    /// alineación contra el audio). La UI no debe volver a repartirlos.
     pub words_exact: bool,
 }
 
@@ -39,6 +40,7 @@ pub enum LyricsSource {
     #[default]
     None,
     Lrclib,
+    Lrcmux,
     Captions,
     Plain,
     Estimated,
@@ -50,6 +52,7 @@ impl LyricsSource {
         match self {
             Self::None => "",
             Self::Lrclib => "lrclib",
+            Self::Lrcmux => "lrcmux",
             Self::Captions => "captions",
             Self::Plain => "plain",
             Self::Estimated => "approx",
@@ -62,6 +65,7 @@ impl LyricsSource {
     pub fn from_label(label: &str) -> Option<Self> {
         match label.trim().to_ascii_lowercase().as_str() {
             "lrclib" => Some(Self::Lrclib),
+            "lrcmux" => Some(Self::Lrcmux),
             "captions" => Some(Self::Captions),
             "plain" => Some(Self::Plain),
             "approx" => Some(Self::Estimated),
@@ -78,6 +82,9 @@ pub struct LyricsDoc {
     pub synced: bool,
     pub instrumental: bool,
     pub source: LyricsSource,
+    /// Ajuste manual del usuario. El `[offset:]` que trae un LRC de proveedor
+    /// se hornea en los tiempos de las líneas al parsear (ver [`parse_lrc`]),
+    /// así que aquí no se suma dos veces. `0` = sin ajuste.
     pub offset_ms: i64,
     /// Tiempos refinados contra la voz real (ASR/audio), no solo LRC.
     pub aligned: bool,
@@ -126,7 +133,8 @@ impl LyricsDoc {
         self.lines.is_empty()
     }
 
-    /// Tiempo de documento: posición de la canción con el offset aplicado.
+    /// Tiempo de documento: posición de la canción con el offset **de usuario**
+    /// aplicado. El offset del proveedor ya está horneado en `start_ms`.
     ///
     /// Toda comparación contra `LyricLine.start_ms` / `Word.start_ms` debe usar
     /// esta base. Si la línea se elige con offset pero el karaoke se pinta sin
@@ -277,7 +285,7 @@ impl LyricsDoc {
                 let score = total / used as f32 * prior;
                 all_scores.push(score);
                 match best {
-                    Some((best_score, best_offset)) if score > best_score => {
+                    Some((best_score, _)) if score > best_score => {
                         runner_up = best_score;
                         best = Some((score, offset));
                     }
@@ -370,10 +378,7 @@ impl LyricsService {
             .timeout(std::time::Duration::from_secs(8))
             .build()
             .unwrap_or_default();
-        Self {
-            client,
-            asr: None,
-        }
+        Self { client, asr: None }
     }
 
     /// Construye el servicio desde la configuración.
@@ -397,6 +402,20 @@ impl LyricsService {
         audio: Option<&std::path::Path>,
         force_align: bool,
     ) -> Result<Option<LyricsDoc>, LyricsError> {
+        self.fetch_with_audio_cancellable(track, audio, force_align, None)
+            .await
+    }
+
+    /// Variante cancelable que usa el worker de la TUI. `cancel` se consulta
+    /// entre lecturas del ASR; al cambiar de pista se activa y el proceso del
+    /// transcriptor se mata en vez de bloquear la cola.
+    pub async fn fetch_with_audio_cancellable(
+        &self,
+        track: &TrackRef,
+        audio: Option<&std::path::Path>,
+        force_align: bool,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Option<LyricsDoc>, LyricsError> {
         let doc = remote::fetch_track(&self.client, track).await?;
         let Some(mut doc) = doc else {
             return Ok(None);
@@ -407,21 +426,20 @@ impl LyricsService {
         if !needs_alignment(&doc, force_align) {
             return Ok(Some(doc));
         }
-        let lines: Vec<LyricLine> = doc
-            .lines
-            .iter()
-            .filter(|line| {
-                let text = line.text.trim();
-                !text.is_empty() && !text.trim_matches('♪').trim().is_empty()
-            })
-            .cloned()
-            .collect();
+        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Ok(Some(doc));
+        }
+        let lines = asr_reference_lines(&doc);
         if lines.len() < 2 {
             return Ok(Some(doc));
         }
         let duration_s = track.duration_ms as f64 / 1000.0;
-        match asr::align_track(config, audio, duration_s, &lines) {
-            Some((aligned, confidence)) => {
+        // Una letra ya sincronizada solo se sustituye si el ASR mejora con
+        // claridad; una plana se acepta con menos confianza porque cualquier
+        // cosa es mejor que el reparto a ojo.
+        let minimum = if doc.synced { 0.45 } else { 0.35 };
+        match asr::align_track_with(config, audio, duration_s, &lines, cancel, None) {
+            Some((aligned, confidence)) if confidence >= minimum && aligned.len() >= 2 => {
                 tracing::info!(
                     target: "spote::lyrics",
                     "letra alineada con ASR: {} líneas, confianza {:.2}",
@@ -431,6 +449,15 @@ impl LyricsService {
                 doc.lines = aligned;
                 doc.aligned = true;
                 doc.synced = true;
+                // Los tiempos del ASR son absolutos del audio; el offset del
+                // proveedor ya no aplica (antes se sumaba otra vez al pintar).
+                doc.offset_ms = 0;
+            }
+            Some((_, confidence)) => {
+                tracing::debug!(
+                    target: "spote::lyrics",
+                    "ASR con confianza {confidence:.2} insuficiente; se conserva la letra anterior"
+                );
             }
             None => {
                 tracing::debug!(
@@ -448,15 +475,47 @@ impl LyricsService {
     }
 }
 
+/// Líneas para el ASR en tiempo de audio: sin marcas instrumentales y sin el
+/// offset de usuario (el ASR devuelve tiempos absolutos del fichero).
+fn asr_reference_lines(doc: &LyricsDoc) -> Vec<LyricLine> {
+    doc.lines
+        .iter()
+        .filter(|line| {
+            let text = line.text.trim();
+            !text.is_empty()
+                && text != INSTRUMENTAL_MARK
+                && text.chars().any(|ch| ch.is_alphanumeric())
+        })
+        .map(|line| {
+            let mut line = line.clone();
+            line.start_ms = (line.start_ms as i64 - doc.offset_ms).max(0) as u64;
+            line.end_ms = (line.end_ms as i64 - doc.offset_ms).max(0) as u64;
+            line.words.clear();
+            line.words_exact = false;
+            line
+        })
+        .collect()
+}
+
 /// ¿Merece la pena re-alinear? Un LRC sincronizado de LRCLIB suele ser mejor
 /// que el ASR; solo se toca si viene de una versión vieja (`force_align`) o si
 /// trae ráfagas imposibles (varias líneas a menos de 400 ms).
 fn needs_alignment(doc: &LyricsDoc, force_align: bool) -> bool {
-    if force_align {
-        return true;
-    }
     if doc.aligned {
         return false;
+    }
+    // Una letra con tiempos de palabra reales o captions del vídeo exacto ya
+    // está alineada contra el audio: repetir ASR solo añade minutos de espera
+    // y puede empeorar una sincronización que ya era buena. Esto gana incluso
+    // a `force_align` (versión vieja de la caché).
+    if doc.synced
+        && (matches!(doc.source, LyricsSource::Captions)
+            || doc.lines.iter().any(|line| line.words_exact))
+    {
+        return false;
+    }
+    if force_align {
+        return true;
     }
     if !doc.synced || matches!(doc.source, LyricsSource::Estimated | LyricsSource::Plain) {
         return true;
@@ -486,7 +545,8 @@ impl Default for LyricsService {
 /// - Varias marcas por línea (`[00:12.34][00:30.00]`) comparten texto.
 /// - Timestamps `[mm:ss]`, con 1, 2 o 3 decimales y también con coma o con
 ///   `[mm:ss:xx]` (variante antigua).
-/// - `[offset:±NNN]` se guarda en el documento (la UI suma su propio ajuste).
+/// - `[offset:±NNN]` se aplica a los tiempos al parsear y se guarda a cero: el
+///   único offset que queda en el documento es el ajuste manual del usuario.
 /// - `[ti:]`, `[ar:]`, `[al:]`, `[by:]`, `[length:]` y similares son metadatos y
 ///   no llegan a las líneas; `[Verse 1]`, `[Chorus]`… tampoco.
 /// - Los tags `<mm:ss.xx>` de palabra se aceptan absolutos (lo normal) y
@@ -562,6 +622,9 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
         }
         doc.synced = false;
         doc.source = LyricsSource::Plain;
+        // El offset de un LRC sin tiempos no se puede hornear en un reparto
+        // estimado: se descarta para no sumarlo dos veces al ajustar.
+        doc.offset_ms = 0;
         return doc;
     }
 
@@ -679,6 +742,23 @@ pub fn parse_lrc(text: &str) -> LyricsDoc {
         mark_optional_words(line);
     }
 
+    // El `[offset:]` del proveedor se aplica aquí, una sola vez, y se guarda a
+    // cero: así el único offset que queda es el ajuste manual del usuario. Antes
+    // el documento arrastraba el offset del LRC y la app lo sustituía por el
+    // del usuario (se perdía el del proveedor) o lo sumaba al del ASR (doble).
+    if doc.offset_ms != 0 {
+        let offset = doc.offset_ms;
+        for line in &mut out {
+            line.start_ms = shift_to_audio(line.start_ms, offset);
+            line.end_ms = shift_to_audio(line.end_ms, offset);
+            for word in &mut line.words {
+                word.start_ms = shift_to_audio(word.start_ms, offset);
+                word.end_ms = shift_to_audio(word.end_ms, offset);
+            }
+        }
+    }
+    doc.offset_ms = 0;
+
     doc.instrumental = !out.is_empty() && out.iter().all(|line| line.text == INSTRUMENTAL_MARK);
     doc.lines = out;
     doc.synced = true;
@@ -759,6 +839,12 @@ fn is_instrumental_text(text: &str) -> bool {
     let lower = text.to_lowercase();
     let lower = lower.trim().trim_matches(|ch: char| !ch.is_alphanumeric());
     matches!(lower, "instrumental" | "instrumental break" | "interludio")
+}
+
+/// Pasa un tiempo de documento a tiempo de audio restando el `[offset:]` del
+/// proveedor. Positivo adelanta la letra, así que el audio llega antes.
+fn shift_to_audio(ms: u64, offset: i64) -> u64 {
+    (ms as i64 - offset).max(0) as u64
 }
 
 /// `[offset:+500]`, `[offset:-120]` o `[offset: 30 ]`.
@@ -942,7 +1028,7 @@ fn push_word(words: &mut Vec<(u64, String)>, stamp: Option<u64>, text: &str) {
 /// Marca las palabras que caen dentro de paréntesis o corchetes. El parser
 /// conserva esos textos (se ven en la línea), pero el progreso y la selección
 /// de línea los tratan como opcionales.
-fn mark_optional_words(line: &mut LyricLine) {
+pub(crate) fn mark_optional_words(line: &mut LyricLine) {
     if line.words.is_empty() {
         return;
     }
@@ -981,7 +1067,7 @@ fn mark_optional_words(line: &mut LyricLine) {
     }
 }
 
-fn word_times(start: u64, end: u64, text: &str) -> Option<Vec<Word>> {
+pub(crate) fn word_times(start: u64, end: u64, text: &str) -> Option<Vec<Word>> {
     let chunks: Vec<&str> = text.split_whitespace().collect();
     if chunks.len() < 2 {
         return None;
@@ -1109,17 +1195,39 @@ mod tests {
     }
 
     #[test]
-    fn offset_tag_is_applied_to_the_document() {
+    fn provider_offset_is_baked_into_the_timeline() {
         let doc = parse_lrc("[offset:+250]\n[00:10.00]hola");
-        assert_eq!(doc.offset_ms, 250);
-        // El offset positivo adelanta la letra, como marca el estándar LRC.
-        assert_eq!(doc.index_at(9_700), None);
-        assert_eq!(doc.index_at(9_800), Some(0));
+        // El offset del proveedor ya no vive en `offset_ms`: se aplica una vez
+        // a las líneas para que no se pueda sumar dos veces con el del usuario.
+        assert_eq!(doc.offset_ms, 0);
+        assert_eq!(doc.lines[0].start_ms, 9_750);
+        assert_eq!(doc.index_at(9_749), None);
+        assert_eq!(doc.index_at(9_750), Some(0));
 
         let negative = parse_lrc("[offset:-500]\n[00:10.00]hola");
-        assert_eq!(negative.offset_ms, -500);
-        assert_eq!(negative.index_at(10_400), None);
+        assert_eq!(negative.offset_ms, 0);
+        assert_eq!(negative.lines[0].start_ms, 10_500);
+        assert_eq!(negative.index_at(10_499), None);
         assert_eq!(negative.index_at(10_500), Some(0));
+    }
+
+    #[test]
+    fn provider_and_user_offsets_compose_once_each() {
+        let doc = parse_lrc("[offset:+1000]\n[00:10.00]primera frase\n[00:12.00]segunda frase");
+        assert_eq!(doc.lines[0].start_ms, 9_000);
+        assert_eq!(doc.offset_ms, 0);
+        // El ajuste manual se suma sobre el tiempo ya corregido por el
+        // proveedor; antes uno de los dos se perdía.
+        let mut doc = doc;
+        doc.offset_ms = 500;
+        assert_eq!(doc.aligned_ms(8_500), 9_000);
+        assert_eq!(doc.index_at(8_500), Some(0));
+        assert_eq!(doc.index_at(8_499), None);
+        // El progreso de palabra usa la misma base que el índice.
+        let baseline = parse_lrc("[00:10.00]primera frase\n[00:12.00]segunda frase");
+        assert!(
+            (doc.word_progress_at(10_000, 0) - baseline.word_progress_at(11_500, 0)).abs() < 1e-3
+        );
     }
 
     #[test]
@@ -1233,6 +1341,37 @@ mod tests {
         assert!(!doc.synced);
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.source, LyricsSource::Plain);
+    }
+
+    #[test]
+    fn alignment_is_only_requested_for_lyrics_that_need_it() {
+        let synced = LyricsDoc::from_lrc(LRC, true);
+        assert!(!needs_alignment(&synced, false));
+
+        let plain = LyricsDoc::from_lrc("one\ntwo\nthree", false);
+        assert!(needs_alignment(&plain, false));
+
+        // Ráfagas imposibles: dos líneas a menos de 400 ms.
+        let broken = LyricsDoc::from_lrc(
+            "[00:10.00]uno\n[00:10.10]dos\n[00:10.20]tres\n[00:20.00]cuatro",
+            true,
+        );
+        assert!(needs_alignment(&broken, false));
+
+        // Captions ya vienen del audio exacto; no hace falta ASR.
+        let mut captions = synced.clone();
+        captions.source = LyricsSource::Captions;
+        assert!(!needs_alignment(&captions, false));
+
+        // Un LRC mejorado con palabras ya está alineado.
+        let word_timed = LyricsDoc::from_lrc(
+            "[00:10.00]<00:10.00>uno <00:11.00>dos\n[00:12.00]tres",
+            true,
+        );
+        assert!(!needs_alignment(&word_timed, false));
+
+        // `force_align` manda: es una petición explícita de re-alinear.
+        assert!(needs_alignment(&synced, true));
     }
 
     #[test]
@@ -1411,13 +1550,13 @@ mod timeline_tests {
                           [00:14.00]tercera frase\n[00:16.00]cuarta frase\n[00:18.00]";
 
     #[test]
-    fn active_applies_offset_to_progress() {
+    fn user_offset_applies_to_index_and_progress() {
         let baseline = LyricsDoc::from_lrc(VERSES, true);
         for offset in [0i64, 1_000, -1_000, 500] {
-            let doc = LyricsDoc::from_lrc(&format!("[offset:{offset}]\n{VERSES}"), true);
-            assert_eq!(doc.offset_ms, offset);
-            // Con offset, el estado en `ms` debe ser el mismo que sin offset
-            // en `ms + offset`. Antes el índice se desplazaba y el progreso no.
+            let mut doc = baseline.clone();
+            doc.offset_ms = offset;
+            // Con offset de usuario, el estado en `ms` debe ser el mismo que
+            // sin offset en `ms + offset`.
             for ms in [10_000u64, 10_500, 11_000, 11_500, 12_000, 13_500] {
                 let shift = (ms as i64 + offset).max(0) as u64;
                 if shift < 10_000 {
@@ -1436,12 +1575,37 @@ mod timeline_tests {
         }
         // Caso exacto del reporte: con +1 s, el cambio ocurre cuando la frase
         // anterior, medida con el reloj sin corregir, iría por la mitad.
-        let doc = LyricsDoc::from_lrc(&format!("[offset:+1000]\n{VERSES}"), true);
+        let mut doc = baseline;
+        doc.offset_ms = 1_000;
         let (index, progress) = doc.active(11_000).unwrap();
         assert_eq!(index, 1);
         assert!(progress < 0.01, "justo al cambiar empieza la nueva frase");
         let outgoing_raw = LyricsDoc::word_progress(&doc.lines[0], 11_000);
         assert!((0.2..0.85).contains(&outgoing_raw), "raw={outgoing_raw}");
+        let outgoing_aligned = LyricsDoc::word_progress(&doc.lines[0], doc.aligned_ms(11_000));
+        assert!(outgoing_aligned > 0.99, "aligned={outgoing_aligned}");
+    }
+
+    #[test]
+    fn provider_offset_bakes_an_equivalent_timeline() {
+        let baseline = LyricsDoc::from_lrc(VERSES, true);
+        for offset in [1_000i64, -1_000, 500] {
+            let doc = LyricsDoc::from_lrc(&format!("[offset:{offset}]\n{VERSES}"), true);
+            assert_eq!(doc.offset_ms, 0, "el proveedor no deja offset pendiente");
+            for ms in [9_000u64, 10_000, 11_000, 12_000, 13_500] {
+                let shift = (ms as i64 + offset).max(0) as u64;
+                if shift < 10_000 {
+                    continue;
+                }
+                let (index, progress) = doc.active(ms).unwrap();
+                let (base_index, base_progress) = baseline.active(shift).unwrap();
+                assert_eq!(index, base_index, "offset={offset} ms={ms}");
+                assert!(
+                    (progress - base_progress).abs() < 1e-3,
+                    "offset={offset} ms={ms}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1453,9 +1617,10 @@ mod timeline_tests {
     }
 
     #[test]
-    fn timeline_detects_a_broken_document() {
-        // Documento construido a mano con la vieja inconsistencia: el índice
-        // cambia con offset pero los words siguen en tiempo de canción.
+    fn raw_clock_differs_from_document_clock_with_user_offset() {
+        // Con un offset de usuario, comparar las palabras contra el reloj de
+        // canción sin corregir da un progreso falso; el documento usa
+        // `aligned_ms` en todas las rutas.
         let mut doc = LyricsDoc::from_lrc(VERSES, true);
         doc.offset_ms = 1_000;
         let transitions = scan(&doc, 9_000, 19_000, 50);

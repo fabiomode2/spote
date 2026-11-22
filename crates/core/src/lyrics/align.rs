@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use super::LyricLine;
+use super::{mark_optional_words, word_times, LyricLine, Word};
 
 /// Las palabras muy cortas se emparejan con más tolerancia: un "mrs" oído como
 /// "mr" sigue siendo un ancla útil.
@@ -411,6 +411,106 @@ fn fit_run(durations: &[f64], begin: f64, end: f64) -> Vec<f64> {
     starts
 }
 
+/// Construye los tiempos de palabra de una línea alineada.
+///
+/// Usa el reparto por sílabas como base y sobrescribe las palabras que casaron
+/// con el ASR. Antes `align_lines` devolvía `words: Vec::new()`: la app se salta
+/// el refinado cuando `aligned` es true, así que el karaoke se quedaba sin
+/// progreso por palabra justo en las letras mejor alineadas.
+fn aligned_words(
+    words: &[String],
+    token_words: &[usize],
+    range: (usize, usize),
+    mapping: &HashMap<usize, usize>,
+    asr_tokens: &[(f64, f64, String)],
+    start_ms: u64,
+    end_ms: u64,
+) -> Vec<Word> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let end_ms = end_ms.max(start_ms + 1);
+    let mut out = if words.len() >= 2 {
+        word_times(start_ms, end_ms, &words.join(" ")).unwrap_or_else(|| {
+            vec![Word {
+                start_ms,
+                end_ms,
+                text: words.join(" "),
+                optional: false,
+            }]
+        })
+    } else {
+        vec![Word {
+            start_ms,
+            end_ms,
+            text: words[0].clone(),
+            optional: false,
+        }]
+    };
+    if out.len() != words.len() {
+        out = words
+            .iter()
+            .map(|text| Word {
+                start_ms,
+                end_ms,
+                text: text.clone(),
+                optional: false,
+            })
+            .collect();
+    }
+
+    // Ancla de cada palabra de la línea, si su token casó con el ASR.
+    let begin = range.0;
+    for global in range.0..range.1 {
+        let Some(&asr_index) = mapping.get(&global) else {
+            continue;
+        };
+        let Some(local) = global.checked_sub(begin) else {
+            continue;
+        };
+        let Some(&word_index) = token_words.get(local) else {
+            continue;
+        };
+        let Some(word) = out.get_mut(word_index) else {
+            continue;
+        };
+        let Some((start_s, end_s, _)) = asr_tokens.get(asr_index) else {
+            continue;
+        };
+        let last_usable = end_ms.saturating_sub(1).max(start_ms);
+        let anchor_start =
+            ((*start_s * 1000.0).round() as i64).clamp(start_ms as i64, last_usable as i64) as u64;
+        let anchor_end =
+            ((*end_s * 1000.0).round() as i64).clamp(anchor_start as i64 + 1, end_ms as i64) as u64;
+        word.start_ms = anchor_start;
+        word.end_ms = anchor_end;
+    }
+
+    // Monótono y dentro de la línea: una ancla mala no puede adelantar la
+    // palabra siguiente ni salirse del verso.
+    let last_usable = end_ms.saturating_sub(1).max(start_ms);
+    let mut previous = start_ms;
+    for word in &mut out {
+        let floor = previous.min(last_usable);
+        word.start_ms = word.start_ms.clamp(floor, last_usable);
+        word.end_ms = word.end_ms.max(word.start_ms + 1).min(end_ms);
+        previous = word.start_ms;
+    }
+    let count = out.len();
+    for index in 0..count {
+        let next_start = out
+            .get(index + 1)
+            .map(|word| word.start_ms)
+            .unwrap_or(end_ms);
+        let word_start = out[index].start_ms;
+        out[index].end_ms = next_start.max(word_start + 1).min(end_ms);
+    }
+    if let Some(last) = out.last_mut() {
+        last.end_ms = end_ms.max(last.start_ms + 1);
+    }
+    out
+}
+
 /// Alinea las líneas contra las palabras del ASR.
 ///
 /// Las líneas deben venir sin marcas instrumentales (`♪`): el llamante las
@@ -425,18 +525,29 @@ pub fn align_lines(
         return None;
     }
 
-    // 1. Tokens de la letra, guardando a qué línea pertenece cada uno.
+    // 1. Tokens de la letra, guardando a qué línea y a qué palabra pertenece
+    //    cada token. Así luego se reconstruyen tiempos por palabra con las
+    //    anclas del ASR.
     let mut lyric_tokens: Vec<String> = Vec::new();
     let mut line_ranges: Vec<(usize, usize)> = Vec::with_capacity(lines.len());
+    let mut line_words: Vec<Vec<String>> = Vec::with_capacity(lines.len());
+    let mut token_words: Vec<Vec<usize>> = Vec::with_capacity(lines.len());
     for line in lines {
         let begin = lyric_tokens.len();
+        let mut words_here: Vec<String> = Vec::new();
+        let mut token_word_here: Vec<usize> = Vec::new();
         for word in line.text.split_whitespace() {
+            let word_index = words_here.len();
+            words_here.push(word.to_string());
             let normalized = normalize_word(word);
             if !normalized.is_empty() {
                 lyric_tokens.push(normalized);
+                token_word_here.push(word_index);
             }
         }
         line_ranges.push((begin, lyric_tokens.len()));
+        line_words.push(words_here);
+        token_words.push(token_word_here);
     }
     if lyric_tokens.len() < 6 {
         return None;
@@ -656,13 +767,26 @@ pub fn align_lines(
             estimated_end(&line.text, start_ms)
         };
         end_ms = end_ms.min(next_ms.saturating_sub(40)).max(start_ms + 250);
-        refined.push(LyricLine {
+        let words = aligned_words(
+            &line_words[index],
+            &token_words[index],
+            line_ranges[index],
+            &mapping,
+            &asr_tokens,
+            start_ms,
+            end_ms,
+        );
+        let mut refined_line = LyricLine {
             start_ms,
             end_ms,
             text: line.text.clone(),
-            words: Vec::new(),
-            words_exact: false,
-        });
+            words,
+            // Los tiempos por palabra vienen del ASR, no del mapa de energía:
+            // que la UI no los vuelva a repartir.
+            words_exact: true,
+        };
+        mark_optional_words(&mut refined_line);
+        refined.push(refined_line);
         previous_ms = Some(start_ms);
     }
 
@@ -807,6 +931,34 @@ mod tests {
             assert!(pair[1] - pair[0] >= 250, "{starts:?}");
         }
         assert!(starts[2] > 1_000, "{starts:?}");
+    }
+
+    #[test]
+    fn aligned_lines_get_word_timings_from_the_asr() {
+        let lines = vec![line(0, "one two three"), line(4_000, "four five six")];
+        let words = vec![
+            word(0.0, 0.2, "one", 0.9),
+            word(0.2, 0.4, "two", 0.9),
+            word(0.4, 0.6, "three", 0.9),
+            word(6.0, 6.2, "four", 0.9),
+            word(6.2, 6.4, "five", 0.9),
+            word(6.4, 6.6, "six", 0.9),
+        ];
+        let (refined, _, _) = align_lines(&lines, &words, 10.0).unwrap();
+        for line in &refined {
+            assert!(line.words_exact, "la UI no debe repartir estas palabras");
+            assert!(!line.words.is_empty());
+            let mut previous = line.start_ms;
+            for word in &line.words {
+                assert!(word.start_ms >= previous, "{word:?} en {line:?}");
+                assert!(word.end_ms >= word.start_ms, "{word:?}");
+                assert!(word.end_ms <= line.end_ms, "{word:?} en {line:?}");
+                previous = word.start_ms;
+            }
+        }
+        // La primera palabra se ancla al inicio real de la voz (6 s), no al
+        // reparto proporcional de la línea.
+        assert!((refined[1].words[0].start_ms as i64 - 6_000).abs() < 50);
     }
 
     #[test]

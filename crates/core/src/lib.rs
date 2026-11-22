@@ -5,6 +5,7 @@
 
 pub mod artwork;
 pub mod audio;
+pub mod audio_fx;
 pub mod audio_map;
 pub mod catalog;
 pub mod config;
@@ -14,10 +15,14 @@ pub mod harvest;
 pub mod library;
 pub mod lyrics;
 pub mod mpris;
+pub mod mpris_server;
+pub mod playback;
 pub mod player;
 pub mod record;
 pub mod spotify;
+pub mod stream;
 pub mod spotify_api;
+pub mod system_media;
 pub mod util;
 
 pub use spote_protocol as protocol;
@@ -36,7 +41,7 @@ impl ToolStatus {
         Self {
             mpv: util::which("mpv").is_some(),
             ffmpeg: util::which("ffmpeg").is_some(),
-            yt_dlp: util::which("yt-dlp").is_some(),
+            yt_dlp: crate::stream::ytdlp_available(),
             parec: util::which("parec").is_some(),
         }
     }

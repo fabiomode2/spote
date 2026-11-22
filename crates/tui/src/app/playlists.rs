@@ -17,6 +17,7 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::Audio => self.handle_audio_key(key),
             Overlay::Trim => match key.code {
                 KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
                 KeyCode::Char('a') | KeyCode::Home => self.trim_start_here(),
@@ -185,6 +186,10 @@ impl App {
             self.toast("selecciona una pista para añadirla a una lista", ToastKind::Warn);
             return;
         };
+        if !self.ensure_track_key(&key) {
+            self.toast("no encuentro esa pista en la biblioteca", ToastKind::Warn);
+            return;
+        }
         if self.lib.playlists().map(|lists| lists.is_empty()).unwrap_or(true) {
             self.toast("no hay listas: crea una con N", ToastKind::Warn);
             return;

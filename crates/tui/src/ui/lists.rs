@@ -69,14 +69,44 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         chip_right = chip_right.saturating_sub(1);
     }
 
+    // Buscador inline de la biblioteca. Comparte la fila con nada más para
+    // que el texto respire; la lista empieza en `inner.y + 3`.
+    let search_rect = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    fill(buf, search_rect, if app.lib_search_focus { pal.surface_alt } else { pal.surface });
+    let mut search_text = if app.lib_query.is_empty() {
+        "buscar en la biblioteca…  ( / )".to_string()
+    } else {
+        format!("⌕ {}", app.lib_query)
+    };
+    if app.lib_search_focus {
+        search_text.push('▏');
+    }
+    truncate_chars(&mut search_text, search_rect.width.saturating_sub(1) as usize);
+    text_at(
+        buf,
+        search_rect,
+        search_text,
+        Style::new().fg(color(if app.lib_search_focus {
+            pal.text
+        } else if app.lib_query.is_empty() {
+            pal.dim
+        } else {
+            pal.primary
+        })),
+        Alignment::Left,
+    );
+    app.hit.add(search_rect, Action::LibrarySearch);
+
     // Cabecera de la lista: portada y descripción, si hay una abierta. Los
     // chips de gestión ocupan la primera fila; la lista empieza debajo para
     // que las canciones no se pinten encima de «N lista / I importar».
+    // Fila 0: chips. Fila 1: buscador. Fila 2: cabecera de columnas.
+    // La lista empieza en +3 para no pintar canciones sobre el buscador.
     let mut list_area = Rect::new(
         inner.x,
-        inner.y + 2,
+        inner.y + 3,
         inner.width,
-        inner.height.saturating_sub(2),
+        inner.height.saturating_sub(3),
     );
     if let crate::app::LibFilter::Playlist(id) = app.lib_filter {
         if let Ok(Some(list)) = app.lib.playlist(id) {
@@ -130,9 +160,9 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             );
             list_area = Rect::new(
                 inner.x,
-                inner.y + 5,
+                inner.y + 6,
                 inner.width,
-                inner.height.saturating_sub(5),
+                inner.height.saturating_sub(6),
             );
         }
     }
@@ -152,7 +182,9 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         }
     }
     if app.view.is_empty() {
-        let message = if in_playlist {
+        let message = if !app.lib_query.is_empty() {
+            "sin resultados para la búsqueda · Esc limpia"
+        } else if in_playlist {
             "lista vacía · l añade desde la biblioteca · d borra la lista"
         } else if app.lib.count().unwrap_or(0) > 0 {
             "no hay pistas en este filtro · [ ] cambia de filtro"
@@ -533,7 +565,7 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     put(buf, input_rect.x + 1, input_rect.y, "/", color(pal.primary), None);
     let empty = app.search.query.is_empty();
     let query = if empty {
-        "artistas, álbumes y canciones…".to_string()
+        "canciones, artistas y álbumes…".to_string()
     } else {
         app.search.query.clone()
     };
@@ -549,7 +581,7 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            "buscando artistas, álbumes y canciones…",
+            "buscando canciones, artistas y álbumes…",
             Style::new().fg(color(pal.warn)),
             Alignment::Left,
         );
@@ -565,13 +597,21 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         y += 1;
     }
 
-    // Lista mixta: artistas, álbumes y canciones, como Spotify.
+    // Lista mixta: primero canciones, luego artistas y álbumes. El catálogo
+    // de Deezer devuelve muchos álbumes y antes empujaban las pistas fuera de
+    // la pantalla, que es justo lo que el usuario venía a buscar.
     #[derive(Clone, Copy)]
     enum Row {
         Section(&'static str),
         Entry(crate::app::SearchEntry),
     }
     let mut rows: Vec<Row> = Vec::new();
+    if !app.search.results.is_empty() {
+        rows.push(Row::Section("CANCIONES"));
+        for index in 0..app.search.results.len() {
+            rows.push(Row::Entry(crate::app::SearchEntry::Track(index)));
+        }
+    }
     if !app.search.artists.is_empty() {
         rows.push(Row::Section("ARTISTAS"));
         for index in 0..app.search.artists.len() {
@@ -582,12 +622,6 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         rows.push(Row::Section("ÁLBUMES"));
         for index in 0..app.search.albums.len() {
             rows.push(Row::Entry(crate::app::SearchEntry::Album(index)));
-        }
-    }
-    if !app.search.results.is_empty() {
-        rows.push(Row::Section("CANCIONES"));
-        for index in 0..app.search.results.len() {
-            rows.push(Row::Entry(crate::app::SearchEntry::Track(index)));
         }
     }
     if rows.is_empty() {
@@ -767,11 +801,9 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
 
 fn entry_flat(app: &App, entry: crate::app::SearchEntry) -> usize {
     match entry {
-        crate::app::SearchEntry::Artist(i) => i,
-        crate::app::SearchEntry::Album(i) => app.search.artists.len() + i,
-        crate::app::SearchEntry::Track(i) => {
-            app.search.artists.len() + app.search.albums.len() + i
-        }
+        crate::app::SearchEntry::Track(i) => i,
+        crate::app::SearchEntry::Artist(i) => app.search.results.len() + i,
+        crate::app::SearchEntry::Album(i) => app.search.results.len() + app.search.artists.len() + i,
     }
 }
 
@@ -1097,7 +1129,7 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         let mode = if app.room.is_some() {
             "sala"
         } else if app.follow_spotify {
-            "spotify"
+            "sistema"
         } else if app.social.is_some() {
             "servidor"
         } else {

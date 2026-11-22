@@ -52,18 +52,22 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
                 } else {
                     pal.surface
                 }))
-                .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
             Alignment::Center,
         );
         app.hit.add(tab_rect, Action::Tab(tab));
         x += width + 1;
     }
 
-    // Chip de Spotify: la puerta de entrada al modo acompañante.
+    // Chip del reproductor del sistema: puerta de entrada al modo MPRIS.
     let spotify_label = if app.follow_spotify {
-        "● spotify"
+        "● sistema"
     } else {
-        "○ spotify"
+        "○ sistema"
     };
     let spotify_width = spotify_label.chars().count() as u16 + 2;
     if x + spotify_width + 1 < rect.x + rect.width.saturating_sub(24) {
@@ -73,7 +77,11 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             buf,
             chip_rect,
             if app.follow_spotify {
-                mix(pal.surface, pal.secondary, 0.30 + app.audio.kick_pulse * 0.20)
+                mix(
+                    pal.surface,
+                    pal.secondary,
+                    0.30 + app.audio.kick_pulse * 0.20,
+                )
             } else if hover {
                 pal.surface_alt
             } else {
@@ -97,7 +105,11 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     // Estado de la derecha.
     let mut right = rect.x + rect.width.saturating_sub(1);
     let fps = if app.cfg.ui.show_fps {
-        Some(format!("{:.0} fps · {:.1} ms", app.fps.value(), app.frame_ms))
+        Some(format!(
+            "{:.0} fps · {:.1} ms",
+            app.fps.value(),
+            app.frame_ms
+        ))
     } else {
         None
     };
@@ -117,7 +129,7 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         let label = app.room_label(&room.id);
         items.push((format!("◆ {label}"), pal.primary));
     } else if app.follow_spotify {
-        items.push(("● spotify".into(), pal.secondary));
+        items.push(("● sistema".into(), pal.secondary));
     } else if app.social.is_some() {
         items.push((
             if app.social_connected {
@@ -194,7 +206,16 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     use crate::app::LibFilter;
     let rect = layout.nav;
     let focused = app.focus == crate::app::Pane::Nav;
-    panel(Some(app), buf, rect, pal, focused, 0.55, Some("vistas"), app.audio.kick_pulse);
+    panel(
+        Some(app),
+        buf,
+        rect,
+        pal,
+        focused,
+        0.55,
+        Some("vistas"),
+        app.audio.kick_pulse,
+    );
     app.hit.add(rect, Action::Focus(crate::app::Pane::Nav));
     // Clic derecho en la cabecera "vistas": crear/importar lista, recargar...
     app.hit
@@ -217,11 +238,7 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         let active = app.tab == tab;
         let row = Rect::new(rect.x + 1, y, rect.width - 2, 1);
         if active {
-            fill(
-                buf,
-                row,
-                mix(pal.surface, pal.primary, 0.22 + pulse * 0.10),
-            );
+            fill(buf, row, mix(pal.surface, pal.primary, 0.22 + pulse * 0.10));
             put(buf, row.x, y, "▍", color(pal.primary), None);
         }
         let fg = if active {
@@ -235,9 +252,11 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             buf,
             Rect::new(row.x + 2, y, row.width.saturating_sub(2), 1),
             format!("{}  {}", tab.icon(), tab.label()),
-            Style::new()
-                .fg(color(fg))
-                .add_modifier(if active { Modifier::BOLD } else { Modifier::empty() }),
+            Style::new().fg(color(fg)).add_modifier(if active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
             Alignment::Left,
         );
         app.hit.add(row, Action::Tab(tab));
@@ -325,14 +344,15 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         return;
     }
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
-    let progress = {
-        let duration = app.now.duration_ms.max(1);
+    let progress = if app.now.duration_ms == 0 {
+        0.0
+    } else {
+        let duration = app.now.duration_ms;
         let position = app.display_position_ms().min(duration);
         (position as f32 / duration as f32).clamp(0.0, 1.0)
     };
     let pulse = (app.pulse.eased() * 0.45 + app.audio.kick_pulse * 0.55).min(1.0);
-    let progress_row =
-        rect.height >= 2 && (!app.progress_in_viz || layout.viz.height < 2);
+    let progress_row = rect.height >= 2 && (!app.progress_in_viz || layout.viz.height < 2);
     if app.progress_in_viz && layout.viz.height >= 2 {
         let y = layout.viz.y + layout.viz.height / 2;
         let width = bar_width(rect.width, app.bar_width_pct);
@@ -347,135 +367,178 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
     let controls_y = rect.y + u16::from(progress_row);
     let controls_h = rect.height.saturating_sub(u16::from(progress_row)).max(1);
     let compact = rect.width < 82;
-    let big = controls_h >= 2 && rect.width >= 64;
+    let big = controls_h >= 2 && rect.width >= 100;
     let pad = u16::from(app.button_pad.clamp(1, 4));
     let (prev_label, play_label, next_label) =
         ("◀◀", if app.now.playing { PAUSE } else { PLAY }, "▶▶");
-    let loop_label = if app.loop_file { "⟲ on" } else { "⟲" };
-    let (prev_w, play_w, next_w, loop_w) = if big {
-        (7, 9, 9, 7)
+    let repeat_label = match app.repeat_mode {
+        spote_core::playback::RepeatMode::Off => "⟲",
+        spote_core::playback::RepeatMode::All => "⟲",
+        spote_core::playback::RepeatMode::One => "⟲1",
+    };
+    let side_w = if big { 9 } else { 5 };
+    let (prev_w, play_w, next_w, repeat_w) = if big {
+        (7, 9, 9, side_w)
     } else {
         (
             prev_label.chars().count() as u16 + pad * 2,
             play_label.chars().count() as u16 + pad * 2,
             next_label.chars().count() as u16 + pad * 2,
-            loop_label.chars().count() as u16 + pad * 2,
+            side_w,
         )
     };
-    let total_w = prev_w + play_w + next_w + loop_w + 3;
+    let show_modes = rect.width >= 72;
+    // Con los modos ocultos no se reserva su hueco: play/next deben quedar
+    // centrados aunque el ancho no permita enseñar shuffle y repeat.
+    let total_w = prev_w + play_w + next_w + 2 + if show_modes { (side_w + 1) * 2 } else { 0 };
     let mut x = rect.x + rect.width.saturating_sub(total_w) / 2;
-    let play_rect = Rect::new(x + prev_w + 1, controls_y, play_w, controls_h);
+    let play_rect = Rect::new(
+        x + if show_modes { side_w + 1 } else { 0 } + prev_w + 1,
+        controls_y,
+        play_w,
+        controls_h,
+    );
     if app.cfg.ui.fx.bloom_play {
         bloom_glow(buf, play_rect, pal, 0.35 + app.audio.kick_pulse * 0.45);
     }
-    for (label, width, action, primary) in [
-        (prev_label, prev_w, Action::Prev, false),
-        (play_label, play_w, Action::PlayPause, true),
-        (next_label, next_w, Action::Next, false),
-        (loop_label, loop_w, Action::LoopToggle, false),
-    ] {
-        let button = Rect::new(x, controls_y, width, controls_h);
-        let hover = app.hover == Some(action.clone());
-        let looping = matches!(action, Action::LoopToggle) && app.loop_file;
-        let bg = if hover {
-            pal.surface_alt
-        } else if primary {
-            mix_oklab(pal.surface, pal.primary, 0.25 + pulse * 0.32)
-        } else if looping {
-            mix_oklab(pal.surface, pal.primary, 0.30)
+
+    if show_modes {
+        let shuffle = Rect::new(x, controls_y, side_w, controls_h);
+        draw_transport_control(
+            app,
+            buf,
+            shuffle,
+            Action::ToggleShuffle,
+            false,
+            app.shuffle_on,
+            ICON_SHUFFLE,
+            "azar",
+            "⇄",
+            pal,
+            big,
+            controls_h,
+            pulse,
+        );
+        x += side_w + 1;
+    }
+    let prev = Rect::new(x, controls_y, prev_w, controls_h);
+    draw_transport_control(
+        app,
+        buf,
+        prev,
+        Action::Prev,
+        false,
+        false,
+        ICON_PREV,
+        "atrás",
+        prev_label,
+        pal,
+        big,
+        controls_h,
+        pulse,
+    );
+    x += prev_w + 1;
+    let play = Rect::new(x, controls_y, play_w, controls_h);
+    draw_transport_control(
+        app,
+        buf,
+        play,
+        Action::PlayPause,
+        true,
+        false,
+        if app.now.playing {
+            ICON_PAUSE
         } else {
-            pal.surface
-        };
-        fill_soft(buf, button, bg, 0.95, pal.bg_deep);
-        if primary && controls_h >= 2 {
-            let edge = mix_oklab(pal.primary, pal.secondary, pulse);
-            for i in 1..button.width.saturating_sub(1) {
-                put(buf, button.x + i, button.y, "▔", color(edge), None);
-                // Con etiqueta en la última fila, la línea inferior la tacharía.
-                if controls_h < 3 {
-                    put(buf, button.x + i, button.y + button.height - 1, "▁", color(edge), None);
-                }
-            }
-        }
-        if matches!(action, Action::LoopToggle) {
-            text_at(
-                buf,
-                button,
-                loop_label.to_string(),
-                Style::new()
-                    .fg(color(if looping { pal.primary } else { pal.muted }))
-                    .add_modifier(if looping || !big {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-                Alignment::Center,
-            );
-        } else if big {
-            let icon = if primary {
-                if app.now.playing { ICON_PAUSE } else { ICON_PLAY }
-            } else if matches!(action, Action::Prev) {
-                ICON_PREV
+            ICON_PLAY
+        },
+        if app.now.playing { "pausa" } else { "play" },
+        play_label,
+        pal,
+        big,
+        controls_h,
+        pulse,
+    );
+    x += play_w + 1;
+    let next = Rect::new(x, controls_y, next_w, controls_h);
+    draw_transport_control(
+        app,
+        buf,
+        next,
+        Action::Next,
+        false,
+        false,
+        ICON_NEXT,
+        "siguiente",
+        next_label,
+        pal,
+        big,
+        controls_h,
+        pulse,
+    );
+    x += next_w + 1;
+    if show_modes {
+        let repeat = Rect::new(x, controls_y, repeat_w, controls_h);
+        draw_transport_control(
+            app,
+            buf,
+            repeat,
+            Action::CycleRepeat,
+            false,
+            !matches!(app.repeat_mode, spote_core::playback::RepeatMode::Off),
+            if matches!(app.repeat_mode, spote_core::playback::RepeatMode::One) {
+                ICON_REPEAT_ONE
             } else {
-                ICON_NEXT
-            };
-            let label = if primary {
-                if app.now.playing { "pausa" } else { "play" }
-            } else if matches!(action, Action::Prev) {
-                "atrás"
-            } else {
-                "siguiente"
-            };
-            if controls_h >= 3 {
-                let icon_rect = Rect::new(button.x, button.y, button.width, controls_h - 1);
-                draw_icon(
-                    buf,
-                    icon_rect,
-                    icon,
-                    color(if primary { pal.text } else { pal.muted }),
-                    primary,
-                );
-                text_at(
-                    buf,
-                    Rect::new(button.x, button.y + controls_h - 1, button.width, 1),
-                    label,
-                    Style::new().fg(color(if primary { pal.primary } else { pal.dim })),
-                    Alignment::Center,
-                );
-            } else {
-                draw_icon(
-                    buf,
-                    button,
-                    icon,
-                    color(if primary { pal.text } else { pal.muted }),
-                    primary,
-                );
-            }
-        } else {
-            text_at(
-                buf,
-                button,
-                label.to_string(),
-                Style::new()
-                    .fg(color(if primary { pal.primary } else { pal.text }))
-                    .add_modifier(Modifier::BOLD),
-                Alignment::Center,
-            );
-        }
-        app.hit.add(button, action);
-        x += width + 1;
+                ICON_REPEAT
+            },
+            match app.repeat_mode {
+                spote_core::playback::RepeatMode::One => "bucle 1",
+                spote_core::playback::RepeatMode::All => "todo",
+                spote_core::playback::RepeatMode::Off => "bucle",
+            },
+            repeat_label,
+            pal,
+            big,
+            controls_h,
+            pulse,
+        );
     }
 
     // Slider de volumen: barra con degradado, knob y porcentaje. Se puede
     // arrastrar, clicar y mover con ↑↓ cuando el transporte tiene el foco.
-    let vol_w = if compact { 8 } else { 14u16.min(rect.width / 6).max(8) };
+    let vol_w = if compact {
+        8
+    } else {
+        14u16.min(rect.width / 6).max(8)
+    };
     let vol_x = rect.x + 2;
     let y = controls_y + controls_h / 2;
-    let icon = if app.now.volume <= 0.001 { "🔇" } else { "♪" };
-    put(buf, vol_x, y, icon, color(if app.now.volume <= 0.001 { pal.error } else { pal.secondary }), None);
+    let icon = if app.now.volume <= 0.001 {
+        "🔇"
+    } else {
+        "♪"
+    };
+    put(
+        buf,
+        vol_x,
+        y,
+        icon,
+        color(if app.now.volume <= 0.001 {
+            pal.error
+        } else {
+            pal.secondary
+        }),
+        None,
+    );
     let track_x = vol_x + 2;
     if app.focus == crate::app::Pane::Transport {
-        put(buf, vol_x.saturating_sub(1), y, "▏", color(pal.primary), None);
+        put(
+            buf,
+            vol_x.saturating_sub(1),
+            y,
+            "▏",
+            color(pal.primary),
+            None,
+        );
     }
     for i in 0..vol_w {
         let t = (i as f32 + 0.5) / vol_w as f32;
@@ -492,9 +555,11 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         };
         put(buf, track_x + i, y, ch, color(fg), None);
     }
-    // Zona clicable un poco más alta para que no haya que acertar la fila.
+    // La zona clicable no puede subir a la fila de progreso: en un transporte
+    // de dos filas se comía los clics de la barra de seek.
+    let hit_h = if controls_h >= 3 { 2 } else { 1 };
     app.hit.add(
-        Rect::new(track_x, y.saturating_sub(1), vol_w, 2.min(rect.height)),
+        Rect::new(track_x, y, vol_w, hit_h.min(rect.height)),
         Action::VolumeTrack,
     );
     let label = format!("{:>3.0}%", app.now.volume * 100.0);
@@ -503,11 +568,13 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         track_x + vol_w + 1,
         y,
         &label,
-        color(if app.dragging_volume || app.focus == crate::app::Pane::Transport {
-            pal.primary
-        } else {
-            pal.dim
-        }),
+        color(
+            if app.dragging_volume || app.focus == crate::app::Pane::Transport {
+                pal.primary
+            } else {
+                pal.dim
+            },
+        ),
         None,
     );
 
@@ -523,21 +590,35 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         if track_x + vol_w + 8 + width < rect.x + rect.width / 2 {
             let chip = Rect::new(track_x + vol_w + 7, y, width, 1);
             fill(buf, chip, mix(pal.surface, pal.primary, 0.12));
-            text_at(buf, chip, text, Style::new().fg(color(pal.primary)), Alignment::Center);
+            text_at(
+                buf,
+                chip,
+                text,
+                Style::new().fg(color(pal.primary)),
+                Alignment::Center,
+            );
         }
     }
 
     // Derecha: viz, arte, spotify (separados del resto).
     let mut right = rect.x + rect.width.saturating_sub(2);
     let mut items: Vec<(String, Action, Rgb)> = vec![
-        (app.viz.preset_name().to_string(), Action::VizNext, pal.primary),
-        (format!("arte {}", app.art_mode.label()), Action::ArtMode, pal.dim),
+        (
+            app.viz.preset_name().to_string(),
+            Action::VizNext,
+            pal.primary,
+        ),
+        (
+            format!("arte {}", app.art_mode.label()),
+            Action::ArtMode,
+            pal.dim,
+        ),
     ];
     if let Some(section) = app.song_section {
         items.push((section.label().to_string(), Action::VizNext, pal.secondary));
     }
     if app.follow_spotify {
-        items.push(("spotify".into(), Action::ToggleFollow, pal.secondary));
+        items.push(("sistema".into(), Action::ToggleFollow, pal.secondary));
     }
     for (label, action, fg) in items {
         let width = label.chars().count() as u16 + 2;
@@ -564,38 +645,23 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
     }
 }
 
-const ICON_PLAY: &[&str] = &[
-    "█    ",
-    "██   ",
-    "███  ",
-    "██   ",
-    "█    ",
-];
-const ICON_PAUSE: &[&str] = &[
-    "█  █",
-    "█  █",
-    "█  █",
-    "█  █",
-    "█  █",
-];
-const ICON_PREV: &[&str] = &[
-    "█  █ ",
-    "██ █ ",
-    "███  ",
-    "██ █ ",
-    "█  █ ",
-];
-const ICON_NEXT: &[&str] = &[
-    " █  █",
-    " █ ██",
-    "  ███",
-    " █ ██",
-    " █  █",
-];
+const ICON_PLAY: &[&str] = &["█    ", "██   ", "███  ", "██   ", "█    "];
+const ICON_PAUSE: &[&str] = &["█  █", "█  █", "█  █", "█  █", "█  █"];
+
+const ICON_PREV: &[&str] = &["█  █ ", "██ █ ", "███  ", "██ █ ", "█  █ "];
+const ICON_NEXT: &[&str] = &[" █  █", " █ ██", "  ███", " █ ██", " █  █"];
+
+const ICON_SHUFFLE: &[&str] = &["██   ██", " ██ ██ ", "  ███  ", " ██ ██ ", "██   ██"];
+const ICON_REPEAT: &[&str] = &["███████", "█     █", "█     █", "█     █", "███████"];
+const ICON_REPEAT_ONE: &[&str] = &["███████", "█     █", "█  █  █", "█  █  █", "███████"];
 
 /// Pinta un icono de bloque centrado, escalando si el botón es más alto.
 pub(super) fn draw_icon(buf: &mut Buffer, rect: Rect, icon: &[&str], fg: Color, glow: bool) {
-    let w = icon.iter().map(|line| line.chars().count()).max().unwrap_or(0) as u16;
+    let w = icon
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
     if rect.width < w || rect.height == 0 {
         return;
     }
@@ -657,7 +723,9 @@ pub(super) fn bloom_glow(buf: &mut Buffer, rect: Rect, pal: &Palette, amount: f3
             if glow <= 0.005 {
                 continue;
             }
-            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
             let under = match cell.bg {
                 Color::Rgb(r, g, b) => (r, g, b),
                 _ => pal.bg_deep,
@@ -670,6 +738,116 @@ pub(super) fn bloom_glow(buf: &mut Buffer, rect: Rect, pal: &Palette, amount: f3
             }
         }
     }
+}
+
+/// Botón del transporte. Todos comparten altura, relleno, hover, borde activo
+/// y el mismo par icono/etiqueta; así shuffle y bucle no parecen de otra TUI.
+#[allow(clippy::too_many_arguments)]
+fn draw_transport_control(
+    app: &mut App,
+    buf: &mut Buffer,
+    rect: Rect,
+    action: Action,
+    primary: bool,
+    active: bool,
+    icon: &[&str],
+    big_label: &str,
+    compact_label: &str,
+    pal: &Palette,
+    big: bool,
+    controls_h: u16,
+    pulse: f32,
+) {
+    let hover = app.hover == Some(action.clone());
+    let bg = if hover {
+        pal.surface_alt
+    } else if primary {
+        mix_oklab(pal.surface, pal.primary, 0.25 + pulse * 0.32)
+    } else if active {
+        mix_oklab(pal.surface, pal.primary, 0.30)
+    } else {
+        pal.surface
+    };
+    fill_soft(buf, rect, bg, 0.95, pal.bg_deep);
+    if (primary || active) && controls_h == 2 {
+        // Con dos filas el borde superior/inferior sustituye al fondo como
+        // indicador. Con tres o más hay icono pixel-art: el fondo y el brillo
+        // ya marcan el estado y no se pisa la primera fila del dibujo.
+        let edge = if active {
+            mix_oklab(pal.primary, pal.secondary, 0.35)
+        } else {
+            mix_oklab(pal.primary, pal.secondary, pulse)
+        };
+        for i in 1..rect.width.saturating_sub(1) {
+            put(buf, rect.x + i, rect.y, "▔", color(edge), None);
+            put(
+                buf,
+                rect.x + i,
+                rect.y + rect.height - 1,
+                "▁",
+                color(edge),
+                None,
+            );
+        }
+    }
+    if big {
+        if controls_h >= 4 {
+            // Cuatro filas: tres de icono y una de etiqueta.
+            let icon_rect = Rect::new(rect.x, rect.y, rect.width, controls_h - 1);
+            draw_icon(
+                buf,
+                icon_rect,
+                icon,
+                color(if primary || active {
+                    pal.text
+                } else {
+                    pal.muted
+                }),
+                primary,
+            );
+            text_at(
+                buf,
+                Rect::new(rect.x, rect.y + controls_h - 1, rect.width, 1),
+                big_label,
+                Style::new().fg(color(if primary || active {
+                    pal.primary
+                } else {
+                    pal.dim
+                })),
+                Alignment::Center,
+            );
+        } else {
+            // Tres filas (el alto por defecto): el icono usa todo el botón y
+            // se muestra a resolución completa. Las etiquetas volverían a
+            // robar una fila y dejarían el repeat en dos píxeles ilegibles.
+            draw_icon(
+                buf,
+                rect,
+                icon,
+                color(if primary || active {
+                    pal.text
+                } else {
+                    pal.muted
+                }),
+                primary,
+            );
+        }
+    } else {
+        text_at(
+            buf,
+            rect,
+            compact_label.to_string(),
+            Style::new()
+                .fg(color(if primary || active {
+                    pal.primary
+                } else {
+                    pal.text
+                }))
+                .add_modifier(Modifier::BOLD),
+            Alignment::Center,
+        );
+    }
+    app.hit.add(rect, action);
 }
 
 /// Ancho de la barra según el ajuste, sin comerse los tiempos laterales.
@@ -767,7 +945,6 @@ pub(super) fn draw_progress_bar(
     }
 }
 
-
 pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.hint;
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
@@ -782,10 +959,14 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             "♪ {}  ·  {}{}",
             track.title,
             track.artist,
-            if app.follow_spotify { "  ·  spotify" } else { "" }
+            if app.follow_spotify {
+                "  ·  sistema"
+            } else {
+                ""
+            }
         )
     } else if app.follow_spotify {
-        "modo acompañante de spotify".to_string()
+        "modo acompañante del sistema (MPRIS)".to_string()
     } else {
         format!(
             "{} pistas · {} descargadas",
@@ -805,7 +986,8 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         );
         if let Some(track) = &app.now.track {
             if !track.artist.is_empty() {
-                app.hit.add(right_rect, Action::OpenArtist(track.artist.clone()));
+                app.hit
+                    .add(right_rect, Action::OpenArtist(track.artist.clone()));
             }
         }
     }

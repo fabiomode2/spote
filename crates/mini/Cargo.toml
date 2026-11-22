@@ -1,0 +1,13 @@
+[package]
+name = "spote-mini"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# eframe 0.32 exige 1.85. El crate queda fuera de `default-members` para que
+# el build/test normal no dependa de libs gráficas.
+rust-version = "1.85"
+
+[dependencies]
+spote-protocol = { path = "../protocol" }
+eframe = { version = "0.32.3", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
+image = { workspace = true }

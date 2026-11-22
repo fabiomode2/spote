@@ -4,16 +4,21 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio_fx::AudioCfg;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub app: AppCfg,
     pub server: ServerCfg,
     pub player: PlayerCfg,
+    pub playback: PlaybackCfg,
     pub ui: UiCfg,
     pub download: DownloadCfg,
     pub lyrics: LyricsCfg,
     pub discord: DiscordCfg,
+    /// EQ, preamp, normalizador y limitador aplicados en caliente a mpv.
+    pub audio: AudioCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +117,12 @@ pub struct PlayerCfg {
     pub volume: f32,
     pub prefetch: usize,
     pub mpv_path: String,
+    /// Reproduce una URL resuelta mientras se descarga la pista en segundo plano.
+    pub streaming: bool,
+    /// Guarda en `media/` lo que se está reproduciendo en streaming.
+    pub stream_cache: bool,
+    /// `system` captura el monitor para el visualizador; `off` lo apaga.
+    pub remote_viz: String,
 }
 
 impl Default for PlayerCfg {
@@ -120,6 +131,27 @@ impl Default for PlayerCfg {
             volume: 0.8,
             prefetch: 2,
             mpv_path: "mpv".to_string(),
+            streaming: true,
+            stream_cache: true,
+            remote_viz: "system".to_string(),
+        }
+    }
+}
+
+/// Modos de reproducción persistidos. Son preferencias, no estado de sesión.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlaybackCfg {
+    /// `off` | `all` | `one`
+    pub repeat: String,
+    pub shuffle: bool,
+}
+
+impl Default for PlaybackCfg {
+    fn default() -> Self {
+        Self {
+            repeat: "off".to_string(),
+            shuffle: false,
         }
     }
 }
@@ -347,6 +379,7 @@ impl Config {
                     eprintln!("spote: config inválida en {}: {err}", path.display());
                     Self::default()
                 });
+                cfg.audio = cfg.audio.sanitized();
                 // Configs anteriores al rediseño: la rotación venía encendida y
                 // no existía `[ui.layout]`. Se migra una vez, sin tocar el resto.
                 if !text.contains("[ui.layout]") {
@@ -370,7 +403,10 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(path, text)
+        // Escritura atómica: un corte a mitad no deja la config truncada.
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)
     }
 
     pub fn media_dir(&self) -> PathBuf {
@@ -431,12 +467,17 @@ fn expand(path: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    use crate::audio_fx::NormalizerMode;
+
     #[test]
     fn defaults_are_usable() {
         let cfg = Config::default();
         assert_eq!(cfg.ui.art_mode, "plain");
         assert!(!cfg.server.url.is_empty() || cfg.server.url.is_empty());
         assert!(cfg.player.volume > 0.0);
+        // El audio por defecto no procesa nada: el limitador es opt-in.
+        assert!(!cfg.audio.limiter);
+        assert_eq!(cfg.audio.filter_chain(), None);
     }
 
     #[test]
@@ -454,5 +495,32 @@ mod tests {
         assert_eq!(cfg.ui.fps, 30);
         assert_eq!(cfg.ui.art_mode, "plain");
         assert_eq!(cfg.player.volume, 0.8);
+    }
+
+    #[test]
+    fn old_config_without_audio_section_uses_audio_defaults() {
+        let cfg: Config = toml::from_str("[ui]\nfps = 30\n[player]\nvolume = 0.4\n").unwrap();
+        assert_eq!(cfg.audio, AudioCfg::default());
+        assert!(cfg.audio.enabled);
+        assert!(cfg.audio.eq_enabled);
+        assert_eq!(cfg.audio.normalizer, NormalizerMode::Off);
+    }
+
+    #[test]
+    fn audio_section_roundtrips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.audio.enabled = true;
+        cfg.audio.preamp_db = -2.5;
+        cfg.audio.bands = [1.0, 0.0, -1.5, 2.0, 0.0, 0.0, 3.0, 0.0, 0.0, -4.0];
+        cfg.audio.normalizer = NormalizerMode::Dynamic;
+        cfg.audio.normalizer_strength = 0.75;
+        cfg.audio.limiter = true;
+
+        let text = toml::to_string(&cfg).unwrap();
+        assert!(text.contains("[audio]"));
+        assert!(text.contains("normalizer = \"dynamic\""));
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.audio, cfg.audio);
+        assert_eq!(back.ui.art_mode, cfg.ui.art_mode);
     }
 }

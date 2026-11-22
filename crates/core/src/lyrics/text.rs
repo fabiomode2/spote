@@ -39,8 +39,24 @@ impl VersionKind {
 
 /// Deduce la variante mirando título y álbum. Las palabras se buscan completas
 /// para que "alive" no cuente como "live".
+///
+/// Solo se miran los grupos entre paréntesis/corchetes, lo que va detrás de un
+/// separador (` - `, ` | `…) y el álbum. Mirar el título entero convertía
+/// "Live Forever" o "Cover Me" en directo/cover. Si no hay ningún grupo ni
+/// separador, se acepta la pista completa solo cuando el marcador cierra el
+/// título ("Song Live"), no cuando lo abre.
 pub fn version_kind(title: &str, album: Option<&str>) -> VersionKind {
-    let haystack = words_of(&format!("{title} {}", album.unwrap_or_default()).to_lowercase());
+    let mut scopes: Vec<String> = Vec::new();
+    if let Some(album) = album.filter(|value| !value.trim().is_empty()) {
+        scopes.push(album.to_lowercase());
+    }
+    scopes.extend(group_contents(title));
+    scopes.extend(suffix_scopes(title));
+    let whole_title = scopes.is_empty();
+    if whole_title {
+        scopes.push(title.to_lowercase());
+    }
+
     const HINTS: &[(VersionKind, &[&str])] = &[
         (
             VersionKind::Karaoke,
@@ -80,11 +96,54 @@ pub fn version_kind(title: &str, album: Option<&str>) -> VersionKind {
         ),
     ];
     for (kind, needles) in HINTS {
-        if needles.iter().any(|needle| has_phrase(&haystack, needle)) {
+        let found = scopes.iter().any(|scope| {
+            let words = words_of(scope);
+            needles.iter().any(|needle| {
+                if whole_title {
+                    has_suffix_phrase(&words, needle)
+                } else {
+                    has_phrase(&words, needle)
+                }
+            })
+        });
+        if found {
             return *kind;
         }
     }
     VersionKind::Studio
+}
+
+/// Contenido de los grupos `(…)`, `[…]` y `{…}` de un título.
+fn group_contents(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(|ch| matches!(ch, '(' | '[' | '{')) {
+        let open = rest[start..].chars().next().unwrap_or('(');
+        let close = match open {
+            '[' => ']',
+            '{' => '}',
+            _ => ')',
+        };
+        let after = &rest[start + open.len_utf8()..];
+        let Some(end) = after.find(close) else { break };
+        out.push(after[..end].to_lowercase());
+        rest = &after[end + close.len_utf8()..];
+    }
+    out
+}
+
+/// Lo que queda detrás de cada separador tipo "Artista - Tema".
+fn suffix_scopes(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for separator in SEPARATORS {
+        let mut from = 0;
+        while let Some(found) = text[from..].find(separator) {
+            let start = from + found + separator.len();
+            out.push(text[start..].to_lowercase());
+            from = start;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +583,88 @@ fn has_phrase(words: &str, phrase: &str) -> bool {
     words.contains(&format!(" {phrase} "))
 }
 
+/// `true` si la frase cierra el texto. `words` viene de [`words_of`], con un
+/// espacio final, así que se compara contra el final recortado.
+fn has_suffix_phrase(words: &str, phrase: &str) -> bool {
+    words.trim_end().ends_with(&format!(" {phrase}"))
+}
+
+/// `true` para los proveedores cuyo id es un vídeo de YouTube y cuyas captions
+/// comparten los tiempos del audio descargado.
+pub fn is_youtube_provider(provider: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    let compact: String = provider.chars().filter(|ch| !ch.is_whitespace()).collect();
+    provider.contains("youtube") || compact == "ytmusic" || compact == "yt"
+}
+
+/// Canales que suben música de otros: discográficas, recopilatorios, canales
+/// de letras. El nombre del canal no identifica al artista y no puede usarse
+/// como puerta dura en el matching.
+pub fn is_curator_artist(artist: &str) -> bool {
+    let words = words_of(&artist.to_lowercase());
+    const CURATOR_WORDS: &[&str] = &[
+        "records",
+        "recordings",
+        "music",
+        "official",
+        "label",
+        "entertainment",
+        "media",
+        "uploads",
+        "channel",
+        "videos",
+        "network",
+        "lyrics",
+        "hits",
+        "playlist",
+    ];
+    CURATOR_WORDS
+        .iter()
+        .any(|needle| has_phrase(&words, *needle))
+}
+
+/// `true` cuando el texto empieza por un marcador de versión: "Live at…",
+/// "Remix", "En vivo…". Sirve para distinguir "Tema - Live at X" (título a la
+/// izquierda) de "Artista - Tema (Live)" (artista a la izquierda).
+pub fn starts_with_version_marker(text: &str) -> bool {
+    let words = words_of(&text.to_lowercase());
+    let first = words.split_whitespace().next().unwrap_or_default();
+    matches!(
+        first,
+        "live"
+            | "remix"
+            | "rmx"
+            | "cover"
+            | "instrumental"
+            | "karaoke"
+            | "acoustic"
+            | "demo"
+            | "sped"
+            | "slowed"
+            | "en"
+            | "ao"
+            | "unplugged"
+            | "concert"
+            | "nightcore"
+    )
+}
+
+/// Título listo para una query HTTP: además de la limpieza normal, pliega
+/// comillas y guiones tipográficos que LRCLIB/Genius no siempre normalizan.
+pub fn search_title(title: &str) -> String {
+    let folded: String = title
+        .chars()
+        .map(|ch| match ch {
+            '’' | '‘' | '`' | '´' => '\'',
+            '“' | '”' => '"',
+            '–' | '—' | '−' => '-',
+            '\u{00a0}' => ' ',
+            other => other,
+        })
+        .collect();
+    clean_title(&folded)
+}
+
 /// `find` en minúsculas, solo cuando los índices siguen cuadrando con el
 /// original (`to_lowercase` puede cambiar el número de bytes).
 fn find_lower(text: &str, needle: &str) -> Option<usize> {
@@ -609,6 +750,60 @@ mod tests {
         assert_eq!(version_kind("Stayin' Alive", None), VersionKind::Studio);
         assert!(VersionKind::Karaoke.is_incompatible());
         assert!(!VersionKind::Live.is_incompatible());
+    }
+
+    #[test]
+    fn version_kind_does_not_mistake_the_song_title_for_a_version() {
+        // "Live Forever" y "Cover Me" son títulos, no versiones. Antes el
+        // escaneo del título completo los penalizaba como directo/cover.
+        assert_eq!(version_kind("Live Forever", None), VersionKind::Studio);
+        assert_eq!(version_kind("Cover Me", None), VersionKind::Studio);
+        assert_eq!(version_kind("Alive", None), VersionKind::Studio);
+        assert_eq!(version_kind("Remix", Some("Album")), VersionKind::Studio);
+        // El marcador sí cuenta cuando cierra el título o va en el sufijo.
+        assert_eq!(version_kind("Song Live", None), VersionKind::Live);
+        assert_eq!(
+            version_kind("Song - Live at Reading", None),
+            VersionKind::Live
+        );
+        assert_eq!(
+            version_kind("Song (Official Live Video)", None),
+            VersionKind::Live
+        );
+    }
+
+    #[test]
+    fn version_suffixes_are_distinguished_from_version_titles() {
+        assert!(starts_with_version_marker("Live at Reading"));
+        assert!(starts_with_version_marker("Remix"));
+        assert!(starts_with_version_marker("En vivo desde Madrid"));
+        assert!(!starts_with_version_marker("Do I Wanna Know? (Live)"));
+        assert!(!starts_with_version_marker("Song Live"));
+    }
+
+    #[test]
+    fn curator_channels_are_not_artists() {
+        assert!(is_curator_artist("Sony Music"));
+        assert!(is_curator_artist("Official Charts"));
+        assert!(is_curator_artist("Indie Uploads"));
+        assert!(!is_curator_artist("Arctic Monkeys"));
+        assert!(!is_curator_artist("Tame Impala"));
+    }
+
+    #[test]
+    fn youtube_providers_are_recognized() {
+        for provider in ["youtube", "YouTube", "ytmusic", "YT Music", "yt"] {
+            assert!(is_youtube_provider(provider), "{provider}");
+        }
+        for provider in ["spotify", "deezer", "soundcloud", "local", ""] {
+            assert!(!is_youtube_provider(provider), "{provider}");
+        }
+    }
+
+    #[test]
+    fn search_title_folds_typography() {
+        assert_eq!(search_title("Don’t Stop “Me” Now"), "Don't Stop \"Me\" Now");
+        assert_eq!(search_title("Song – Official Video"), "Song");
     }
 
     #[test]

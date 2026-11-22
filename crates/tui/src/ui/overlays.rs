@@ -7,11 +7,15 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         // Velo de fondo sólido: los overlays antiguos dejaban traslucir la
         // lista de debajo en terminales con celdas de fondo incompletas.
         fill_soft(buf, layout.full, pal.bg_deep, 0.88, pal.bg_deep);
+        // Un modal captura todo el ratón: sin esto, un clic fuera del panel
+        // podía activar la lista o el transporte que quedaban debajo.
+        app.hit.clear();
     }
     match overlay {
         Overlay::None => {}
         Overlay::Help => draw_help(app, buf, layout, pal),
         Overlay::Effects => draw_effects(app, buf, layout, pal),
+        Overlay::Audio => draw_audio(app, buf, layout, pal),
         Overlay::PlaylistForm => draw_playlist_form(app, buf, layout, pal),
         Overlay::ImportPlaylist => draw_import_playlist(app, buf, layout, pal),
         Overlay::ConfirmDeletePlaylist { name, .. } => {
@@ -313,6 +317,9 @@ pub(super) fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
 
 pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = overlay_frame(layout, pal, buf, 74, 22, "visualizaciones · capas y presets");
+    // El cierre se registra primero: el HitMap se queda con la última acción
+    // añadida y, si fuera al final, se tragaría los clics de presets/capas.
+    app.hit.add(rect, Action::CloseOverlay);
     let inner = Rect::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(4), rect.height.saturating_sub(3));
 
     // Presets.
@@ -346,7 +353,7 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             Style::new().fg(color(if active { pal.text } else { pal.muted })),
             Alignment::Left,
         );
-        app.hit.add(chip_rect, Action::VizNext);
+        app.hit.add(chip_rect, Action::VizPreset(i));
     }
     y += ((presets.len() + per_row - 1) / per_row + 1) as u16;
 
@@ -392,7 +399,7 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     if y < inner.y + inner.height {
         let keys: Vec<&str> = crate::viz::EffectKind::ALL.iter().map(|kind| kind.key()).collect();
         let mut available = format!("disponibles: {}", keys.join(" · "));
-        available.truncate(inner.width.saturating_sub(2) as usize);
+        truncate_chars(&mut available, inner.width.saturating_sub(2) as usize);
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
@@ -401,7 +408,6 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             Alignment::Left,
         );
     }
-    app.hit.add(rect, Action::CloseOverlay);
 }
 
 pub(super) fn blend_label(blend: Blend) -> &'static str {

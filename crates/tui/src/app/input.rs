@@ -18,6 +18,70 @@ impl App {
             self.handle_overlay_key(key);
             return;
         }
+        // Buscador inline de la biblioteca: captura el teclado mientras tiene
+        // el foco para no disparar atajos globales al escribir.
+        if self.lib_search_focus {
+            match key.code {
+                KeyCode::Esc => {
+                    if self.lib_query.is_empty() {
+                        self.lib_search_focus = false;
+                    } else {
+                        self.lib_query.clear();
+                        self.selected = 0;
+                        self.refresh_view();
+                    }
+                }
+                KeyCode::Enter => {
+                    self.lib_search_focus = false;
+                    if self.selected_row().is_some() {
+                        self.play_row(self.selected);
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.lib_query.pop();
+                    self.selected = 0;
+                    self.refresh_view();
+                }
+                KeyCode::Tab => {
+                    self.lib_search_focus = false;
+                    self.tab = self.tab.next();
+                    self.enter_tab();
+                }
+                KeyCode::BackTab => {
+                    self.lib_search_focus = false;
+                    self.tab = self.tab.prev();
+                    self.enter_tab();
+                }
+                KeyCode::Up => {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    if !self.view.is_empty() {
+                        self.selected = (self.selected + 1).min(self.view.len() - 1);
+                    }
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.lib_query.clear();
+                    self.selected = 0;
+                    self.refresh_view();
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.persist_volume();
+                    self.should_quit = true;
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.lib_query.push(c);
+                    self.selected = 0;
+                    self.refresh_view();
+                }
+                _ => {}
+            }
+            self.needs_redraw = true;
+            return;
+        }
         // En la vista de búsqueda se escribe directamente: no hace falta "/".
         if self.tab == Tab::Search {
             match key.code {
@@ -29,6 +93,8 @@ impl App {
                         self.search.results.clear();
                         self.search.albums.clear();
                         self.search.artists.clear();
+                        self.search.last_query_id = self.search.last_query_id.wrapping_add(1);
+                        self.search.loading = false;
                     }
                     return;
                 }
@@ -46,6 +112,11 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     self.search.query.pop();
+                    self.search.last_query_id = self.search.last_query_id.wrapping_add(1);
+                    self.search.loading = false;
+                    self.search.results.clear();
+                    self.search.albums.clear();
+                    self.search.artists.clear();
                     return;
                 }
                 KeyCode::Up => {
@@ -70,6 +141,7 @@ impl App {
                     return;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.persist_volume();
                     self.should_quit = true;
                     return;
                 }
@@ -83,6 +155,8 @@ impl App {
                     self.search.artists.clear();
                     self.search.selected = 0;
                     self.search.message.clear();
+                    self.search.last_query_id = self.search.last_query_id.wrapping_add(1);
+                    self.search.loading = false;
                     return;
                 }
                 _ => {}
@@ -93,7 +167,12 @@ impl App {
             || matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.persist_volume();
                 self.should_quit = true
+            }
+            KeyCode::Char('q') if key.modifiers.is_empty() => {
+                self.persist_volume();
+                self.should_quit = true;
             }
             KeyCode::Char(' ') => self.toggle_play(),
             KeyCode::Esc => {
@@ -122,13 +201,19 @@ impl App {
                 self.enter_tab();
             }
             KeyCode::Char('/') => {
-                self.tab = Tab::Search;
-                self.search.results.clear();
-                self.search.query.clear();
+                if self.tab == Tab::Library {
+                    self.lib_search_focus = true;
+                } else {
+                    self.tab = Tab::Search;
+                    self.search.results.clear();
+                    self.search.query.clear();
+                }
                 self.needs_redraw = true;
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
             KeyCode::Char('e') if !upper => self.overlay = Overlay::Effects,
+            KeyCode::Char('A') => self.open_audio(),
+            KeyCode::Char('w') if !upper => self.open_mini(),
             KeyCode::Char('E') => self.overlay = Overlay::Layout,
             KeyCode::Char('g') if !upper => self.open_artist(),
             KeyCode::Delete => {
@@ -258,8 +343,10 @@ impl App {
                     self.play_queue_selected();
                 } else if self.tab == Tab::Albums {
                     self.album_enter();
-                } else if let Some(row) = self.selected_row().cloned() {
-                    self.play_local(row.track, row.path);
+                } else if matches!(self.tab, Tab::Library | Tab::Now) {
+                    // `play_row` crea el contexto para que next/prev/repeat
+                    // funcionen también desde listas.
+                    self.play_row(self.selected);
                 }
             }
             KeyCode::Char('a') if !upper => match self.tab {
@@ -351,6 +438,8 @@ impl App {
             }
             KeyCode::Char('n') => self.next_track(),
             KeyCode::Char('p') => self.prev_track(),
+            KeyCode::Char('S') => self.toggle_shuffle(),
+            KeyCode::Char('o') if !upper => self.cycle_repeat(),
             KeyCode::Char('.') => {
                 if self.center_focus == CenterFocus::Lyrics {
                     self.nudge_lyrics_offset(100);

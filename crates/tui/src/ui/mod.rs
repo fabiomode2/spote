@@ -16,6 +16,7 @@ use crate::viz::Blend;
 
 mod albums;
 mod art;
+mod audio;
 mod chrome;
 mod layout;
 mod lists;
@@ -25,6 +26,7 @@ mod settings;
 mod side;
 use albums::*;
 use art::*;
+use audio::*;
 use chrome::*;
 pub use layout::Layout;
 use lists::*;

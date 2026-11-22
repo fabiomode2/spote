@@ -113,7 +113,7 @@ pub struct LyricsRow {
 
 /// Se sube cuando cambia el alineado (scoring, relecturas, reparto). Las filas
 /// guardadas con una versión anterior se re-alinean al reproducirlas.
-pub const LYRICS_ALIGN_VERSION: i64 = 2;
+pub const LYRICS_ALIGN_VERSION: i64 = 3;
 
 pub struct Library {
     conn: Connection,
@@ -424,6 +424,8 @@ impl Library {
             "UPDATE source SET status = ?1 WHERE track_id = ?2 AND provider = ?3",
             params![status.as_str(), track_id, provider],
         )?;
+        // El contador de descargadas se cachea 250 ms para pintarlo cada frame.
+        self.ready_cache.set(None);
         Ok(())
     }
 
@@ -444,6 +446,20 @@ impl Library {
         title: &str,
         duration_ms: u64,
     ) -> Result<Option<TrackRow>> {
+        self.find_by_meta_within(artist, title, duration_ms, 8_000)
+    }
+
+    /// Igual que [`find_by_meta`](Self::find_by_meta) con una tolerancia de
+    /// duración explícita. `find_by_meta` es para portada/letras (8 s); un
+    /// reemplazo de reproducción va más justo para no cambiar una versión por
+    /// otra (directo, remix) con el mismo título.
+    fn find_by_meta_within(
+        &self,
+        artist: &str,
+        title: &str,
+        duration_ms: u64,
+        tolerance_ms: u64,
+    ) -> Result<Option<TrackRow>> {
         let artist = artist.trim().to_lowercase();
         let title = title.trim().to_lowercase();
         if title.is_empty() {
@@ -453,12 +469,15 @@ impl Library {
             "{SELECT_TRACK}
              WHERE lower(t.title) = ?1
                AND lower(t.artist) = ?2
-               AND (?3 = 0 OR t.duration_ms = 0 OR abs(t.duration_ms - ?3) < 8000)
+               AND (?3 = 0 OR t.duration_ms = 0 OR abs(t.duration_ms - ?3) < ?4)
              ORDER BY (s.status = 'ready') DESC, abs(t.duration_ms - ?3)
              LIMIT 1"
         ))?;
         let row = stmt
-            .query_row(params![title, artist, duration_ms as i64], row_to_track)
+            .query_row(
+                params![title, artist, duration_ms as i64, tolerance_ms as i64],
+                row_to_track,
+            )
             .optional()?;
         Ok(row)
     }
@@ -467,7 +486,7 @@ impl Library {
     /// proveedor (ISRC/Spotify) distinto. Evita que importar una lista cree
     /// una segunda fila de algo que ya está descargado en la biblioteca.
     pub fn canonical_key(&self, track: &TrackRef) -> String {
-        self.find_by_meta(&track.artist, &track.title, track.duration_ms)
+        self.find_by_meta_within(&track.artist, &track.title, track.duration_ms, 2_000)
             .ok()
             .flatten()
             .map(|row| row.track.key)
@@ -665,6 +684,7 @@ impl Library {
             .ok()
             .flatten()
             .and_then(|row| row.path)
+            .filter(|path| path.exists())
     }
 
     /// Búsqueda full-text. Si la query es basura para FTS5, no explota.
@@ -677,10 +697,17 @@ impl Library {
                     .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
                     .collect::<String>()
             })
-            .filter(|token| !token.is_empty())
+            .filter(|token| {
+                !token.is_empty() && token.chars().any(|c| c.is_alphanumeric())
+            })
             .collect();
-        if tokens.is_empty() {
+        if query.trim().is_empty() {
             return self.recent(limit);
+        }
+        if tokens.is_empty() {
+            // Una consulta solo de puntuación no debe devolver “recientes”:
+            // el usuario está filtrando, no pidiendo la lista por defecto.
+            return Ok(Vec::new());
         }
         let fts_query = tokens
             .iter()
@@ -696,8 +723,14 @@ impl Library {
             .query_map(params![fts_query, limit as i64], row_to_track)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if rows.is_empty() {
-            // FTS5 no hace prefijos con acentos raros: fallback a LIKE.
-            let like = format!("%{}%", query.trim());
+            // FTS5 no hace prefijos con acentos raros: fallback a LIKE. Se
+            // escapan los comodines para que "_" o "%" no devuelvan todo.
+            let literal = query
+                .trim()
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let like = format!("%{literal}%");
             return self.like_search(&like, limit);
         }
         Ok(rows)
@@ -705,8 +738,8 @@ impl Library {
 
     fn like_search(&self, pattern: &str, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} WHERE t.title LIKE ?1 OR t.artist LIKE ?1 OR t.album LIKE ?1
-             ORDER BY t.artist LIMIT ?2"
+            "{SELECT_TRACK} WHERE t.title LIKE ?1 ESCAPE '\\' OR t.artist LIKE ?1 ESCAPE '\\'
+               OR t.album LIKE ?1 ESCAPE '\\' ORDER BY t.artist LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -844,7 +877,7 @@ impl Library {
             }
         }
         let value = self.conn.query_row(
-            "SELECT count(*) FROM source WHERE status = 'ready'",
+            "SELECT count(DISTINCT track_id) FROM source WHERE status = 'ready'",
             [],
             |r| r.get(0),
         )?;
@@ -1432,7 +1465,7 @@ mod tests {
         assert_eq!(lib.search("505", 10).unwrap().len(), 1);
         assert_eq!(lib.search("radiohead", 10).unwrap().len(), 1);
         // Sin tokens útiles se comporta como "recientes", no como error.
-        assert_eq!(lib.search("!!!", 10).unwrap().len(), 3);
+        assert_eq!(lib.search("!!!", 10).unwrap().len(), 0);
         assert_eq!(lib.search("", 10).unwrap().len(), 3);
     }
 
@@ -1538,6 +1571,22 @@ mod tests {
             lib.canonical_key(&track("isrc:otro", "El Hueso", "Ralphie Choo")),
             "sha1:local"
         );
+    }
+
+    #[test]
+    fn canonical_key_does_not_swap_a_different_duration() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let local = track("sha1:local", "El Hueso", "Ralphie Choo");
+        lib.upsert_track(&local).unwrap();
+
+        // Misma pareja título/artista, pero 5 s más: puede ser el directo o el
+        // videoclip. Para reproducir no se cambia por la copia local.
+        let mut other = track("isrc:otro", "El Hueso", "Ralphie Choo");
+        other.duration_ms = local.duration_ms + 5_000;
+        assert_eq!(lib.canonical_key(&other), "isrc:otro");
+
+        let same = track("isrc:igual", "El Hueso", "Ralphie Choo");
+        assert_eq!(lib.canonical_key(&same), "sha1:local");
     }
 
     #[test]
