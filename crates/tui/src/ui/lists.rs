@@ -801,7 +801,6 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
 
 fn entry_flat(app: &App, entry: crate::app::SearchEntry) -> usize {
     match entry {
-        crate::app::SearchEntry::Artist(i) => i,
         crate::app::SearchEntry::Track(i) => i,
         crate::app::SearchEntry::Artist(i) => app.search.results.len() + i,
         crate::app::SearchEntry::Album(i) => app.search.results.len() + app.search.artists.len() + i,
