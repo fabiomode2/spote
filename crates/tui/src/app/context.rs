@@ -25,6 +25,7 @@ impl App {
         }
         self.streaming = false;
         self.stream_cache_pending = None;
+        self.stream_resolver.cancel();
         self.pending_stream = None;
         self.pending_play = None;
         self.pending_seek_ms = None;
@@ -32,6 +33,7 @@ impl App {
         self.now.track = None;
         self.now.path = None;
         self.now.position_ms = 0;
+        self.now.position_unknown = false;
         self.now.duration_ms = 0;
         self.now.playing = false;
         self.now.loading = false;

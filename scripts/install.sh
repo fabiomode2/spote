@@ -138,6 +138,11 @@ case ":$PATH:" in
   *) warn "añade $BIN_DIR al PATH para lanzar «spote» desde cualquier sitio" ;;
 esac
 
-say "listo · lanza: spote"
-say "letras: LRCLIB + Genius + captions de YouTube"
+if [[ "$WITH_MINI" == 1 && "$MINI_BUILT" == 0 ]]; then
+  say "listo (sin mini) · lanza: spote"
+  warn "spote-mini no se instaló; usa --no-mini si no tienes libs gráficas"
+else
+  say "listo · lanza: spote"
+fi
+say "letras: LRCLIB + lrcmux + Genius + captions de YouTube"
 [[ "$ASR" == 1 ]] && say "timings: ASR local con faster-whisper"

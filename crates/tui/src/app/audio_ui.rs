@@ -112,7 +112,11 @@ impl App {
             i if i < BANDS => self.cfg.audio.bands[i] = 0.0,
             PREAMP => self.cfg.audio.preamp_db = 0.0,
             STRENGTH => self.cfg.audio.normalizer_strength = 0.5,
-            _ => self.toggle_audio_control(),
+            NORMALIZER => self.cfg.audio.normalizer = spote_core::audio_fx::NormalizerMode::Off,
+            LIMITER => self.cfg.audio.limiter = false,
+            PRESET => self.cfg.audio.bands = [0.0; 10],
+            MASTER => self.cfg.audio.enabled = true,
+            _ => {}
         }
         self.audio_changed();
     }

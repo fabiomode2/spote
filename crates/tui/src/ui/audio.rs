@@ -15,7 +15,11 @@ pub(super) fn draw_audio(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: 
     text_at(
         buf,
         master,
-        format!("{} EQ", if cfg.enabled { "● on" } else { "○ off" }),
+        format!(
+            "{} {} EQ",
+            if selected == 15 { "▸" } else { " " },
+            if cfg.enabled { "● on" } else { "○ off" }
+        ),
         Style::new()
             .fg(color(if cfg.enabled { pal.primary } else { pal.dim }))
             .add_modifier(Modifier::BOLD),
@@ -238,11 +242,11 @@ pub(super) fn draw_audio(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: 
         Alignment::Left,
     );
 
-    let chain = cfg.filter_chain();
+    let active = cfg.enabled;
     text_at(
         buf,
-        Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
-        if chain.is_some() {
+        Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, 1),
+        if active {
             "↑↓ mover · ←→ ±1 dB · 0 reset · p preset · e master · d bandas · r reset · esc"
         } else {
             "procesado apagado · e activa · d bandas · esc"

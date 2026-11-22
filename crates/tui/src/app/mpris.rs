@@ -58,6 +58,18 @@ impl App {
                         if let Some(worker) = &self.spotify_worker {
                             worker.send(SystemCommand::Stop);
                         }
+                    } else if self.now.loading && self.pending_stream.is_some() {
+                        // Stop durante la resolución no debe dejar un stream a
+                        // medio cargar que empiece solo al llegar la URL.
+                        self.stream_resolver.cancel();
+                        self.pending_stream = None;
+                        self.pending_seek_ms = None;
+                        self.pending_seek_key = None;
+                        self.stream_autoplay = false;
+                        self.now.loading = false;
+                        self.now.playing = false;
+                        self.now.message.clear();
+                        self.set_status("detenido");
                     } else {
                         if self.now.playing {
                             self.toggle_play();
@@ -116,13 +128,17 @@ impl App {
     fn mpris_snapshot(&self) -> MprisSnapshot {
         let track = self.now.track.as_ref();
         let art_url = track.and_then(|track| {
-            track.art_url.clone().or_else(|| {
-                self.lib
-                    .art_path(&track.key)
-                    .ok()
-                    .flatten()
-                    .map(|path| format!("file://{}", path.display()))
-            })
+            track
+                .art_url
+                .clone()
+                .filter(|url| !url.trim().is_empty())
+                .or_else(|| {
+                    self.lib
+                        .art_path(&track.key)
+                        .ok()
+                        .flatten()
+                        .and_then(|path| local_art_url(&path))
+                })
         });
         MprisSnapshot {
             playing: self.now.playing,
@@ -143,4 +159,12 @@ impl App {
             .to_string(),
         }
     }
+}
+
+/// `artUrl` de MPRIS tiene que ser una URI válida: `file://` con espacios
+/// crudos o UTF-8 sin escapar rompe la portada en los applets del escritorio.
+fn local_art_url(path: &std::path::Path) -> Option<String> {
+    reqwest::Url::from_file_path(path)
+        .ok()
+        .map(|url| url.to_string())
 }

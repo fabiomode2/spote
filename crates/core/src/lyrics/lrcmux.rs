@@ -294,9 +294,16 @@ fn build_native_synced(rows: Vec<(Option<u64>, String)>, duration_ms: u64) -> Ly
     let mut last_start = 0u64;
     let mut next_guess = 0u64;
     for (start, _) in &rows {
+        // Inicios repetidos producían líneas de duración cero y un karaoke
+        // que parpadeaba. Se exige un hueco mínimo, salvo en la primera.
+        let floor = if starts.is_empty() {
+            0
+        } else {
+            last_start.saturating_add(120)
+        };
         let value = match start {
-            Some(ms) => (*ms).max(last_start),
-            None => next_guess.max(last_start),
+            Some(ms) => (*ms).max(floor),
+            None => next_guess.max(floor),
         };
         starts.push(value);
         last_start = value;
@@ -526,6 +533,21 @@ mod tests {
             duration_ms: 272_000,
             ..TrackRef::default()
         }
+    }
+
+    #[test]
+    fn native_synced_avoids_zero_length_lines() {
+        let doc = build_native_synced(
+            vec![
+                (Some(1_000), "uno".to_string()),
+                (Some(1_000), "dos".to_string()),
+                (None, "tres".to_string()),
+            ],
+            10_000,
+        );
+        assert!(doc.lines[1].start_ms >= doc.lines[0].start_ms + 120);
+        assert!(doc.lines[2].start_ms >= doc.lines[1].start_ms + 120);
+        assert!(doc.lines.iter().all(|line| line.end_ms > line.start_ms));
     }
 
     /// Pista sin duración para que la respuesta JSON sea la que marque el

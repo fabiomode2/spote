@@ -2,6 +2,7 @@
 //! recibe comandos. El cliente vive en `crates/mini` (`spote-mini`).
 
 use std::io::{BufReader, ErrorKind, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,7 +46,7 @@ impl MiniHub {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         }
         listener.set_nonblocking(true)?;
 
@@ -76,8 +77,16 @@ impl MiniHub {
             Err(_) => return,
         };
         // Si un cliente no lee, se cierra: dejar una línea a medias y
-        // reutilizar el socket rompería el framing NDJSON.
-        clients.retain_mut(|stream| stream.write_all(line.as_bytes()).is_ok());
+        // reutilizar el socket rompería el framing NDJSON. `shutdown` hace
+        // que el hilo lector del mismo socket también reciba EOF.
+        clients.retain_mut(|stream| {
+            if stream.write_all(line.as_bytes()).is_ok() {
+                true
+            } else {
+                let _ = stream.shutdown(Shutdown::Both);
+                false
+            }
+        });
     }
 
     pub fn has_clients(&self) -> bool {
@@ -149,7 +158,10 @@ fn read_client(stream: UnixStream, commands: Sender<MiniCommand>) {
     let mut chunk = [0u8; 4096];
     loop {
         match reader.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => {
+                let _ = reader.get_ref().shutdown(Shutdown::Both);
+                break;
+            }
             Ok(n) => {
                 for &byte in &chunk[..n] {
                     if byte == b'\n' {
@@ -159,6 +171,7 @@ fn read_client(stream: UnixStream, commands: Sender<MiniCommand>) {
                             continue;
                         };
                         if command.is_quit() || commands.send(command).is_err() {
+                            let _ = reader.get_ref().shutdown(Shutdown::Both);
                             return;
                         }
                     } else {
@@ -166,6 +179,7 @@ fn read_client(stream: UnixStream, commands: Sender<MiniCommand>) {
                         if pending.len() > MAX_LINE {
                             // Cliente local que no termina la línea: se corta
                             // para no agotar memoria en el hilo de la TUI.
+                            let _ = reader.get_ref().shutdown(Shutdown::Both);
                             return;
                         }
                     }
@@ -174,7 +188,13 @@ fn read_client(stream: UnixStream, commands: Sender<MiniCommand>) {
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 continue;
             }
-            Err(_) => break,
+            Err(_) => {
+                let _ = reader.get_ref().shutdown(Shutdown::Both);
+                break;
+            }
         }
     }
+    // Cierra también el clon escritor: el cliente recibe EOF y reconecta en
+    // vez de quedarse «medio conectado» mandando comandos que nadie lee.
+    let _ = reader.get_ref().shutdown(Shutdown::Both);
 }

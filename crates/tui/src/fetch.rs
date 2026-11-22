@@ -357,10 +357,13 @@ impl LyricsWorker {
                 // tardó, no se repite cada vez que suena. La letra cacheada se
                 // sigue mostrando.
                 let mut asr_attempted: HashSet<String> = HashSet::new();
-                while let Ok((_, mut request)) = rx.recv() {
+                while let Ok((mut my_generation, mut request)) = rx.recv() {
                     // Si hay varias peticiones en cola (el usuario saltó de
-                    // pista), solo interesa la última.
-                    while let Ok((_, newer)) = rx.try_recv() {
+                    // pista), solo interesa la última. Se conserva su `id` como
+                    // generación propia: cargarla después del drenado podía
+                    // hacer que el trabajo viejo no se cancelara.
+                    while let Ok((newer_id, newer)) = rx.try_recv() {
+                        my_generation = newer_id;
                         request = newer;
                     }
                     let key = request.track.key.clone();
@@ -368,7 +371,6 @@ impl LyricsWorker {
                         Some(audio) if asr_attempted.insert(key.clone()) => Some(audio),
                         _ => None,
                     };
-                    let my_generation = worker_generation.load(Ordering::Relaxed);
                     let cancel = Arc::new(AtomicBool::new(false));
                     let done = Arc::new(AtomicBool::new(false));
                     // Vigilante: al llegar una petición nueva, activa `cancel`.

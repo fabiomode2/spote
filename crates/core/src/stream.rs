@@ -216,7 +216,7 @@ pub struct StreamResolver {
     generation: Arc<AtomicU64>,
     /// Se conservan para que los `Arc` vivan mientras exista el resolver; el
     /// worker tiene sus propias copias.
-    _urls: UrlCache,
+    urls: UrlCache,
     _files: FileCache,
     _cache_dir: PathBuf,
 }
@@ -260,7 +260,7 @@ impl StreamResolver {
             tx: job_tx,
             rx: event_rx,
             generation,
-            _urls: urls,
+            urls,
             _files: files,
             _cache_dir: cache_dir,
         }
@@ -316,9 +316,31 @@ impl StreamResolver {
         let _ = self.tx.send(job);
     }
 
+    /// Cancela el trabajo en vuelo sin encolar nada. Se usa al pasar a una
+    /// pista local, al activar follow o al cerrar la app.
+    pub fn cancel(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Tira la URL cacheada de una pista (por ejemplo, si mpv da 403). La
+    /// siguiente reproducción vuelve a resolver en vez de repetir la URL rota.
+    pub fn invalidate(&self, key: &str) {
+        if let Ok(mut urls) = self.urls.lock() {
+            urls.remove(key);
+        }
+    }
+
     /// Lee un evento sin bloquear.
     pub fn try_recv(&self) -> Option<StreamEvent> {
         self.rx.try_recv().ok()
+    }
+}
+
+impl Drop for StreamResolver {
+    fn drop(&mut self) {
+        // El worker ve la generación cambiada, mata el `yt-dlp` en vuelo y
+        // sale al cerrarse el canal.
+        self.cancel();
     }
 }
 
@@ -388,22 +410,26 @@ fn handle_job(
     // Para un prefetch explícito, el fichero manda.
     if job.strategy == Strategy::StreamFirst {
         if let Some(source) = url_cache_lookup(urls, &job.key) {
-            let _ = events.send(StreamEvent::Resolved {
-                key: job.key,
-                source,
-            });
-            return;
+            if cache_matches_hint(&source.id, job.hint.as_ref()) {
+                let _ = events.send(StreamEvent::Resolved {
+                    key: job.key,
+                    source,
+                });
+                return;
+            }
         }
     }
 
     if let Some(cached) = file_cache_lookup(files, cache_dir, &job.key) {
-        let _ = events.send(StreamEvent::Downloaded {
-            key: job.key,
-            path: cached.path,
-            provider: cached.provider,
-            id: cached.id,
-        });
-        return;
+        if cache_matches_hint(&cached.id, job.hint.as_ref()) {
+            let _ = events.send(StreamEvent::Downloaded {
+                key: job.key,
+                path: cached.path,
+                provider: cached.provider,
+                id: cached.id,
+            });
+            return;
+        }
     }
 
     if cancel.requested() {
@@ -499,6 +525,21 @@ fn resolve_job(job: &Job, cache_dir: &Path, cancel: Option<&Cancel>) -> Result<R
             Err(download_error) => Err(combined_failure(stream_error, download_error)),
         },
     }
+}
+
+/// ¿La entrada de caché corresponde al hint actual? Un id vacío (caché de
+/// una versión anterior) se acepta; un id distinto significa que la fuente
+/// cambió y no se debe servir el audio viejo.
+fn cache_matches_hint(cached_id: &str, hint: Option<&SourceHint>) -> bool {
+    let Some(hint) = hint else {
+        return true;
+    };
+    let id = hint.id.trim();
+    if id.is_empty() || !is_youtube_provider(&hint.provider) {
+        return true;
+    }
+    let cached_id = cached_id.trim();
+    cached_id.is_empty() || cached_id == id
 }
 
 /// Devuelve `(id, provider)` sólo cuando el hint es utilizable.
@@ -1545,7 +1586,7 @@ fn default_cache_dir() -> PathBuf {
 
 /// Binario configurable por entorno. `SPOTE_YTDLP` gana sobre
 /// `SPOTE_YTDLP_PATH`; si ninguno sirve se usa el `yt-dlp` del `PATH`.
-fn ytdlp_bin() -> String {
+pub(crate) fn ytdlp_bin() -> String {
     for var in ["SPOTE_YTDLP", "SPOTE_YTDLP_PATH"] {
         if let Ok(value) = std::env::var(var) {
             let value = value.trim();
@@ -2549,6 +2590,25 @@ mod tests {
             url_expire_epoch("https://x.googlevideo.com/a?expire=abc"),
             None
         );
+    }
+
+    #[test]
+    fn cache_only_matches_the_current_hint() {
+        let hint = SourceHint {
+            provider: "youtube".into(),
+            id: "dQw4w9WgXcQ".into(),
+            duration_ms: 1,
+        };
+        assert!(cache_matches_hint("dQw4w9WgXcQ", Some(&hint)));
+        assert!(cache_matches_hint("", Some(&hint)));
+        assert!(!cache_matches_hint("AAAAAAAAAAA", Some(&hint)));
+        assert!(cache_matches_hint("AAAAAAAAAAA", None));
+        let spotify = SourceHint {
+            provider: "spotify".into(),
+            id: "abc".into(),
+            duration_ms: 1,
+        };
+        assert!(cache_matches_hint("AAAAAAAAAAA", Some(&spotify)));
     }
 
     #[test]

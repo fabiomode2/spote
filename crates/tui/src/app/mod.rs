@@ -358,6 +358,9 @@ pub struct NowPlaying {
     /// playhead entre eventos sin que la barra vaya a saltos.
     pub position_at: Instant,
     pub position_seen_ms: u64,
+    /// `true` cuando el reproductor seguido no publica `Position`: el reloj
+    /// avanza por interpolación en vez de quedarse clavado en 0.
+    pub position_unknown: bool,
     pub playing: bool,
     pub volume: f32,
     pub loading: bool,
@@ -376,6 +379,7 @@ impl Default for NowPlaying {
             duration_ms: 0,
             position_at: Instant::now(),
             position_seen_ms: 0,
+            position_unknown: false,
             playing: false,
             volume: 0.0,
             loading: false,
@@ -1300,6 +1304,26 @@ impl App {
     }
 
     // --------------------------------------------------------- reproducción
+    /// Devuelve la fila canónica local si la misma canción ya existe con otra
+    /// clave (ISRC/Spotify frente a `sha1`). Conserva hint y portada de la
+    /// pista entrante para no repetir búsquedas ni perder arte.
+    fn canonical_track(&self, track: &TrackRef) -> TrackRef {
+        let canonical = self.lib.canonical_key(track);
+        if canonical == track.key {
+            return track.clone();
+        }
+        let Ok(Some(row)) = self.lib.track_by_key(&canonical) else {
+            return track.clone();
+        };
+        let mut out = row.track;
+        out.art_url = out.art_url.or_else(|| track.art_url.clone());
+        out.source_hint = out.source_hint.or_else(|| track.source_hint.clone());
+        if out.album.is_none() {
+            out.album = track.album.clone();
+        }
+        out
+    }
+
     /// Carga una pista ya resuelta a fichero local.
     pub fn play_local(&mut self, track: TrackRef, path: Option<PathBuf>) {
         self.play_local_inner(track, path, true);
@@ -1332,17 +1356,7 @@ impl App {
         }
         // Reutiliza la fila canónica si la misma canción ya está descargada
         // con otra clave (búsqueda/álbum/ISRC). Evita duplicados y descargas.
-        let canonical = self.lib.canonical_key(&track);
-        if canonical != track.key {
-            if let Ok(Some(row)) = self.lib.track_by_key(&canonical) {
-                let mut canonical_track = row.track;
-                canonical_track.art_url = canonical_track.art_url.or(track.art_url.take());
-                if canonical_track.album.is_none() {
-                    canonical_track.album = track.album.take();
-                }
-                track = canonical_track;
-            }
-        }
+        track = self.canonical_track(&track);
         // La historia se guarda antes de resolver el stream: las pistas que
         // aún no tienen fichero también deben poder recuperarse con "anterior".
         if record_history {
@@ -1360,6 +1374,9 @@ impl App {
         self.pending_play = None;
         self.now.ended = false;
         self.stream_autoplay = true;
+        // Cualquier resolución anterior deja de interesar: si se elige una
+        // pista local, su yt-dlp no debe seguir descargando por detrás.
+        self.stream_resolver.cancel();
         let Some(path) = path.or_else(|| self.lib.local_path(&track.key)) else {
             if self.cfg.player.streaming && self.tools.yt_dlp {
                 self.start_stream(track);
@@ -1400,6 +1417,7 @@ impl App {
         self.now.position_ms = start_ms;
         self.now.duration_ms = track.duration_ms;
         self.now.playing = true;
+        self.now.position_unknown = false;
         self.now.loading = false;
         self.now.message.clear();
         self.pending_stream = None;
@@ -1473,12 +1491,19 @@ impl App {
         self.now.track = Some(track.clone());
         self.now.path = None;
         self.now.position_ms = self.trim_start_ms;
+        self.now.position_seen_ms = self.trim_start_ms;
+        self.now.position_at = Instant::now();
         self.now.duration_ms = track.duration_ms;
-        self.now.playing = false;
+        self.stream_autoplay = true;
+        // Mientras se resuelve, la intención es reproducir: MPRIS/mini deben
+        // publicar `Playing` y un `Play` del sistema no debe cancelar el
+        // autoplay. Pausar sí lo desactiva.
+        self.now.playing = self.stream_autoplay;
+        self.now.position_unknown = false;
         self.now.loading = true;
         self.now.ended = false;
-        self.stream_autoplay = true;
         self.pending_seek_ms = None;
+        self.pending_seek_key = None;
         self.now.message.clear();
         self.pending_play = None;
         self.pending_stream = Some(track.key.clone());
@@ -1571,6 +1596,25 @@ impl App {
                             duration_ms: track.duration_ms,
                         });
                         self.now.track = Some(track);
+                    }
+                    // El id resuelto vale también para el contexto y la cola:
+                    // al volver a esta pista no se repite la búsqueda.
+                    if let Some(hint) = self
+                        .now
+                        .track
+                        .as_ref()
+                        .and_then(|track| track.source_hint.clone())
+                    {
+                        for entry in &mut self.play_context {
+                            if entry.track.key == key {
+                                entry.track.source_hint = Some(hint.clone());
+                            }
+                        }
+                        for entry in &mut self.queue {
+                            if entry.track.key == key {
+                                entry.track.source_hint = Some(hint.clone());
+                            }
+                        }
                     }
                     if let Some(player) = &self.player {
                         player.load_url(source.url, start_ms as f64 / 1000.0);
@@ -1723,6 +1767,7 @@ impl App {
 
     /// Encola una pista: si no está descargada, lanza la descarga.
     pub fn queue_track(&mut self, track: TrackRef, url: Option<String>) {
+        let track = self.canonical_track(&track);
         if let Some(path) = self.lib.local_path(&track.key).filter(|path| path.exists()) {
             self.queue.push(QueueEntry {
                 track,
@@ -1980,12 +2025,12 @@ impl App {
             self.next_track();
             return;
         }
-        if !self.queue.is_empty() {
-            self.next_track();
-            return;
-        }
         if self.repeat_mode == RepeatMode::One {
             self.apply_advance(Advance::RepeatCurrent);
+            return;
+        }
+        if !self.queue.is_empty() {
+            self.next_track();
             return;
         }
         if self.play_context.is_empty() {
@@ -2024,7 +2069,10 @@ impl App {
             return;
         }
         self.repeat_mode = mode;
+        self.loop_file = mode == RepeatMode::One;
         if self.follow_spotify {
+            // El repeat es del reproductor externo: se reenvía, pero no se
+            // guarda como preferencia local ni se aplica al mpv de spote.
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetRepeat(
                     match mode {
@@ -2035,6 +2083,7 @@ impl App {
                     .to_string(),
                 ));
             }
+            return;
         }
         self.cfg.playback.repeat = match mode {
             RepeatMode::Off => "off",
@@ -2042,7 +2091,6 @@ impl App {
             RepeatMode::One => "one",
         }
         .to_string();
-        self.loop_file = mode == RepeatMode::One;
         if let Some(player) = &self.player {
             player.set_loop(self.loop_file);
         }
@@ -2051,12 +2099,15 @@ impl App {
 
     pub fn toggle_shuffle(&mut self) {
         self.shuffle_on = !self.shuffle_on;
-        self.cfg.playback.shuffle = self.shuffle_on;
         if self.follow_spotify {
+            // Igual que repeat: manda en el reproductor seguido, no en la
+            // configuración local.
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetShuffle(self.shuffle_on));
             }
+            return;
         }
+        self.cfg.playback.shuffle = self.shuffle_on;
         self.cfg.save().ok();
         if self.shuffle_on {
             if self.play_context.is_empty() && !self.view.is_empty() {
@@ -2397,13 +2448,14 @@ impl App {
         }
         if self.follow_spotify {
             // El volumen del reproductor externo no es el volumen local de
-            // spote: no se guarda en `[player]` ni se arrastra al desactivar.
+            // spote: no se guarda, ni se aplica a mpv, ni se arrastra al
+            // desactivar el modo acompañante.
             if let Some(worker) = &self.spotify_worker {
                 worker.send(SystemCommand::SetVolume(self.now.volume));
             }
-        } else {
-            self.cfg.player.volume = self.now.volume;
+            return;
         }
+        self.cfg.player.volume = self.now.volume;
         // Durante el arrastre se guarda al soltar; en teclado/rueda, ya.
         if !self.dragging_volume {
             self.cfg.save().ok();
@@ -2989,8 +3041,11 @@ impl App {
                     self.now.position_at = Instant::now();
                     // Los streams HLS pueden quedarse reconectando en el EOF y
                     // no emitir `end-file eof`; se avanza por posición cuando
-                    // la pista conocida ya terminó.
+                    // la pista conocida ya terminó. Con repeat-one manda mpv
+                    // (`loop-file`), no este heurístico: si no, cada vuelta
+                    // re-resolvería el stream.
                     if self.streaming
+                        && !self.loop_file
                         && self.now.duration_ms > 0
                         && self.now.position_ms.saturating_add(700) >= self.now.duration_ms
                     {
@@ -3016,8 +3071,12 @@ impl App {
                     }
                 }
                 PlayerEvent::Duration(duration) => {
-                    if duration > 0.0 {
-                        self.now.duration_ms = (duration * 1000.0) as u64;
+                    let reported = (duration * 1000.0) as u64;
+                    // En un stream el vídeo puede ser un visualizer más largo
+                    // que la pista: la duración lógica manda y el corte sigue
+                    // siendo el de la canción, no el del vídeo.
+                    if reported > 0 && (!self.streaming || self.now.duration_ms == 0) {
+                        self.now.duration_ms = reported;
                     }
                 }
                 PlayerEvent::Paused(paused) => self.now.playing = !paused,
@@ -3041,11 +3100,20 @@ impl App {
                 }
                 PlayerEvent::Error(message) => {
                     self.toast(format!("mpv: {message}"), ToastKind::Error);
-                    if self.streaming {
+                    // Un error de la URL anterior puede llegar después de
+                    // empezar a resolver la siguiente: mientras `loading` esté
+                    // activo no se dispara una descarga de la pista nueva por
+                    // un fallo que no es suyo.
+                    if self.streaming && !self.now.loading {
                         self.streaming = false;
                         self.stream_cache_pending = None;
-                        self.now.loading = false;
+                        self.now.loading = true;
+                        self.now.playing = false;
+                        self.now.message = "descargando tras fallar el stream…".into();
                         if let Some(track) = self.now.track.clone() {
+                            // La URL cacheada puede estar muerta (403/expire
+                            // prematuro): que la próxima vez se resuelva otra.
+                            self.stream_resolver.invalidate(&track.key);
                             self.start_resolve(&track);
                             self.pending_play = Some(track.key.clone());
                         }
@@ -3204,7 +3272,17 @@ impl App {
                         {
                             let entry = self.queue.remove(entry);
                             self.play_local(entry.track, Some(path.clone()));
-                        } else if let Some(track) = self.now.track.clone() {
+                        } else if let Some(track) = self
+                            .lib
+                            .track_by_key(&key)
+                            .ok()
+                            .flatten()
+                            .map(|row| row.track)
+                            .or_else(|| self.now.track.clone().filter(|track| track.key == key))
+                        {
+                            // El fallback por `now.track` sin comprobar la
+                            // clave cargaba la pista A con el fichero de B si B
+                            // ya no estaba en la cola.
                             self.play_local(track, Some(path.clone()));
                         }
                     } else {
@@ -3550,6 +3628,24 @@ impl App {
                     self.lyrics_loading = false;
                     match doc {
                         Some(doc) => {
+                            // Un plain de un proveedor de reserva no debe
+                            // reemplazar un LRC sincronizado (o alineado) que
+                            // ya se está mostrando.
+                            let incoming = if doc.aligned {
+                                3
+                            } else if doc.synced {
+                                2
+                            } else {
+                                1
+                            };
+                            let cached = self
+                                .lyrics
+                                .as_ref()
+                                .map(|old| if old.aligned { 3 } else if old.synced { 2 } else { 1 })
+                                .unwrap_or(0);
+                            if cached > incoming {
+                                continue;
+                            }
                             if let Some(text) = lrc {
                                 self.lib
                                     .save_lyrics(
@@ -3562,7 +3658,9 @@ impl App {
                                     .ok();
                                 // La versión ASR ya está alineada: arrastrar el
                                 // offset de la letra aproximada la desalinea.
-                                if doc.aligned {
+                                // Un ajuste manual hecho mientras cargaba se
+                                // respeta.
+                                if doc.aligned && self.lyrics_offset_ms == 0 {
                                     self.lib.set_lyrics_offset(&key, 0).ok();
                                 }
                             }
@@ -4162,7 +4260,25 @@ impl App {
         }
         let index = self.queue_selected.min(self.queue_len() - 1);
         if self.room_queue.is_empty() {
-            self.queue.remove(index);
+            let removed = self.queue.remove(index);
+            if self.pending_play.as_deref() == Some(removed.track.key.as_str()) {
+                self.pending_play = None;
+                self.pending_seek_ms = None;
+                self.pending_seek_key = None;
+                if self.now.track.as_ref().map(|track| track.key.as_str())
+                    == Some(removed.track.key.as_str())
+                    && self.now.path.is_none()
+                {
+                    self.now.track = None;
+                    self.now.duration_ms = 0;
+                    self.now.position_ms = 0;
+                    self.now.position_unknown = false;
+                    self.now.loading = false;
+                    self.now.playing = false;
+                    self.now.ended = false;
+                    self.now.message = "quitada de la cola".into();
+                }
+            }
             self.toast("quitada de la cola", ToastKind::Info);
         } else if let Some(item) = self.room_queue.get(index) {
             let id = item.id.clone();
@@ -4420,14 +4536,17 @@ impl App {
             let elapsed = self.now.position_at.elapsed().as_millis() as u64;
             // Tope sin retroceso: antes, al pasar 500 ms, el valor caía de
             // `position_ms + 500` a `position_ms` (diente de sierra visible
-            // en el karaoke cuando mpv tarda en informar).
-            let current = self.now.position_ms + elapsed.min(500);
+            // en el karaoke cuando mpv tarda en informar). Si el reproductor
+            // seguido no publica `Position`, no hay tope: mejor avanzar con
+            // deriva que dejar la barra y la letra congeladas en 0.
+            let current = if self.now.position_unknown {
+                self.now.position_ms.saturating_add(elapsed)
+            } else {
+                self.now.position_ms + elapsed.min(500)
+            };
             if self.now.duration_ms > 0 {
                 current.min(self.now.duration_ms)
             } else {
-                // Sin duración (MPRIS/streams que no la publican) no se puede
-                // clampear a 1 ms: la barra se quedaba al 100 % y la letra
-                // congelada.
                 current
             }
         } else {

@@ -85,7 +85,9 @@ impl Player {
                 run(mpv, task_socket, task_volume, cmd_rx, task_events.clone(), task_fail.clone())
                     .await
             {
-                *task_fail.lock().unwrap() = Some(err.to_string());
+                if let Ok(mut slot) = task_fail.lock() {
+                    *slot = Some(err.to_string());
+                }
                 let _ = task_events.send(PlayerEvent::Disconnected);
             }
         });
@@ -219,6 +221,7 @@ async fn run(
     let volume_pct = f32::from_bits(volume.load(Ordering::Relaxed)) * 100.0;
     let mut command = tokio::process::Command::new(&mpv_path);
     command
+        .kill_on_drop(true)
         .arg("--no-video")
         .arg("--no-terminal")
         .arg("--really-quiet")
@@ -354,7 +357,9 @@ async fn run(
 
     let _ = child.kill().await;
     let _ = std::fs::remove_file(&socket);
-    *fail.lock().unwrap() = Some("mpv desconectado".to_string());
+    if let Ok(mut slot) = fail.lock() {
+        *slot = Some("mpv desconectado".to_string());
+    }
     let _ = events.send(PlayerEvent::Disconnected);
     Ok(())
 }

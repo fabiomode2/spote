@@ -265,6 +265,7 @@ fn run_server(
             .name(BUS_NAME)
             .allow_name_replacements(true)
             .replace_existing_names(false)
+            .method_timeout(Duration::from_secs(2))
             .serve_at(OBJECT_PATH, root)
             .serve_at(OBJECT_PATH, player)
             .build()
@@ -449,19 +450,14 @@ impl RootInterface {
 
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<String> {
-        vec!["file".to_string(), "http".to_string(), "https".to_string()]
+        // `OpenUri` no está implementado: no se anuncia lo que no se puede
+        // cumplir. Los clientes dejan de ofrecer «abrir con spote».
+        Vec::new()
     }
 
     #[zbus(property)]
     fn supported_mime_types(&self) -> Vec<String> {
-        vec![
-            "audio/mpeg".to_string(),
-            "audio/flac".to_string(),
-            "audio/ogg".to_string(),
-            "audio/opus".to_string(),
-            "audio/mp4".to_string(),
-            "audio/x-wav".to_string(),
-        ]
+        Vec::new()
     }
 
     #[zbus(property)]
@@ -471,7 +467,8 @@ impl RootInterface {
 
     #[zbus(property)]
     fn can_raise(&self) -> bool {
-        true
+        // No hay ventana que traer al frente más allá del terminal.
+        false
     }
 
     #[zbus(property)]
@@ -651,6 +648,11 @@ impl PlayerInterface {
     }
 
     fn set_position(&self, track_id: ObjectPath<'_>, position: i64) -> zbus::fdo::Result<()> {
+        if position < 0 {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "SetPosition no acepta posiciones negativas".to_string(),
+            ));
+        }
         let snapshot = self.current();
         if track_id.as_str() != track_object_path(&snapshot) {
             // MPRIS: si el path no es la pista actual, la llamada se ignora.
@@ -660,8 +662,10 @@ impl PlayerInterface {
         self.send(MprisCommand::SetPosition(position_ms))
     }
 
-    fn open_uri(&self, uri: &str) -> zbus::fdo::Result<()> {
-        self.send(MprisCommand::OpenUri(uri.to_string()))
+    fn open_uri(&self, _uri: &str) -> zbus::fdo::Result<()> {
+        Err(zbus::fdo::Error::NotSupported(
+            "spote todavía no abre URIs externas".to_string(),
+        ))
     }
 }
 

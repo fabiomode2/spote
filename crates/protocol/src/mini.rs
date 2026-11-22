@@ -93,7 +93,9 @@ impl MiniSnapshot {
 
     pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
         self.duration_ms = duration_ms;
-        self.position_ms = self.position_ms.min(duration_ms);
+        if duration_ms > 0 {
+            self.position_ms = self.position_ms.min(duration_ms);
+        }
         self
     }
 
@@ -347,6 +349,15 @@ mod tests {
             .with_bands([0.1, 0.4, 0.9])
             .with_status("playing")
             .with_track_key("isrc:GBBKS9500001")
+    }
+
+    #[test]
+    fn zero_duration_does_not_erase_the_position() {
+        let snapshot = MiniSnapshot::new("Song", "Artist")
+            .with_position_ms(42_500)
+            .with_duration_ms(0);
+        assert_eq!(snapshot.position_ms, 42_500);
+        assert_eq!(snapshot.duration_ms, 0);
     }
 
     #[test]

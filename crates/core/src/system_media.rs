@@ -167,6 +167,11 @@ impl SystemMediaWatcher {
                  (esperaba el object path o la clave de la pista activa)"
             );
         }
+        if track_key_or_path.starts_with('/')
+            && self.active_trackid.as_deref() != Some(track_key_or_path)
+        {
+            bail!("SetPosition para una pista que ya no es la activa");
+        }
         let path = if track_key_or_path.starts_with('/') {
             Some(track_key_or_path.to_string())
         } else {
@@ -180,11 +185,14 @@ impl SystemMediaWatcher {
             return self.call_method(&player, "SetPosition", &(object, position_us));
         }
         // Sin mpris:trackid (Stremio, algunos navegadores) se usa Seek
-        // relativo, que sí entienden todos los reproductores MPRIS.
-        let current = if self.active_position_known {
-            self.active_position_ms
-        } else {
-            0
+        // relativo, que sí entienden todos los reproductores MPRIS. Si no
+        // conocemos la posición actual, un Seek relativo sería un salto a un
+        // sitio arbitrario: mejor no mover nada.
+        let Some(current) = self.active_position_known.then_some(self.active_position_ms) else {
+            bail!(
+                "el reproductor no publica Position; no se puede hacer SetPosition \
+                 absoluto sin mpris:trackid"
+            );
         };
         let delta_ms = position_ms as i64 - current as i64;
         let delta_us = delta_ms.saturating_mul(1000);
@@ -279,7 +287,11 @@ impl Default for SystemMediaWatcher {
 }
 
 async fn session_connection() -> Result<zbus::Connection> {
-    zbus::Connection::session()
+    zbus::connection::Builder::session()
+        // Un reproductor colgado no debe dejar el watcher bloqueado para
+        // siempre: cada llamada D-Bus tiene un tope.
+        .method_timeout(Duration::from_secs(2))
+        .build()
         .await
         .context("bus de sesión no disponible")
 }
@@ -291,7 +303,7 @@ async fn discover(
 ) -> Option<(zbus::Connection, Option<Reading>)> {
     let connection = match existing {
         Some(connection) => connection,
-        None => zbus::Connection::session().await.ok()?,
+        None => session_connection().await.ok()?,
     };
     let bus = Proxy::new(
         &connection,

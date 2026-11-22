@@ -41,7 +41,7 @@ impl ToolStatus {
         Self {
             mpv: util::which("mpv").is_some(),
             ffmpeg: util::which("ffmpeg").is_some(),
-            yt_dlp: util::which("yt-dlp").is_some(),
+            yt_dlp: crate::util::which(&crate::stream::ytdlp_bin()).is_some(),
             parec: util::which("parec").is_some(),
         }
     }

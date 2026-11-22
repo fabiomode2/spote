@@ -14,7 +14,7 @@ git clone https://github.com/fabiomode2/spote && cd spote
 spote
 ```
 
-Hacen falta Rust 1.82+, `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
+Hacen falta Rust 1.82+ para la TUI (1.85+ si compilas `spote-mini`), `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
 deja los binarios en `~/.local/bin`, crea el venv con `faster-whisper` y copia
 los scripts. Las letras no necesitan nada más: LRCLIB, Genius, captions de
 YouTube y ASR van dentro.

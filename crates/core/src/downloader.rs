@@ -16,6 +16,7 @@ use serde::Deserialize;
 use spote_protocol::TrackRef;
 
 use crate::library::{Library, SourceStatus};
+use crate::stream::ytdlp_bin;
 use crate::util;
 
 #[derive(Debug, Clone)]
@@ -330,12 +331,18 @@ fn worker(
 ) {
     let mut queue: VecDeque<Job> = VecDeque::new();
     loop {
-        // Prioriza el trabajo en curso; recoge todo lo que haya.
+        // Prioriza el trabajo en curso; recoge todo lo que haya. `Quit` corta
+        // de inmediato: al cerrar no se procesan descargas pendientes ni se
+        // spawnean yt-dlp nuevos después de matar los hijos.
         while let Ok(job) = jobs.try_recv() {
+            if matches!(job, Job::Quit) {
+                return;
+            }
             queue.push_back(job);
         }
         let Some(job) = queue.pop_front() else {
             match jobs.recv_timeout(std::time::Duration::from_millis(80)) {
+                Ok(Job::Quit) => return,
                 Ok(job) => queue.push_back(job),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(_) => return,
@@ -410,7 +417,7 @@ fn worker(
                 finish_job(&inflight, &done_key);
             }
             Job::Update => {
-                let output = Command::new("yt-dlp").arg("-U").output();
+                let output = Command::new(ytdlp_bin()).arg("-U").output();
                 let message = match output {
                     Ok(output) => {
                         let text = String::from_utf8_lossy(&output.stdout).to_string()
@@ -451,14 +458,17 @@ struct SearchEntry {
 }
 
 fn search(query: &str) -> Result<Vec<SearchItem>> {
-    let output = Command::new("yt-dlp")
+    let output = Command::new(ytdlp_bin())
         .args([
             "--flat-playlist",
             "--dump-single-json",
             "--no-warnings",
             "--no-playlist",
+            "--socket-timeout",
+            "15",
             "--extractor-args",
             "youtube:player_client=default,web_safari",
+            "--",
             &format!("ytsearch12:{query}"),
         ])
         .stdin(Stdio::null())
@@ -598,11 +608,14 @@ fn download(
     let name = util::slug(key, 80);
     let name = if name.is_empty() { "track".to_string() } else { name };
     let target = out_dir.join(name);
+    // El `media_dir` del usuario puede contener `%`: yt-dlp lo interpreta
+    // como plantilla. Se escapa el prefijo y se deja solo el `%(ext)s` real.
+    let template_base = target.display().to_string().replace('%', "%%");
 
-    let mut command = Command::new("yt-dlp");
+    let mut command = Command::new(ytdlp_bin());
     command
         .arg("-f")
-        .arg("bestaudio")
+        .arg("bestaudio/best")
         .arg("-x")
         .arg("--audio-format")
         .arg("opus")
@@ -611,6 +624,8 @@ fn download(
         .arg("--no-playlist")
         .arg("--newline")
         .arg("--no-warnings")
+        .arg("--socket-timeout")
+        .arg("15")
         .arg("--embed-metadata")
         .arg("--write-thumbnail")
         .arg("--convert-thumbnails")
@@ -623,9 +638,9 @@ fn download(
              %(progress.total_bytes_estimate)s %(progress.total_bytes)s",
         )
         .arg("-o")
-        .arg(format!("{}.%(ext)s", target.display()))
+        .arg(format!("{template_base}.%(ext)s"))
         .arg("-o")
-        .arg(format!("thumbnail:{}.%(ext)s", target.display()))
+        .arg(format!("thumbnail:{template_base}.%(ext)s"))
         // `--` corta las opciones: una URL que empiece por `-` no puede
         // convertirse en un flag de yt-dlp.
         .arg("--")

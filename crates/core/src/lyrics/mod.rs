@@ -501,19 +501,21 @@ fn asr_reference_lines(doc: &LyricsDoc) -> Vec<LyricLine> {
 /// que el ASR; solo se toca si viene de una versión vieja (`force_align`) o si
 /// trae ráfagas imposibles (varias líneas a menos de 400 ms).
 fn needs_alignment(doc: &LyricsDoc, force_align: bool) -> bool {
-    if force_align {
-        return true;
-    }
     if doc.aligned {
         return false;
     }
     // Una letra con tiempos de palabra reales o captions del vídeo exacto ya
-    // está alineada contra el audio: repetir ASR solo añade minutos de espera.
+    // está alineada contra el audio: repetir ASR solo añade minutos de espera
+    // y puede empeorar una sincronización que ya era buena. Esto gana incluso
+    // a `force_align` (versión vieja de la caché).
     if doc.synced
         && (matches!(doc.source, LyricsSource::Captions)
             || doc.lines.iter().any(|line| line.words_exact))
     {
         return false;
+    }
+    if force_align {
+        return true;
     }
     if !doc.synced || matches!(doc.source, LyricsSource::Estimated | LyricsSource::Plain) {
         return true;
