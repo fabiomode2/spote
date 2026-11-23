@@ -43,6 +43,7 @@ mod input;
 mod keymap;
 mod layout_editor;
 pub use keymap::help_sections;
+mod lyrics_search;
 mod playlists;
 mod settings;
 mod spotify;
@@ -154,6 +155,14 @@ pub enum Fullscreen {
     Viz,
 }
 
+/// Panel persistente de la derecha: perfil de artista o ficha de álbum.
+/// No es un overlay: se queda abierto hasta que se pulsa volver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Artist,
+    Album,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
@@ -177,8 +186,10 @@ pub enum Overlay {
     /// Menú contextual de una pista (clic derecho).
     Context,
     /// Perfil de artista de Spotify/Deezer.
+    #[allow(dead_code)]
     Artist,
     /// Álbum abierto (biblioteca o catálogo remoto).
+    #[allow(dead_code)]
     Album,
     /// Editor de recorte de intro/outro.
     Trim,
@@ -295,6 +306,12 @@ pub enum Action {
     LyricsFollow,
     /// Borra la caché de la letra de esta pista y la busca de nuevo.
     LyricsRefetch,
+    /// Abre la búsqueda manual dentro de la zona de letra.
+    LyricsSearchOpen,
+    LyricsSearchRun,
+    LyricsSearchClose,
+    LyricsSearchSelect(usize),
+    LyricsAcceptCandidate,
     Help,
     Effects,
     CloseOverlay,
@@ -312,6 +329,9 @@ pub enum Action {
     OpenAlbum(String, String),
     ArtistAlbum(usize),
     ArtistTrack(usize),
+    ArtistAlbumsScroll(i32),
+    CloseDetail,
+    FavoriteNow,
     RefreshLibrary,
     DeletePlaylist(i64),
     AddToPlaylist,
@@ -485,6 +505,19 @@ pub struct SearchState {
     pub last_query_id: u64,
     pub last_query: String,
     pub message: String,
+}
+
+/// Búsqueda manual de letras dentro de la pestaña de letra.
+#[derive(Debug, Clone, Default)]
+pub struct LyricsSearchState {
+    pub query: String,
+    pub query_id: u64,
+    pub last_search_query: String,
+    pub loading: bool,
+    pub results: Vec<spote_core::lyrics::LyricsCandidate>,
+    pub selected: usize,
+    pub preview_scroll: usize,
+    pub status: String,
 }
 
 /// Efecto de las miniaturas de las listas: paleta del tema, foto literal o
@@ -902,6 +935,16 @@ pub struct App {
     pub artist_loading: bool,
     pub artist_selected: usize,
     pub artist_status: String,
+    /// Nombre que se está pidiendo; las respuestas de otro artista se ignoran.
+    pub artist_request: String,
+    /// Desplazamiento horizontal de la discografía del artista.
+    pub artist_album_scroll: usize,
+    /// Tarjetas de álbum que caben en el panel; lo fija el dibujo.
+    pub detail_album_visible: usize,
+    /// Zona de las tarjetas de álbum para la rueda del ratón.
+    pub detail_albums_area: Rect,
+    /// Panel persistente de detalle (artista o álbum), a la derecha.
+    pub detail: Option<Detail>,
     pub metadata_requests: std::collections::HashSet<String>,
     pub metadata_tried: std::collections::HashSet<String>,
     pub metadata_manual: std::collections::HashSet<String>,
@@ -991,6 +1034,7 @@ pub struct App {
     pub update_info: Option<crate::version::UpdateInfo>,
     /// Actualizador en marcha: `true` si terminó bien.
     pub update_run: Option<std::sync::mpsc::Receiver<bool>>,
+    pub update_started: Option<Instant>,
     pub update_dismissed: bool,
     pub update_finished: Option<bool>,
 
@@ -998,6 +1042,8 @@ pub struct App {
     pub lyrics_status: String,
     pub lyrics_key: String,
     pub lyrics_loading: bool,
+    pub lyrics_search: Option<LyricsSearchState>,
+    pub lyrics_search_worker: crate::fetch::LyricsSearchWorker,
     pub lyrics_offset_ms: i64,
     /// Desplazamiento calculado con el mapa de audio (no persistido).
     pub lyrics_auto_offset: Option<i64>,
@@ -1168,6 +1214,11 @@ impl App {
             artist_loading: false,
             artist_selected: 0,
             artist_status: String::new(),
+            artist_request: String::new(),
+            artist_album_scroll: 0,
+            detail_album_visible: 1,
+            detail_albums_area: Rect::default(),
+            detail: None,
             metadata_requests: std::collections::HashSet::new(),
             metadata_tried: std::collections::HashSet::new(),
             metadata_manual: std::collections::HashSet::new(),
@@ -1238,12 +1289,15 @@ impl App {
             update_check: crate::version::spawn_check(),
             update_info: None,
             update_run: None,
+            update_started: None,
             update_dismissed: false,
             update_finished: None,
             lyrics: None,
             lyrics_status: String::new(),
             lyrics_key: String::new(),
             lyrics_loading: false,
+            lyrics_search: None,
+            lyrics_search_worker: crate::fetch::LyricsSearchWorker::start(cfg.lyrics.clone()),
             lyrics_offset_ms: 0,
             lyrics_auto_offset: None,
             lyrics_retry: std::collections::HashSet::new(),
@@ -2066,7 +2120,9 @@ impl App {
         match crate::version::spawn_update() {
             Some(rx) => {
                 self.update_run = Some(rx);
-                self.overlay = Overlay::None;
+                self.update_started = Some(Instant::now());
+                self.update_finished = None;
+                self.overlay = Overlay::Update;
                 self.set_status("actualizando spote… se cerrará al terminar");
             }
             None => {
@@ -2164,6 +2220,7 @@ impl App {
         self.lyrics_scroll = Spring::new(0.0);
         self.lyrics_scroll_index = None;
         self.lyrics_follow = true;
+        self.lyrics_search = None;
         self.lyrics_debug_last = None;
     }
 
@@ -2770,23 +2827,27 @@ impl App {
             // letra plana genérica. Se revalida una vez por sesión.
             let stale_plain = row.source.eq_ignore_ascii_case("plain") && !row.synced;
             self.lyrics_offset_ms = doc.offset_ms;
-            let source_label = doc.source.label().to_string();
+            let source = doc.source;
             self.lyrics = Some(doc);
             self.lyrics_status = if stale_alignment || broken_sync {
                 "afinando de nuevo…".to_string()
             } else if row.aligned {
                 "asr".to_string()
-            } else if source_label.is_empty() {
-                "aprox".to_string()
             } else {
-                source_label
+                match source {
+                    spote_core::lyrics::LyricsSource::Plain
+                    | spote_core::lyrics::LyricsSource::Estimated => "aprox".to_string(),
+                    source => source.label().to_string(),
+                }
             };
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
+            let manual = row.source == "manual";
             let needs_audio = ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
+                && !manual
                 && audio.is_some();
-            if (needs_audio || stale_captions || stale_plain)
+            if (needs_audio || (!manual && (stale_captions || stale_plain)))
                 && !self.lyrics_retry.contains(&track.key)
             {
                 self.lyrics_retry.insert(track.key.clone());
@@ -3182,13 +3243,19 @@ impl App {
                     if ok {
                         self.should_quit = true;
                     } else {
+                        self.update_started = None;
+                        self.overlay = Overlay::Update;
                         self.toast(
                             "la actualización falló; mira ~/.cache/spote/update.log",
                             ToastKind::Error,
                         );
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_run = None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.update_run = None;
+                    self.update_started = None;
+                    self.update_finished = Some(false);
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
@@ -3230,6 +3297,7 @@ impl App {
         self.poll_meta();
         self.poll_song_map();
         self.poll_lyrics();
+        self.poll_lyrics_search();
         self.poll_spotify(dt);
         self.poll_mini();
         self.poll_mpris();
@@ -3267,7 +3335,6 @@ impl App {
             || !self.lyrics_scroll.settled()
             || self.pulse.value > 0.0
             || (self.art_rotate && self.now.track.is_some())
-            || self.cfg.ui.fx.ambient == "mosaic"
             || self.downloads.iter().any(DownloadInfo::active)
             || self.search.loading
             || self.album_page_loading
@@ -3820,6 +3887,13 @@ impl App {
         while let Some(event) = self.meta_worker.try_recv() {
             match event {
                 MetaEvent::Artist { name, result } => {
+                    // Una respuesta lenta del artista anterior no debe pintarse
+                    // como si fuera el nuevo: eso mezclaba discografías enteras.
+                    if !self.artist_request.is_empty()
+                        && util::normalize(&name) != util::normalize(&self.artist_request)
+                    {
+                        continue;
+                    }
                     if self.artist_loading {
                         self.artist_loading = false;
                     }
@@ -3865,7 +3939,6 @@ impl App {
                         match result {
                             Ok(info) => {
                                 self.open_album_info(info);
-                                self.overlay = Overlay::Album;
                             }
                             Err(err) => {
                                 self.album_page_status = format!("álbum: {err}");
@@ -3891,7 +3964,6 @@ impl App {
                         match result {
                             Ok(info) => {
                                 self.open_album_info(info);
-                                self.overlay = Overlay::Album;
                             }
                             Err(err) => {
                                 self.album_page_status = format!("álbum: {err}");
@@ -3956,6 +4028,7 @@ impl App {
                 spote_core::lyrics::LyricsSource::Estimated
                     | spote_core::lyrics::LyricsSource::Plain
                     | spote_core::lyrics::LyricsSource::Local
+                    | spote_core::lyrics::LyricsSource::Manual
                     | spote_core::lyrics::LyricsSource::Captions
             )
         {

@@ -43,6 +43,15 @@ pub(super) fn draw_audio_tab(app: &mut App, buf: &mut Buffer, layout: &Layout, p
             .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
+    let mut selection = format!("◂ {} ▸", app.audio_selection_label());
+    truncate_chars(&mut selection, inner.width.saturating_sub(36) as usize);
+    text_at(
+        buf,
+        Rect::new(inner.x + 13, y, inner.width.saturating_sub(36), 1),
+        selection,
+        Style::new().fg(color(pal.secondary)),
+        Alignment::Left,
+    );
     let mut right = inner.x + inner.width;
     let master = format!(
         "{} proceso",
@@ -239,7 +248,7 @@ pub(super) fn draw_audio_tab(app: &mut App, buf: &mut Buffer, layout: &Layout, p
         draw_audio_dynamics_compact(app, buf, compact, pal, &cfg);
     }
 
-    let hints = "↑↓ mover · ←→ ±1 dB · clic en una banda · p preset · n nivelación · e proceso · esc vuelve";
+    let hints = "↑↓ valor · ←→ control · clic banda · p preset · n nivelar · esc";
     text_at(
         buf,
         Rect::new(inner.x, footer, inner.width, 1),
@@ -368,14 +377,14 @@ fn draw_audio_graph(
             col_w.min(plot.x + plot.width - x0),
             plot.height,
         );
+        let center = x0 + col_w / 2;
         if is_selected {
             fill(
                 buf,
                 column,
-                mix(pal.bg_deep, pal.primary, 0.12),
+                mix(pal.bg_deep, pal.primary, 0.18),
             );
         }
-        let center = x0 + col_w / 2;
         for x in x0..column.x + column.width {
             put(
                 buf,
@@ -385,6 +394,9 @@ fn draw_audio_graph(
                 color(mix(pal.bg_deep, pal.border, 0.55)),
                 None,
             );
+        }
+        if is_selected {
+            put(buf, center, plot.y, "▾", color(pal.primary), None);
         }
 
         // Nivel en directo: mancha tenue que sube desde el cero, al lado de la
@@ -1049,7 +1061,7 @@ pub(super) fn draw_audio_overlay(app: &mut App, buf: &mut Buffer, layout: &Layou
         buf,
         Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, 1),
         if active {
-            "↑↓ mover · ←→ ±1 dB · 0 reset · p preset · e master · d bandas · r reset · esc"
+            "↑↓ ajustar · ←→ mover · 0 reset · p preset · e master · d bandas · r reset · esc"
         } else {
             "procesado apagado · e activa · d bandas · esc"
         },

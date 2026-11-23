@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use spote_core::artwork::{decode_image, render_cover, ArtMode, CoverArt, Palette};
 use spote_core::config;
-use spote_core::lyrics::{LyricsDoc, LyricsService};
+use spote_core::lyrics::{LyricsCandidate, LyricsDoc, LyricsService};
 use spote_core::spotify_api;
 use spote_core::util;
 use spote_protocol::TrackRef;
@@ -477,6 +477,80 @@ impl LyricsWorker {
     }
 
     pub fn try_recv(&self) -> Option<LyricsMsg> {
+        self.responses.try_recv().ok()
+    }
+}
+
+/// Búsqueda manual de letras: devuelve todos los candidatos de LRCLIB para que
+/// el usuario pueda previsualizarlos y aceptar el correcto.
+pub struct LyricsSearchWorker {
+    requests: Sender<(u64, String)>,
+    responses: Receiver<LyricsSearchMsg>,
+    generation: Arc<AtomicU64>,
+}
+
+pub enum LyricsSearchMsg {
+    Results {
+        query_id: u64,
+        query: String,
+        result: Result<Vec<LyricsCandidate>, String>,
+    },
+}
+
+impl LyricsSearchWorker {
+    pub fn start(cfg: spote_core::config::LyricsCfg) -> Self {
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<(u64, String)>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(0));
+        let worker_generation = Arc::clone(&generation);
+        std::thread::Builder::new()
+            .name("spote-lyrics-search".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                let service = LyricsService::from_config(&cfg);
+                while let Ok((mut query_id, mut query)) = request_rx.recv() {
+                    while let Ok((newer, newer_query)) = request_rx.try_recv() {
+                        query_id = newer;
+                        query = newer_query;
+                    }
+                    if worker_generation.load(Ordering::Relaxed) != query_id {
+                        continue;
+                    }
+                    let result = runtime
+                        .block_on(service.search_candidates(&query))
+                        .map_err(|err| err.to_string());
+                    if response_tx
+                        .send(LyricsSearchMsg::Results {
+                            query_id,
+                            query,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            requests: request_tx,
+            responses: response_rx,
+            generation,
+        }
+    }
+
+    pub fn request(&self, query: String) -> u64 {
+        let id = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.requests.send((id, query));
+        id
+    }
+
+    pub fn try_recv(&self) -> Option<LyricsSearchMsg> {
         self.responses.try_recv().ok()
     }
 }

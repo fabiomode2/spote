@@ -750,7 +750,14 @@ fn event_loop(
         // pausa van a ese ritmo). Antes se repintaba a 60-120 Hz siempre,
         // incluso con la UI congelada.
         let wait = if animating {
-            budget.saturating_sub(last.elapsed())
+            // El mosaico recolorea toda la pantalla; 60 fps no aportan nada y
+            // disparan el uso de CPU en terminales lentos.
+            let target = if app.cfg.ui.fx.ambient == "mosaic" {
+                budget.max(Duration::from_millis(33))
+            } else {
+                budget
+            };
+            target.saturating_sub(last.elapsed())
         } else {
             IDLE_POLL
         };

@@ -258,7 +258,9 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         truncate_chars(&mut meta, room as usize);
         spans.push(Span::styled(
             format!("  ·  {meta}"),
-            Style::new().fg(color(pal.muted)),
+            Style::new()
+                .fg(color(pal.secondary))
+                .add_modifier(Modifier::UNDERLINED),
         ));
     }
     line_at(
@@ -338,6 +340,10 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         return;
     }
     app.lyrics_area = rect;
+    if app.lyrics_search.is_some() {
+        draw_lyrics_search(app, buf, rect, pal);
+        return;
+    }
     let Some(doc) = &app.lyrics else {
         let message = if app.lyrics_status.is_empty() {
             "sin letra".to_string()
@@ -346,11 +352,39 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         };
         text_at(
             buf,
-            Rect::new(rect.x, rect.y + rect.height / 2, rect.width, 1),
+            Rect::new(rect.x, rect.y + rect.height / 2 - 1, rect.width, 1),
             message,
             Style::new().fg(color(pal.dim)),
             Alignment::Center,
         );
+        let label = "⌕ buscar letra a mano";
+        let width = label.chars().count() as u16 + 2;
+        if rect.width > width + 4 && rect.height > 4 {
+            let chip = Rect::new(
+                rect.x + (rect.width.saturating_sub(width)) / 2,
+                rect.y + rect.height / 2 + 1,
+                width,
+                1,
+            );
+            let hover = app.hover == Some(Action::LyricsSearchOpen);
+            fill(
+                buf,
+                chip,
+                if hover {
+                    pal.surface_alt
+                } else {
+                    mix(pal.surface, pal.primary, 0.22)
+                },
+            );
+            text_at(
+                buf,
+                chip,
+                label,
+                Style::new().fg(color(pal.text)),
+                Alignment::Center,
+            );
+            app.hit.add(chip, Action::LyricsSearchOpen);
+        }
         return;
     };
     if doc.is_empty() {
@@ -620,6 +654,16 @@ fn draw_lyrics_toolbar(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
             "⟳",
             Action::LyricsRefetch,
         );
+        lyric_chip(
+            app,
+            buf,
+            pal,
+            &mut x,
+            right,
+            rect.y,
+            "⌕",
+            Action::LyricsSearchOpen,
+        );
     }
 }
 
@@ -669,6 +713,269 @@ fn lyric_chip(
     );
     app.hit.add(rect, action);
     *x += width + 1;
+}
+
+/// Búsqueda manual de letras dentro del hueco de la letra. Es una pantalla
+/// persistente, no un popup: el usuario puede leer la previsualización y
+/// aceptar la versión que sea de verdad.
+fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
+    let Some(state) = app.lyrics_search.clone() else {
+        return;
+    };
+    fill_soft(buf, rect, mix(pal.bg_deep, pal.surface, 0.55), 0.55, pal.bg_deep);
+    let inner = Rect::new(
+        rect.x + 1,
+        rect.y,
+        rect.width.saturating_sub(2),
+        rect.height,
+    );
+    // Cabecera.
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y, inner.width.saturating_sub(16), 1),
+        "BUSCAR LETRA",
+        Style::new()
+            .fg(color(mix_oklab(pal.primary, pal.text, 0.2)))
+            .add_modifier(Modifier::BOLD),
+        Alignment::Left,
+    );
+    let back = "esc volver";
+    let back_w = back.chars().count() as u16;
+    if inner.width > back_w {
+        let back_rect = Rect::new(inner.x + inner.width - back_w, inner.y, back_w, 1);
+        put(buf, back_rect.x, back_rect.y, back, color(pal.dim), None);
+        app.hit.add(back_rect, Action::LyricsSearchClose);
+    }
+    // Consulta + estado.
+    let query_y = inner.y + 1;
+    let query_rect = Rect::new(inner.x, query_y, inner.width, 1);
+    fill(buf, query_rect, mix(pal.surface, pal.primary, 0.10));
+    put(buf, query_rect.x + 1, query_y, "⌕", color(pal.primary), None);
+    let mut query = state.query.clone();
+    truncate_chars(&mut query, inner.width.saturating_sub(6) as usize);
+    put(buf, query_rect.x + 3, query_y, &query, color(pal.text), None);
+    let cursor_x = (query_rect.x + 3 + query.chars().count() as u16)
+        .min(query_rect.x + query_rect.width - 1);
+    put(buf, cursor_x, query_y, "▏", color(pal.primary), None);
+    if !state.status.is_empty() && inner.width > 30 {
+        let mut status = state.status.clone();
+        truncate_chars(&mut status, inner.width.saturating_sub(2) as usize);
+        text_at(
+            buf,
+            Rect::new(inner.x + 1, query_y + 1, inner.width.saturating_sub(2), 1),
+            status,
+            Style::new().fg(color(if state.loading { pal.warn } else { pal.dim })),
+            Alignment::Left,
+        );
+    }
+
+    let body_y = query_y + 2;
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    let body_h = footer_y.saturating_sub(body_y);
+    let two_cols = inner.width >= 52 && body_h >= 7;
+    let results_w = if two_cols {
+        ((inner.width as u32 * 46 / 100) as u16).max(24)
+    } else {
+        inner.width
+    };
+    let preview_w = if two_cols {
+        inner.width.saturating_sub(results_w + 2)
+    } else {
+        0
+    };
+    let results = state.results.clone();
+    let selected = state
+        .selected
+        .min(results.len().saturating_sub(1));
+    if results.is_empty() {
+        let message = if state.loading {
+            "buscando…".to_string()
+        } else if !state.status.is_empty() {
+            state.status.clone()
+        } else {
+            "escribe una búsqueda y pulsa enter".to_string()
+        };
+        text_at(
+            buf,
+            Rect::new(inner.x, body_y + body_h / 2, inner.width, 1),
+            message,
+            Style::new().fg(color(pal.dim)),
+            Alignment::Center,
+        );
+    } else {
+        // Lista de candidatos.
+        let row_h = 2u16;
+        let visible = (body_h / row_h).max(1) as usize;
+        let start = selected.saturating_sub(visible / 2).min(
+            results
+                .len()
+                .saturating_sub(visible.min(results.len())),
+        );
+        for (offset, candidate) in results.iter().skip(start).take(visible).enumerate() {
+            let index = start + offset;
+            let y = body_y + offset as u16 * row_h;
+            let row = Rect::new(inner.x, y, results_w, row_h);
+            if index == selected {
+                fill(buf, row, mix(pal.surface, pal.primary, 0.24));
+                put(buf, row.x, y, "▍", color(pal.primary), None);
+            } else if app.hover == Some(Action::LyricsSearchSelect(index)) {
+                fill(buf, row, pal.surface_alt);
+            }
+            let sync = if candidate.synced { "♪ sync" } else { "· texto" };
+            let header = format!(
+                "{}  ·  {}",
+                candidate.title.trim(),
+                candidate.artist.trim()
+            );
+            let mut header = header;
+            truncate_chars(&mut header, results_w.saturating_sub(10) as usize);
+            put(
+                buf,
+                row.x + 2,
+                y,
+                &header,
+                color(if index == selected { pal.text } else { pal.muted }),
+                None,
+            );
+            let meta = format!(
+                "{}  ·  {}",
+                candidate.artist.trim(),
+                format_ms(candidate.duration_ms)
+            );
+            let mut meta = meta;
+            truncate_chars(&mut meta, results_w.saturating_sub(12) as usize);
+            put(buf, row.x + 2, y + 1, &meta, color(pal.dim), None);
+            put(
+                buf,
+                row.x + results_w.saturating_sub(sync.chars().count() as u16 + 1),
+                y,
+                sync,
+                color(if candidate.synced {
+                    pal.primary
+                } else {
+                    pal.dim
+                }),
+                None,
+            );
+            app.hit.add(row, Action::LyricsSearchSelect(index));
+        }
+
+        // Previsualización de la candidata seleccionada.
+        if two_cols {
+            if let Some(candidate) = results.get(selected) {
+                let preview = Rect::new(
+                    inner.x + results_w + 2,
+                    body_y,
+                    preview_w,
+                    body_h,
+                );
+                fill_soft(
+                    buf,
+                    preview,
+                    mix(pal.bg_deep, pal.surface, 0.7),
+                    0.5,
+                    pal.bg_deep,
+                );
+                let source = format!(
+                    "VISTA PREVIA · {} · {}",
+                    candidate.source.to_uppercase(),
+                    if candidate.synced {
+                        "sincronizada"
+                    } else {
+                        "texto"
+                    }
+                );
+                text_at(
+                    buf,
+                    Rect::new(preview.x + 1, preview.y, preview.width.saturating_sub(2), 1),
+                    source,
+                    Style::new().fg(color(pal.secondary)),
+                    Alignment::Left,
+                );
+                let lines = candidate.preview_lines();
+                let wrap_w = preview.width.saturating_sub(4).max(8) as usize;
+                let mut wrapped: Vec<String> = Vec::new();
+                for line in lines.iter() {
+                    for row in wrap_text(line, wrap_w) {
+                        wrapped.push(row);
+                    }
+                }
+                let max_rows = preview.height.saturating_sub(2) as usize;
+                let start = state.preview_scroll.min(wrapped.len().saturating_sub(1));
+                for (row, line) in wrapped.iter().skip(start).take(max_rows).enumerate() {
+                    put(
+                        buf,
+                        preview.x + 2,
+                        preview.y + 1 + row as u16,
+                        line,
+                        color(if row == 0 { pal.text } else { pal.muted }),
+                        None,
+                    );
+                }
+                if wrapped.len() > start + max_rows && max_rows > 0 {
+                    put(
+                        buf,
+                        preview.x + 2,
+                        preview.y + preview.height.saturating_sub(1),
+                        "…",
+                        color(pal.dim),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
+    // Acciones y ayuda.
+    if body_h > 0 {
+        let mut x = inner.x;
+        let accept = if results.is_empty() {
+            "enter buscar"
+        } else {
+            "enter usar esta"
+        };
+        let chips = [(accept, Action::LyricsAcceptCandidate)];
+        for (label, action) in chips {
+            let w = label.chars().count() as u16 + 2;
+            if x + w > inner.x + inner.width {
+                break;
+            }
+            let chip = Rect::new(x, footer_y, w, 1);
+            let hover = app.hover == Some(action.clone());
+            fill(
+                buf,
+                chip,
+                if hover {
+                    pal.surface_alt
+                } else {
+                    pal.surface
+                },
+            );
+            text_at(
+                buf,
+                chip,
+                label,
+                Style::new().fg(color(if matches!(&action, Action::LyricsAcceptCandidate) {
+                    pal.primary
+                } else {
+                    pal.muted
+                })),
+                Alignment::Center,
+            );
+            app.hit.add(chip, action);
+            x += w + 1;
+        }
+        let hint = "↑↓ elegir · PgUp/PgDn letra · esc volver";
+        if x + hint.chars().count() as u16 + 2 < inner.x + inner.width {
+            text_at(
+                buf,
+                Rect::new(x, footer_y, inner.width.saturating_sub(x - inner.x), 1),
+                hint,
+                Style::new().fg(color(pal.dim)),
+                Alignment::Left,
+            );
+        }
+    }
 }
 
 /// Pinta la línea activa palabra a palabra. Los tiempos salen de

@@ -289,7 +289,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         let mut artist = row.track.artist.clone();
         truncate_chars(&mut artist, g.title_w as usize);
         let artist_draw_w = artist.chars().count() as u16;
-        put(buf, g.text_x, y + 1, &artist, color(pal.dim), None);
+        put(buf, g.text_x, y + 1, &artist, color(pal.secondary), None);
         if !artist.is_empty() {
             app.hit.add(
                 Rect::new(g.text_x, y + 1, artist_draw_w.min(g.title_w), 1),
@@ -305,7 +305,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
                     g.album_x,
                     y,
                     &shown,
-                    color(if selected { pal.muted } else { pal.dim }),
+                    color(if selected { pal.secondary } else { pal.muted }),
                     None,
                 );
                 let album_draw_w = shown.chars().count() as u16;

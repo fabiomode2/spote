@@ -2,6 +2,10 @@
 use super::*;
 
 pub(super) fn draw_side(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    if app.detail.is_some() {
+        super::detail::draw_detail(app, buf, layout.side, pal);
+        return;
+    }
     if layout.queue.height > 2 {
         draw_queue(app, buf, layout.queue, pal);
     }
@@ -57,7 +61,7 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                     artist.push_str(album);
                 }
                 truncate_chars(&mut artist, inner.width.saturating_sub(4) as usize);
-                put(buf, inner.x + 2, inner.y + 1, &artist, color(pal.dim), None);
+                put(buf, inner.x + 2, inner.y + 1, &artist, color(pal.secondary), None);
             }
             app.hit.add(now_rect, Action::Tab(Tab::Now));
             inner.y += now_h + 1;
@@ -144,7 +148,7 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                 artist.push_str("  ·  ↓");
             }
             truncate_chars(&mut artist, text_w as usize);
-            put(buf, text_x, y + 1, &artist, color(pal.dim), None);
+            put(buf, text_x, y + 1, &artist, color(pal.secondary), None);
             put(
                 buf,
                 text_x,

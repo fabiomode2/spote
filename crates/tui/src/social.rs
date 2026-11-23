@@ -12,7 +12,17 @@ use spote_protocol::{
     QueueItem, Room, RoomState, ServerMsg, TimeResponse, TrackRef,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest, http::HeaderValue, Error as WsError, Message,
+};
+
+const CLIENT_KEY_HEADER: &str = "x-spote-key";
+
+#[derive(Debug)]
+enum ConnectError {
+    Unauthorized,
+    Other(String),
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -28,7 +38,10 @@ pub enum SocialCmd {
 
 #[derive(Debug, Clone)]
 pub enum SocialEvent {
-    Ready { user: String, token: String },
+    Ready {
+        user: String,
+        token: String,
+    },
     Status(String),
     Error(String),
     Rooms(Vec<Room>),
@@ -97,73 +110,59 @@ async fn worker(
         }
     };
 
-    // 1. Login (o reutiliza el token guardado).
-    let mut token = cfg.token.clone();
-    let mut user = cfg.name.clone();
-    if token.is_empty() {
-        let name = if cfg.name.is_empty() {
-            hostname()
-        } else {
-            cfg.name.clone()
-        };
-        let request = LoginRequest {
-            name: name.clone(),
-            invite: if cfg.invite.is_empty() {
-                "spote".into()
-            } else {
-                cfg.invite.clone()
-            },
-        };
-        match client
-            .post(format!("{base}/api/v1/auth/login"))
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                if let Ok(login) = response.json::<LoginResponse>().await {
-                    token = login.token;
-                    user = login.user.name;
-                    let _ = events.send(SocialEvent::Ready {
-                        user: user.clone(),
-                        token: token.clone(),
-                    });
-                }
-            }
-            Ok(response) => {
-                let _ = events.send(SocialEvent::Error(format!(
-                    "login rechazado ({})",
-                    response.status()
-                )));
-                return;
-            }
-            Err(err) => {
-                let _ = events.send(SocialEvent::Error(format!("servidor: {err}")));
-                return;
-            }
-        }
-    }
-    if token.is_empty() {
+    if cfg.client_key.trim().is_empty() {
+        let _ = events.send(SocialEvent::Error(
+            "falta [server] client_key en config.toml".into(),
+        ));
         return;
     }
+
+    // 1. Login (o reutiliza el token guardado si sigue valiendo).
+    let mut token = cfg.token.clone();
+    let mut user = cfg.name.clone();
+    if !token.is_empty() && !token_is_valid(&client, &base, &cfg.client_key, &token).await {
+        token.clear();
+    }
+    if token.is_empty() {
+        let Some((new_token, new_user)) = login(&client, &base, &cfg, &events).await else {
+            return;
+        };
+        token = new_token;
+        user = new_user;
+    }
     let _ = events.send(SocialEvent::Status(format!("conectado como {user}")));
-    refresh_rooms(&client, &base, &token, &events).await;
+    refresh_rooms(&client, &base, &cfg.client_key, &token, &events).await;
 
     // 2. Reloj: 5 muestras, quedarse con la de menor RTT.
-    if let Some(offset) = estimate_clock(&client, &base).await {
+    if let Some(offset) = estimate_clock(&client, &base, &cfg.client_key).await {
         let _ = events.send(SocialEvent::Clock(offset));
     }
 
-    // 3. WebSocket con reconexión.
+    // 3. WebSocket con reconexión. Si la sesión caduca, se renueva sola.
     loop {
-        match connect_ws(&base, &token).await {
+        match connect_ws(&base, &cfg.client_key, &token).await {
             Ok(stream) => {
                 let _ = events.send(SocialEvent::Status("websocket conectado".into()));
                 if run_ws(stream, &mut commands, &events).await {
                     return;
                 }
             }
-            Err(err) => {
+            Err(ConnectError::Unauthorized) => {
+                let _ = events.send(SocialEvent::Error(
+                    "sesión caducada; renovando login".into(),
+                ));
+                match login(&client, &base, &cfg, &events).await {
+                    Some((new_token, new_user)) => {
+                        token = new_token;
+                        let _ =
+                            events.send(SocialEvent::Status(format!("conectado como {new_user}")));
+                        refresh_rooms(&client, &base, &cfg.client_key, &token, &events).await;
+                        continue;
+                    }
+                    None => return,
+                }
+            }
+            Err(ConnectError::Other(err)) => {
                 let _ = events.send(SocialEvent::Error(format!("ws: {err}")));
             }
         }
@@ -172,13 +171,18 @@ async fn worker(
         loop {
             match tokio::time::timeout_at(deadline, commands.recv()).await {
                 Ok(Some(SocialCmd::Refresh)) => {
-                    refresh_rooms(&client, &base, &token, &events).await;
+                    refresh_rooms(&client, &base, &cfg.client_key, &token, &events).await;
                 }
                 Ok(Some(_)) | Ok(None) => {}
                 Err(_) => break,
             }
         }
-        if let Ok(response) = client.get(format!("{base}/api/v1/time")).send().await {
+        if let Ok(response) = client
+            .get(format!("{base}/api/v1/time"))
+            .header(CLIENT_KEY_HEADER, &cfg.client_key)
+            .send()
+            .await
+        {
             if let Ok(time) = response.json::<TimeResponse>().await {
                 let _ = time;
             }
@@ -186,7 +190,92 @@ async fn worker(
     }
 }
 
-fn ws_url(base: &str, token: &str) -> String {
+async fn token_is_valid(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+) -> bool {
+    match client
+        .get(format!("{base}/api/v1/me"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await
+    {
+        Ok(response) => !matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ),
+        // Sin red no se descarta el token: se reintenta.
+        Err(_) => true,
+    }
+}
+
+async fn login(
+    client: &reqwest::Client,
+    base: &str,
+    cfg: &ServerCfg,
+    events: &std::sync::mpsc::Sender<SocialEvent>,
+) -> Option<(String, String)> {
+    if cfg.invite.trim().is_empty() {
+        let _ = events.send(SocialEvent::Error(
+            "falta [server] invite en config.toml".into(),
+        ));
+        return None;
+    }
+    let name = if cfg.name.is_empty() {
+        hostname()
+    } else {
+        cfg.name.clone()
+    };
+    let request = LoginRequest {
+        name: name.clone(),
+        invite: cfg.invite.clone(),
+    };
+    match client
+        .post(format!("{base}/api/v1/auth/login"))
+        .header(CLIENT_KEY_HEADER, &cfg.client_key)
+        .json(&request)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            match response.json::<LoginResponse>().await {
+                Ok(login) => {
+                    let _ = events.send(SocialEvent::Ready {
+                        user: login.user.name.clone(),
+                        token: login.token.clone(),
+                    });
+                    Some((login.token, login.user.name))
+                }
+                Err(err) => {
+                    let _ = events.send(SocialEvent::Error(format!("login: {err}")));
+                    None
+                }
+            }
+        }
+        Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+            let _ = events.send(SocialEvent::Error(
+                "login rechazado · revisa [server] client_key, invite y nombre".into(),
+            ));
+            None
+        }
+        Ok(response) => {
+            let _ = events.send(SocialEvent::Error(format!(
+                "login rechazado ({})",
+                response.status()
+            )));
+            None
+        }
+        Err(err) => {
+            let _ = events.send(SocialEvent::Error(format!("servidor: {err}")));
+            None
+        }
+    }
+}
+
+fn ws_url(base: &str) -> String {
     let ws = if let Some(rest) = base.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = base.strip_prefix("http://") {
@@ -194,22 +283,39 @@ fn ws_url(base: &str, token: &str) -> String {
     } else {
         format!("ws://{base}")
     };
-    format!("{ws}/api/v1/ws?token={token}")
+    format!("{ws}/api/v1/ws")
 }
 
 async fn connect_ws(
     base: &str,
+    client_key: &str,
     token: &str,
 ) -> Result<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    String,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ConnectError,
 > {
-    let (stream, _) = tokio_tungstenite::connect_async(ws_url(base, token))
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(stream)
+    let mut request = ws_url(base)
+        .into_client_request()
+        .map_err(|err| ConnectError::Other(err.to_string()))?;
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|err| ConnectError::Other(err.to_string()))?,
+    );
+    request.headers_mut().insert(
+        CLIENT_KEY_HEADER,
+        HeaderValue::from_str(client_key).map_err(|err| ConnectError::Other(err.to_string()))?,
+    );
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((stream, _)) => Ok(stream),
+        Err(WsError::Http(response))
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                || response.status() == reqwest::StatusCode::FORBIDDEN =>
+        {
+            Err(ConnectError::Unauthorized)
+        }
+        Err(err) => Err(ConnectError::Other(err.to_string())),
+    }
 }
 
 /// Devuelve `true` si el hilo debe terminar (canal cerrado).
@@ -337,12 +443,14 @@ where
 async fn refresh_rooms(
     client: &reqwest::Client,
     base: &str,
+    client_key: &str,
     token: &str,
     events: &std::sync::mpsc::Sender<SocialEvent>,
 ) {
     match client
         .get(format!("{base}/api/v1/rooms"))
         .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
         .send()
         .await
     {
@@ -363,11 +471,16 @@ async fn refresh_rooms(
     }
 }
 
-async fn estimate_clock(client: &reqwest::Client, base: &str) -> Option<i64> {
+async fn estimate_clock(client: &reqwest::Client, base: &str, client_key: &str) -> Option<i64> {
     let mut best: Option<(i64, i64)> = None;
     for _ in 0..5 {
         let t0 = now_ms();
-        let response = client.get(format!("{base}/api/v1/time")).send().await.ok()?;
+        let response = client
+            .get(format!("{base}/api/v1/time"))
+            .header(CLIENT_KEY_HEADER, client_key)
+            .send()
+            .await
+            .ok()?;
         let time: TimeResponse = response.json().await.ok()?;
         let t1 = now_ms();
         let rtt = t1 - t0;

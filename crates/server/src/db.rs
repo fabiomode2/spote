@@ -11,25 +11,37 @@ use std::{
 };
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use spote_protocol::{ChatMsg, Member, Presence, QueueItem, Role, Room, RoomState, TrackRef, User};
+use spote_protocol::{
+    ChatMsg, Member, Presence, QueueItem, Role, Room, RoomState, SyncOp, SyncPlaylist,
+    SyncPlaylistItem, SyncPullResponse, SyncPushResponse, SyncTrack, TrackRef, User,
+};
 use uuid::Uuid;
 
-use crate::{error::AppError, service::now_ms};
+use crate::{
+    config::{random_secret, sha256},
+    error::AppError,
+    service::now_ms,
+};
 
 /// Esquema completo. Todo idempotente: se puede ejecutar en cada arranque.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL UNIQUE,
-    avatar      TEXT,
-    invite_code TEXT NOT NULL,
-    created_at  INTEGER NOT NULL
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    avatar        TEXT,
+    invite_code   TEXT NOT NULL DEFAULT '',
+    client_key_fp TEXT,
+    created_at    INTEGER NOT NULL
 );
 
+-- `token` guarda el SHA-256 del token, nunca el token en claro: si se filtra
+-- una copia de la base de datos no se pueden reutilizar las sesiones.
 CREATE TABLE IF NOT EXISTS sessions (
-    token      TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at INTEGER NOT NULL
+    token         TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_key_fp TEXT,
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS friends (
@@ -103,10 +115,61 @@ CREATE TABLE IF NOT EXISTS user_presence (
     playing     INTEGER NOT NULL DEFAULT 0
 );
 
+-- Biblioteca personal sincronizada PC ↔ móvil. Aquí solo hay metadatos:
+-- rutas locales, audio y descargas no salen del dispositivo.
+CREATE TABLE IF NOT EXISTS sync_meta (
+    user_id    TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    revision   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS sync_tracks (
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    key         TEXT NOT NULL,
+    track_json  TEXT NOT NULL,
+    favorite    INTEGER NOT NULL DEFAULT 0,
+    play_count  INTEGER NOT NULL DEFAULT 0,
+    last_played INTEGER,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    revision    INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS sync_playlists (
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id          TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    cover_url   TEXT,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    revision    INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (user_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS sync_playlist_items (
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id          TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    track_key   TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    deleted     INTEGER NOT NULL DEFAULT 0,
+    revision    INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (user_id, id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_chat_room_ts ON chat(room_id, ts);
 CREATE INDEX IF NOT EXISTS idx_queue_room_position ON queue_items(room_id, position);
 CREATE INDEX IF NOT EXISTS idx_room_members_user ON room_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_play_events_room_ts ON play_events(room_id, ts);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sync_tracks_revision ON sync_tracks(user_id, revision);
+CREATE INDEX IF NOT EXISTS idx_sync_playlists_revision ON sync_playlists(user_id, revision);
+CREATE INDEX IF NOT EXISTS idx_sync_items_revision ON sync_playlist_items(user_id, revision);
+CREATE INDEX IF NOT EXISTS idx_sync_items_playlist
+    ON sync_playlist_items(user_id, playlist_id, position);
 "#;
 
 pub struct Db {
@@ -121,6 +184,7 @@ impl Db {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
+        db.delete_expired_sessions()?;
         Ok(db)
     }
 
@@ -132,6 +196,7 @@ impl Db {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
+        db.delete_expired_sessions()?;
         Ok(db)
     }
 
@@ -149,6 +214,41 @@ impl Db {
     fn migrate(&self) -> Result<(), AppError> {
         let conn = self.lock()?;
         conn.execute_batch(SCHEMA)?;
+
+        // Bases de datos creadas antes del endurecimiento: añade las columnas
+        // sin recrear tablas. Las sesiones viejas no tenían clave de cliente ni
+        // caducidad, así que se invalidan (abajo) y cada cliente vuelve a hacer
+        // login una vez.
+        if !column_exists(&conn, "users", "client_key_fp")? {
+            conn.execute("ALTER TABLE users ADD COLUMN client_key_fp TEXT", [])?;
+        }
+        if !column_exists(&conn, "sessions", "client_key_fp")? {
+            conn.execute("ALTER TABLE sessions ADD COLUMN client_key_fp TEXT", [])?;
+        }
+        if !column_exists(&conn, "sessions", "expires_at")? {
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at)",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM sessions WHERE client_key_fp IS NULL OR expires_at <= ?1",
+            [now_ms()],
+        )?;
+
+        // Unicidad de nombre sin distinguir mayúsculas. Si una base antigua ya
+        // tuviera duplicados, no se impide arrancar: el login los rechazará.
+        if let Err(error) = conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_name_nocase
+             ON users(name COLLATE NOCASE)",
+            [],
+        ) {
+            tracing::warn!(%error, "no se pudo crear el índice único de nombres");
+        }
         Ok(())
     }
 
@@ -158,36 +258,64 @@ impl Db {
             .map_err(|_| AppError::Internal("database lock poisoned".to_string()))
     }
 
+    pub fn ping(&self) -> Result<(), AppError> {
+        let conn = self.lock()?;
+        conn.query_row("SELECT 1", [], |_| Ok(()))?;
+        Ok(())
+    }
+
     // ----------------------------------------------------------------- users
 
-    /// Login idempotente por nombre: reutiliza el usuario y emite token nuevo.
-    /// Devuelve `(user, token, invite_code)`.
-    pub fn login(&self, name: &str, invite_code: &str) -> Result<(User, String, String), AppError> {
+    /// Login idempotente por nombre, atado a la clave de cliente.
+    ///
+    /// - Un nombre nuevo queda vinculado a la huella de la clave que lo creó.
+    /// - Un nombre existente solo puede volver a entrar con esa misma clave.
+    /// - El token devuelto se guarda hasheado y caduca en `expires_at`.
+    pub fn login(
+        &self,
+        name: &str,
+        client_key_fp: &str,
+        expires_at: i64,
+    ) -> Result<(User, String), AppError> {
         let conn = self.lock()?;
         let existing = conn
             .query_row(
-                "SELECT id, name, avatar FROM users WHERE name = ?1",
+                "SELECT id, name, avatar, client_key_fp
+                 FROM users WHERE name = ?1 COLLATE NOCASE",
                 [name],
-                map_user,
+                |row| Ok((map_user(row)?, row.get::<_, Option<String>>(3)?)),
             )
             .optional()?;
 
-        let (user, invite) = match existing {
-            Some(user) => {
-                let code: String = conn.query_row(
-                    "SELECT invite_code FROM users WHERE id = ?1",
-                    [&user.id],
-                    |row| row.get(0),
-                )?;
-                (user, code)
+        let user = match existing {
+            Some((user, bound_key)) => {
+                match bound_key {
+                    Some(bound) if bound != client_key_fp => {
+                        return Err(AppError::Unauthorized("login rejected".to_string()));
+                    }
+                    Some(_) => {}
+                    None => {
+                        // Usuario creado antes de existir las claves de cliente:
+                        // se ata a la primera clave que haga login con su nombre.
+                        conn.execute(
+                            "UPDATE users SET client_key_fp = ?1 WHERE id = ?2",
+                            params![client_key_fp, user.id],
+                        )?;
+                        tracing::warn!(
+                            user = %user.name,
+                            "usuario antiguo vinculado a la clave de cliente actual"
+                        );
+                    }
+                }
+                user
             }
             None => {
                 let id = Uuid::new_v4().to_string();
                 let now = now_ms();
                 conn.execute(
-                    "INSERT INTO users (id, name, avatar, invite_code, created_at)
-                     VALUES (?1, ?2, NULL, ?3, ?4)",
-                    params![id, name, invite_code, now],
+                    "INSERT INTO users (id, name, avatar, invite_code, client_key_fp, created_at)
+                     VALUES (?1, ?2, NULL, '', ?3, ?4)",
+                    params![id, name, client_key_fp, now],
                 )?;
                 conn.execute(
                     "INSERT INTO user_presence (user_id, online, last_seen, now_playing, playing)
@@ -195,36 +323,72 @@ impl Db {
                      ON CONFLICT(user_id) DO NOTHING",
                     params![id, now],
                 )?;
-                (
-                    User {
-                        id,
-                        name: name.to_string(),
-                        avatar: None,
-                    },
-                    invite_code.to_string(),
-                )
+                User {
+                    id,
+                    name: name.to_string(),
+                    avatar: None,
+                }
             }
         };
 
-        let token = Uuid::new_v4().to_string();
+        let token = random_secret(32);
+        let token_hash = hex::encode(sha256(token.as_bytes()));
         conn.execute(
-            "INSERT INTO sessions (token, user_id, created_at) VALUES (?1, ?2, ?3)",
-            params![token, user.id, now_ms()],
+            "INSERT INTO sessions (token, user_id, client_key_fp, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![token_hash, user.id, client_key_fp, now_ms(), expires_at],
         )?;
-        Ok((user, token, invite))
+        // Un dispositivo por amigo es lo normal; 10 sesiones vivas sobran y
+        // evitan que un bucle de login haga crecer la tabla sin límite.
+        conn.execute(
+            "DELETE FROM sessions
+             WHERE user_id = ?1
+               AND token NOT IN (
+                   SELECT token FROM sessions
+                   WHERE user_id = ?1
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT 10
+               )",
+            [&user.id],
+        )?;
+        Ok((user, token))
     }
 
-    pub fn user_by_token(&self, token: &str) -> Result<Option<User>, AppError> {
+    /// Resuelve un token solo si pertenece a la misma clave de cliente y no ha
+    /// caducado. El token se compara por hash, nunca en claro.
+    pub fn user_by_token(
+        &self,
+        token: &str,
+        client_key_fp: &str,
+    ) -> Result<Option<User>, AppError> {
+        let token_hash = hex::encode(sha256(token.as_bytes()));
         let conn = self.lock()?;
         Ok(conn
             .query_row(
                 "SELECT u.id, u.name, u.avatar
                  FROM sessions s JOIN users u ON u.id = s.user_id
-                 WHERE s.token = ?1",
-                [token],
+                 WHERE s.token = ?1
+                   AND s.client_key_fp = ?2
+                   AND s.expires_at > ?3
+                   AND u.client_key_fp = ?2",
+                params![token_hash, client_key_fp, now_ms()],
                 map_user,
             )
             .optional()?)
+    }
+
+    pub fn revoke_session(&self, token_hash: &str) -> Result<bool, AppError> {
+        let conn = self.lock()?;
+        let removed = conn.execute("DELETE FROM sessions WHERE token = ?1", [token_hash])?;
+        Ok(removed > 0)
+    }
+
+    pub fn delete_expired_sessions(&self) -> Result<usize, AppError> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM sessions WHERE expires_at <= ?1 OR client_key_fp IS NULL",
+            [now_ms()],
+        )?)
     }
 
     pub fn user_by_id(&self, user_id: &str) -> Result<Option<User>, AppError> {
@@ -420,6 +584,17 @@ impl Db {
         Ok(removed > 0)
     }
 
+    /// Expulsa a un miembro. El host no puede expulsarse a sí mismo.
+    pub fn kick_member(&self, room_id: &str, user_id: &str) -> Result<bool, AppError> {
+        let conn = self.lock()?;
+        let removed = conn.execute(
+            "DELETE FROM room_members
+             WHERE room_id = ?1 AND user_id = ?2 AND role != 'host'",
+            params![room_id, user_id],
+        )?;
+        Ok(removed > 0)
+    }
+
     pub fn is_member(&self, room_id: &str, user_id: &str) -> Result<bool, AppError> {
         let conn = self.lock()?;
         let found = conn
@@ -530,6 +705,21 @@ impl Db {
         queue_for(&conn, room_id)
     }
 
+    pub fn queue_item_added_by(
+        &self,
+        room_id: &str,
+        item_id: &str,
+    ) -> Result<Option<String>, AppError> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT added_by FROM queue_items WHERE room_id = ?1 AND id = ?2",
+                params![room_id, item_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Quita un item y renumera el resto para no dejar huecos.
     pub fn queue_remove(&self, room_id: &str, item_id: &str) -> Result<bool, AppError> {
         let mut conn = self.lock()?;
@@ -610,6 +800,84 @@ impl Db {
         let mut messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         messages.reverse();
         Ok(messages)
+    }
+
+    // -------------------------------------------------------------- sync
+
+    /// Estado completo activo (sin tombstones) para el primer sync.
+    pub fn sync_snapshot(&self, user_id: &str) -> Result<SyncPullResponse, AppError> {
+        let conn = self.lock()?;
+        let revision = sync_revision(&conn, user_id)?;
+        Ok(SyncPullResponse {
+            revision,
+            tracks: sync_tracks_for(&conn, user_id, None)?,
+            playlists: sync_playlists_for(&conn, user_id, None)?,
+            items: sync_items_for(&conn, user_id, None)?,
+        })
+    }
+
+    /// Cambios con `revision > since`, tombstones incluidos.
+    pub fn sync_pull(&self, user_id: &str, since: i64) -> Result<SyncPullResponse, AppError> {
+        if since < 0 {
+            return Err(AppError::BadRequest("since must be >= 0".to_string()));
+        }
+        let conn = self.lock()?;
+        let revision = sync_revision(&conn, user_id)?;
+        if since > revision {
+            return Err(AppError::BadRequest(
+                "since is ahead of the server".to_string(),
+            ));
+        }
+        Ok(SyncPullResponse {
+            revision,
+            tracks: sync_tracks_for(&conn, user_id, Some(since))?,
+            playlists: sync_playlists_for(&conn, user_id, Some(since))?,
+            items: sync_items_for(&conn, user_id, Some(since))?,
+        })
+    }
+
+    /// Aplica un lote atómico. Si la revisión base no es la actual, no toca
+    /// nada y devuelve conflicto para que el cliente haga pull y reintente.
+    pub fn sync_push(
+        &self,
+        user_id: &str,
+        base_revision: i64,
+        ops: &[SyncOp],
+    ) -> Result<SyncPushResponse, AppError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let current = sync_revision(&tx, user_id)?;
+        if current != base_revision {
+            return Err(AppError::Conflict(
+                "sync revision changed; pull and retry".to_string(),
+            ));
+        }
+        if ops.is_empty() {
+            tx.commit()?;
+            return Ok(SyncPushResponse {
+                revision: current,
+                applied: 0,
+            });
+        }
+
+        let revision = current + 1;
+        let now = now_ms();
+        for op in ops {
+            apply_sync_op(&tx, user_id, revision, now, op)?;
+        }
+        tx.execute(
+            "INSERT INTO sync_meta (user_id, revision, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET
+                 revision = excluded.revision,
+                 updated_at = excluded.updated_at",
+            params![user_id, revision, now],
+        )?;
+        tx.commit()?;
+        Ok(SyncPushResponse {
+            revision,
+            applied: ops.len(),
+        })
     }
 
     // ------------------------------------------------------------- play events
@@ -784,6 +1052,292 @@ fn queue_for(conn: &Connection, room_id: &str) -> Result<Vec<QueueItem>, AppErro
     )?;
     let rows = stmt.query_map([room_id], map_queue_item)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn sync_revision(conn: &Connection, user_id: &str) -> Result<i64, AppError> {
+    Ok(conn
+        .query_row(
+            "SELECT revision FROM sync_meta WHERE user_id = ?1",
+            [user_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+fn apply_sync_op(
+    conn: &Connection,
+    user_id: &str,
+    revision: i64,
+    now: i64,
+    op: &SyncOp,
+) -> Result<(), AppError> {
+    match op {
+        SyncOp::TrackUpsert {
+            track,
+            favorite,
+            play_count,
+            last_played,
+        } => {
+            let json = serde_json::to_string(track)?;
+            conn.execute(
+                "INSERT INTO sync_tracks
+                     (user_id, key, track_json, favorite, play_count, last_played, deleted, revision, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
+                 ON CONFLICT(user_id, key) DO UPDATE SET
+                     track_json = excluded.track_json,
+                     favorite = excluded.favorite,
+                     play_count = excluded.play_count,
+                     last_played = excluded.last_played,
+                     deleted = 0,
+                     revision = excluded.revision,
+                     updated_at = excluded.updated_at",
+                params![
+                    user_id,
+                    track.key,
+                    json,
+                    *favorite as i64,
+                    *play_count as i64,
+                    last_played,
+                    revision,
+                    now
+                ],
+            )?;
+        }
+        SyncOp::TrackDelete { key } => {
+            let tombstone = TrackRef {
+                key: key.clone(),
+                ..Default::default()
+            };
+            conn.execute(
+                "INSERT INTO sync_tracks
+                     (user_id, key, track_json, favorite, play_count, last_played, deleted, revision, updated_at)
+                 VALUES (?1, ?2, ?3, 0, 0, NULL, 1, ?4, ?5)
+                 ON CONFLICT(user_id, key) DO UPDATE SET
+                     deleted = 1,
+                     revision = excluded.revision,
+                     updated_at = excluded.updated_at",
+                params![
+                    user_id,
+                    key,
+                    serde_json::to_string(&tombstone)?,
+                    revision,
+                    now
+                ],
+            )?;
+        }
+        SyncOp::PlaylistUpsert {
+            id,
+            name,
+            description,
+            cover_url,
+        } => {
+            conn.execute(
+                "INSERT INTO sync_playlists
+                     (user_id, id, name, description, cover_url, deleted, revision, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)
+                 ON CONFLICT(user_id, id) DO UPDATE SET
+                     name = excluded.name,
+                     description = excluded.description,
+                     cover_url = excluded.cover_url,
+                     deleted = 0,
+                     revision = excluded.revision,
+                     updated_at = excluded.updated_at",
+                params![user_id, id, name, description, cover_url, revision, now],
+            )?;
+        }
+        SyncOp::PlaylistDelete { id } => {
+            conn.execute(
+                "INSERT INTO sync_playlists
+                     (user_id, id, name, description, cover_url, deleted, revision, updated_at)
+                 VALUES (?1, ?2, '', '', NULL, 1, ?3, ?4)
+                 ON CONFLICT(user_id, id) DO UPDATE SET
+                     deleted = 1,
+                     revision = excluded.revision,
+                     updated_at = excluded.updated_at",
+                params![user_id, id, revision, now],
+            )?;
+            // Sin items huérfanos: el cliente recibe los tombstones en el
+            // mismo pull y puede limpiar la playlist entera.
+            conn.execute(
+                "UPDATE sync_playlist_items
+                 SET deleted = 1, revision = ?1, updated_at = ?2
+                 WHERE user_id = ?3 AND playlist_id = ?4 AND deleted = 0",
+                params![revision, now, user_id, id],
+            )?;
+        }
+        SyncOp::PlaylistItemUpsert {
+            id,
+            playlist_id,
+            track_key,
+            position,
+        } => {
+            conn.execute(
+                "INSERT INTO sync_playlist_items
+                     (user_id, id, playlist_id, track_key, position, deleted, revision, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)
+                 ON CONFLICT(user_id, id) DO UPDATE SET
+                     playlist_id = excluded.playlist_id,
+                     track_key = excluded.track_key,
+                     position = excluded.position,
+                     deleted = 0,
+                     revision = excluded.revision,
+                     updated_at = excluded.updated_at",
+                params![user_id, id, playlist_id, track_key, position, revision, now],
+            )?;
+        }
+        SyncOp::PlaylistItemDelete { id } => {
+            conn.execute(
+                "INSERT INTO sync_playlist_items
+                     (user_id, id, playlist_id, track_key, position, deleted, revision, updated_at)
+                 VALUES (?1, ?2, '', '', 0, 1, ?3, ?4)
+                 ON CONFLICT(user_id, id) DO UPDATE SET
+                     deleted = 1,
+                     revision = excluded.revision,
+                     updated_at = excluded.updated_at",
+                params![user_id, id, revision, now],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn sync_tracks_for(
+    conn: &Connection,
+    user_id: &str,
+    since: Option<i64>,
+) -> Result<Vec<SyncTrack>, AppError> {
+    let mut out = Vec::new();
+    if let Some(since) = since {
+        let mut stmt = conn.prepare(
+            "SELECT key, track_json, favorite, play_count, last_played, deleted
+             FROM sync_tracks WHERE user_id = ?1 AND revision > ?2
+             ORDER BY key",
+        )?;
+        let rows = stmt.query_map(params![user_id, since], map_sync_track)?;
+        for row in rows {
+            out.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT key, track_json, favorite, play_count, last_played, deleted
+             FROM sync_tracks WHERE user_id = ?1 AND deleted = 0
+             ORDER BY key",
+        )?;
+        let rows = stmt.query_map([user_id], map_sync_track)?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+fn map_sync_track(row: &Row<'_>) -> rusqlite::Result<SyncTrack> {
+    let key: String = row.get(0)?;
+    let track_json: String = row.get(1)?;
+    let mut track = parse_track(Some(track_json)).unwrap_or_default();
+    if track.key.is_empty() {
+        track.key = key;
+    }
+    Ok(SyncTrack {
+        track,
+        favorite: row.get::<_, i64>(2)? != 0,
+        play_count: row.get::<_, i64>(3)?.max(0) as u32,
+        last_played: row.get(4)?,
+        deleted: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+fn sync_playlists_for(
+    conn: &Connection,
+    user_id: &str,
+    since: Option<i64>,
+) -> Result<Vec<SyncPlaylist>, AppError> {
+    let mut out = Vec::new();
+    if let Some(since) = since {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, cover_url, deleted
+             FROM sync_playlists WHERE user_id = ?1 AND revision > ?2
+             ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map(params![user_id, since], map_sync_playlist)?;
+        for row in rows {
+            out.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, cover_url, deleted
+             FROM sync_playlists WHERE user_id = ?1 AND deleted = 0
+             ORDER BY name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map([user_id], map_sync_playlist)?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+fn map_sync_playlist(row: &Row<'_>) -> rusqlite::Result<SyncPlaylist> {
+    Ok(SyncPlaylist {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        cover_url: row.get(3)?,
+        deleted: row.get::<_, i64>(4)? != 0,
+    })
+}
+
+fn sync_items_for(
+    conn: &Connection,
+    user_id: &str,
+    since: Option<i64>,
+) -> Result<Vec<SyncPlaylistItem>, AppError> {
+    let mut out = Vec::new();
+    if let Some(since) = since {
+        let mut stmt = conn.prepare(
+            "SELECT id, playlist_id, track_key, position, deleted
+             FROM sync_playlist_items WHERE user_id = ?1 AND revision > ?2
+             ORDER BY playlist_id, position, id",
+        )?;
+        let rows = stmt.query_map(params![user_id, since], map_sync_item)?;
+        for row in rows {
+            out.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, playlist_id, track_key, position, deleted
+             FROM sync_playlist_items WHERE user_id = ?1 AND deleted = 0
+             ORDER BY playlist_id, position, id",
+        )?;
+        let rows = stmt.query_map([user_id], map_sync_item)?;
+        for row in rows {
+            out.push(row?);
+        }
+    }
+    Ok(out)
+}
+
+fn map_sync_item(row: &Row<'_>) -> rusqlite::Result<SyncPlaylistItem> {
+    Ok(SyncPlaylistItem {
+        id: row.get(0)?,
+        playlist_id: row.get(1)?,
+        track_key: row.get(2)?,
+        position: row.get(3)?,
+        deleted: row.get::<_, i64>(4)? != 0,
+    })
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, AppError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn renumber_queue(conn: &Connection, room_id: &str) -> Result<(), AppError> {

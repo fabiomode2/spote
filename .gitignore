@@ -79,6 +79,19 @@ cookies-*.txt
 *.session
 /secrets/
 
+# Android: firmas, SDK local y artefactos de build nunca se publican
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.apk
+*.aab
+local.properties
+.gradle/
+**/build/
+.idea/
+*.iml
+
 # Investigación local sobre DRM/scraping: no se publica
 /research/
 

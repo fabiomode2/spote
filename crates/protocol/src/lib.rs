@@ -288,6 +288,8 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub token: String,
     pub user: User,
+    /// Campo heredado: el servidor ya no devuelve la invitación; va vacío.
+    #[serde(default)]
     pub invite: String,
 }
 
@@ -312,6 +314,109 @@ pub struct ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeResponse {
     pub t: Ts,
+}
+
+// ---------------------------------------------------------------------------
+// Sincronización de la biblioteca personal (PC ↔ móvil)
+// ---------------------------------------------------------------------------
+
+/// Pista de la biblioteca personal. `track.path` no forma parte del contrato:
+/// las rutas locales no se sincronizan, solo metadatos y estado.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncTrack {
+    pub track: TrackRef,
+    pub favorite: bool,
+    #[serde(default)]
+    pub play_count: u32,
+    #[serde(default)]
+    pub last_played: Option<Ts>,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncPlaylist {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub cover_url: Option<String>,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncPlaylistItem {
+    pub id: String,
+    pub playlist_id: String,
+    pub track_key: String,
+    pub position: i64,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SyncPullResponse {
+    /// Revisión global del usuario. El cliente guarda esto como cursor.
+    pub revision: i64,
+    #[serde(default)]
+    pub tracks: Vec<SyncTrack>,
+    #[serde(default)]
+    pub playlists: Vec<SyncPlaylist>,
+    #[serde(default)]
+    pub items: Vec<SyncPlaylistItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncPushRequest {
+    /// El cliente debe enviar la última revisión que conoce. Si no coincide,
+    /// el servidor responde 409 y el cliente vuelve a hacer pull.
+    pub base_revision: i64,
+    pub ops: Vec<SyncOp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum SyncOp {
+    TrackUpsert {
+        track: TrackRef,
+        #[serde(default)]
+        favorite: bool,
+        #[serde(default)]
+        play_count: u32,
+        #[serde(default)]
+        last_played: Option<Ts>,
+    },
+    TrackDelete {
+        key: String,
+    },
+    PlaylistUpsert {
+        id: String,
+        name: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        cover_url: Option<String>,
+    },
+    PlaylistDelete {
+        id: String,
+    },
+    PlaylistItemUpsert {
+        id: String,
+        playlist_id: String,
+        track_key: String,
+        position: i64,
+    },
+    PlaylistItemDelete {
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncPushResponse {
+    pub revision: i64,
+    pub applied: usize,
 }
 
 /// Tolerancia de duración al resolver un `TrackRef` dentro de una sala.
@@ -376,6 +481,28 @@ mod tests {
         let json = serde_json::to_string(&server).unwrap();
         assert!(json.contains("\"type\":\"welcome\""));
         assert_eq!(serde_json::from_str::<ServerMsg>(&json).unwrap(), server);
+    }
+
+    #[test]
+    fn sync_ops_roundtrip_and_keep_optional_fields() {
+        let op = SyncOp::TrackUpsert {
+            track: TrackRef::new("isrc:X", "Title", "Artist"),
+            favorite: true,
+            play_count: 2,
+            last_played: None,
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains("\"op\":\"track_upsert\""));
+        assert_eq!(serde_json::from_str::<SyncOp>(&json).unwrap(), op);
+
+        let pull = SyncPullResponse {
+            revision: 7,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&pull).unwrap();
+        let parsed: SyncPullResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.revision, 7);
+        assert!(parsed.tracks.is_empty());
     }
 
     #[test]

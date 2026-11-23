@@ -14,6 +14,10 @@ use crate::{config::Config, db::Db, error::AppError, service::now_ms};
 
 /// Ventana mínima entre broadcasts de presencia "normales" (ms).
 pub const PRESENCE_THROTTLE_MS: i64 = 1_000;
+/// Conexiones WebSocket simultáneas por usuario y totales. Con cuatro amigos
+/// sobra de largo, pero evita que una clave filtrada abra miles de sockets.
+pub const MAX_WS_CONNS_PER_USER: usize = 8;
+pub const MAX_WS_CONNS_TOTAL: usize = 128;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +51,22 @@ impl AppState {
             loop {
                 ticker.tick().await;
                 state.hub.flush_presence();
+            }
+        });
+
+        // Limpieza de sesiones caducadas. No toca nada más.
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60 * 60));
+            loop {
+                ticker.tick().await;
+                match state.db.delete_expired_sessions() {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(removed, "sesiones caducadas eliminadas");
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "no se pudieron limpiar sesiones"),
+                }
             }
         });
     }
@@ -157,6 +177,35 @@ impl Hub {
             },
         );
         !was_online
+    }
+
+    /// Límite de conexiones antes de aceptar un WebSocket nuevo.
+    pub fn can_accept_connection(&self, user_id: &str) -> bool {
+        let inner = self.read();
+        if inner.conns.len() >= MAX_WS_CONNS_TOTAL {
+            return false;
+        }
+        inner
+            .conns
+            .values()
+            .filter(|conn| conn.user_id == user_id)
+            .count()
+            < MAX_WS_CONNS_PER_USER
+    }
+
+    /// Deja de suscribir todas las conexiones de un usuario a una sala.
+    pub fn evict_user_from_room(&self, user_id: &str, room_id: &str) {
+        let mut inner = self.write();
+        for conn in inner.conns.values_mut() {
+            if conn.user_id == user_id && conn.rooms.remove(room_id) {
+                if conn.active_room.as_deref() == Some(room_id) {
+                    conn.active_room = None;
+                }
+                let _ = conn.tx.send(ServerMsg::Error {
+                    message: "removed from room".to_string(),
+                });
+            }
+        }
     }
 
     /// Da de baja la conexión. Devuelve la presencia resultante del usuario.

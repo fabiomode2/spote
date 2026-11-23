@@ -52,7 +52,8 @@ impl App {
             });
             self.album_page_loading = false;
             self.album_page_status.clear();
-            self.overlay = Overlay::Album;
+            self.detail = Some(Detail::Album);
+            self.overlay = Overlay::None;
         } else {
             // No está descargado: se busca la ficha en el catálogo, igual que
             // al pulsar un álbum en los resultados de búsqueda.
@@ -71,7 +72,8 @@ impl App {
             self.album_page_status = format!("buscando «{album}»…");
             self.meta_worker
                 .album_search(album.to_string(), artist.to_string());
-            self.overlay = Overlay::Album;
+            self.detail = Some(Detail::Album);
+            self.overlay = Overlay::None;
         }
     }
 
@@ -90,8 +92,9 @@ impl App {
         });
         self.album_page_loading = true;
         self.album_page_status = format!("cargando {}…", album.title);
+        self.detail = Some(Detail::Album);
+        self.overlay = Overlay::None;
         self.meta_worker.album(album.provider.clone(), album.id.clone());
-        self.overlay = Overlay::Album;
     }
 
     pub(super) fn open_album_info(&mut self, info: spote_core::spotify_api::AlbumInfo) {
@@ -112,6 +115,8 @@ impl App {
         });
         self.album_page_loading = false;
         self.album_page_status.clear();
+        self.detail = Some(Detail::Album);
+        self.overlay = Overlay::None;
     }
 
     pub(crate) fn request_album_page_art(&mut self, page: &AlbumPage, w: u16, h: u16) {
@@ -134,16 +139,13 @@ impl App {
     }
 
     pub(super) fn close_album_page(&mut self) {
-        self.overlay = Overlay::None;
-        self.album_page = None;
-        self.album_page_loading = false;
-        self.album_page_status.clear();
+        self.close_detail();
     }
 
-    pub(super) fn handle_album_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_album_key(&mut self, key: KeyEvent) -> bool {
         let len = self.album_page.as_ref().map(|page| page.tracks.len()).unwrap_or(0);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.close_album_page(),
+            KeyCode::Esc | KeyCode::Backspace => self.close_detail(),
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(page) = &mut self.album_page {
                     page.selected = page.selected.saturating_sub(1);
@@ -169,8 +171,9 @@ impl App {
             }
             KeyCode::Char('d') => self.download_album_page(),
             KeyCode::Char('s') => self.save_album_page_playlist(),
-            _ => {}
+            _ => return false,
         }
+        true
     }
 
     pub(super) fn play_album_page_track(&mut self) {

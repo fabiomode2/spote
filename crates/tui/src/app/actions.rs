@@ -11,14 +11,33 @@ impl App {
             && y < rect.y + rect.height
     }
 
+    fn point_in_detail_albums(&self, x: u16, y: u16) -> bool {
+        let rect = self.detail_albums_area;
+        rect.width > 0
+            && x >= rect.x
+            && x < rect.x + rect.width
+            && y >= rect.y
+            && y < rect.y + rect.height
+    }
+
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::Moved => {
                 self.hover = self.hit.hit(mouse.column, mouse.row).cloned();
             }
             MouseEventKind::ScrollDown => {
+                if self.point_in_detail_albums(mouse.column, mouse.row) {
+                    self.scroll_artist_albums(1);
+                    return;
+                }
                 if self.point_in_lyrics(mouse.column, mouse.row) {
-                    self.scroll_lyrics(1);
+                    if self.lyrics_search.is_some() {
+                        if let Some(state) = self.lyrics_search.as_mut() {
+                            state.preview_scroll = state.preview_scroll.saturating_add(1);
+                        }
+                    } else {
+                        self.scroll_lyrics(1);
+                    }
                     return;
                 }
                 if let Some(Action::AudioBand(index)) = self.hover {
@@ -34,8 +53,18 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
+                if self.point_in_detail_albums(mouse.column, mouse.row) {
+                    self.scroll_artist_albums(-1);
+                    return;
+                }
                 if self.point_in_lyrics(mouse.column, mouse.row) {
-                    self.scroll_lyrics(-1);
+                    if self.lyrics_search.is_some() {
+                        if let Some(state) = self.lyrics_search.as_mut() {
+                            state.preview_scroll = state.preview_scroll.saturating_sub(1);
+                        }
+                    } else {
+                        self.scroll_lyrics(-1);
+                    }
                     return;
                 }
                 if let Some(Action::AudioBand(index)) = self.hover {
@@ -439,6 +468,11 @@ impl App {
             Action::LyricsScroll(delta) => self.scroll_lyrics(delta),
             Action::LyricsFollow => self.follow_current_lyric(),
             Action::LyricsRefetch => self.refetch_lyrics(),
+            Action::LyricsSearchOpen => self.open_lyrics_search(),
+            Action::LyricsSearchRun => self.run_lyrics_search(),
+            Action::LyricsSearchClose => self.close_lyrics_search(),
+            Action::LyricsSearchSelect(index) => self.select_lyrics_candidate(index),
+            Action::LyricsAcceptCandidate => self.accept_lyrics_candidate(),
             Action::Help => self.overlay = Overlay::Help,
             Action::Effects => self.overlay = Overlay::Effects,
             Action::CloseOverlay => self.overlay = Overlay::None,
@@ -502,6 +536,9 @@ impl App {
                     self.open_album_summary(&album);
                 }
             }
+            Action::ArtistAlbumsScroll(delta) => self.scroll_artist_albums(delta),
+            Action::CloseDetail => self.close_detail(),
+            Action::FavoriteNow => self.toggle_favorite_now(),
             Action::AlbumTrackPlay(index) => {
                 if let Some(page) = &mut self.album_page {
                     page.selected = index.min(page.tracks.len().saturating_sub(1));

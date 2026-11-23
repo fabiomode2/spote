@@ -18,6 +18,7 @@ mod albums;
 mod art;
 mod audio;
 mod chrome;
+mod detail;
 mod layout;
 mod lists;
 mod now;
@@ -69,6 +70,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         app.show_viz,
         app.fullscreen,
         art_ratio,
+        app.detail.is_some(),
     );
     app.last_main = layout.main;
     app.hit.clear();
@@ -176,6 +178,9 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if layout.viz.height > 0 {
         draw_viz(app, buf, &layout, &pal);
     }
+    if layout.nowbar.height > 0 {
+        draw_nowbar(app, buf, &layout, &pal);
+    }
     if layout.transport.height > 0 {
         draw_transport(app, buf, &layout, &pal);
     }
@@ -197,8 +202,8 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if let Some(split) = layout.nav_split {
         app.hit.add(split, Action::Resize(Pane::Nav));
     }
-    if let Some(split) = layout.side_split {
-        app.hit.add(split, Action::Resize(Pane::Side));
+    if let Some(split) = layout.side_split.filter(|_| app.detail.is_none()) {
+        app.hit.add(split, Action::Resize(crate::app::Pane::Side));
     }
     draw_toasts(app, buf, &layout, &pal);
     draw_overlay(app, buf, &layout, &pal);
@@ -538,10 +543,21 @@ fn draw_mosaic_cover(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette)
         return;
     }
     let speed = app.cfg.ui.fx.mosaic_speed.clamp(1, 10) as f32 * 0.11;
-    let t = app.mosaic_time * speed;
+    // El mosaico mueve todas las celdas de la pantalla. A 60 fps eso es un
+    // repintado completo constante y algunos terminales parpadean; se avanza
+    // en pasos de ~15 fps, que sigue viéndose fluido y reduce muchísimo el
+    // tráfico por frame.
+    let step = 1.0 / 15.0;
+    let t = ((app.mosaic_time / step).floor() * step) * speed;
     let motion = app.cfg.ui.fx.mosaic_motion.as_str();
-    let beat = if app.cfg.ui.fx.mosaic_beat {
-        app.audio.kick_pulse.clamp(0.0, 1.0)
+    let beat: f32 = if app.cfg.ui.fx.mosaic_beat {
+        // Salto binario al bombo: mantenerlo estable entre frames evita que
+        // todo el fondo cambie de color cada 16 ms.
+        if app.audio.kick_pulse > 0.65 {
+            1.0
+        } else {
+            0.0
+        }
     } else {
         0.0
     };

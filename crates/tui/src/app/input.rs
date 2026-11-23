@@ -14,6 +14,13 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // Salida de emergencia: aunque un overlay se atasque o falte su
+        // contenido, ctrl-c siempre cierra la app.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.persist_volume();
+            self.should_quit = true;
+            return;
+        }
         if self.overlay != Overlay::None {
             self.handle_overlay_key(key);
             return;
@@ -163,9 +170,21 @@ impl App {
             }
         }
 
+        // Búsqueda manual de letras: captura todo mientras está abierta.
+        if self.lyrics_search.is_some() {
+            self.handle_lyrics_search_key(key);
+            return;
+        }
+
         // La pestaña de audio tiene su propio teclado (bandas, preamp,
         // normalización). Las teclas globales que no consuma siguen abajo.
         if self.tab == Tab::Audio && self.handle_audio_tab_key(key) {
+            return;
+        }
+
+        // Panel de artista/álbum: captura sus teclas, pero deja pasar las
+        // globales (espacio, tab, q…).
+        if self.detail.is_some() && self.handle_detail_key(key) {
             return;
         }
 
@@ -439,7 +458,13 @@ impl App {
             }
             KeyCode::Char('x') => self.remove_queue_selected(),
             KeyCode::Char('z') => self.list_cards = !self.list_cards,
-            KeyCode::Char('b') => self.viz_background = !self.viz_background,
+            KeyCode::Char('b') => {
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
+                    self.open_lyrics_search();
+                } else {
+                    self.viz_background = !self.viz_background;
+                }
+            }
             KeyCode::Char('r') => {
                 self.art_rotate = !self.art_rotate;
                 self.cfg.ui.art_rotate = self.art_rotate;
