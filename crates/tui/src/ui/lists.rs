@@ -229,7 +229,11 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             put(buf, g.date_x, h, "AÑADIDA", color(pal.dim), None);
         }
         let right = inner.x + inner.width;
-        put(buf, right.saturating_sub(1), h, "⏱", color(pal.dim), None);
+        if app.shift_held {
+            put(buf, right.saturating_sub(1), h, "×", color(pal.error), None);
+        } else {
+            put(buf, right.saturating_sub(1), h, "⏱", color(pal.dim), None);
+        }
     }
     // Columnas al estilo de Spotify: número, miniatura, título + artista
     // debajo, álbum, fecha de alta y duración. El ancho decide qué columnas
@@ -340,14 +344,39 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             put(buf, g.status_x, y, "↓", color(pal.warn), None);
         }
         let duration_w = duration.chars().count() as u16;
+        let right = inner.x + inner.width;
+        // Con shift se reserva la última celda para la × de quitar.
+        let duration_right = if app.shift_held {
+            right.saturating_sub(2)
+        } else {
+            right
+        };
         put(
             buf,
-            (inner.x + inner.width).saturating_sub(duration_w),
+            duration_right.saturating_sub(duration_w),
             y,
             &duration,
             color(pal.dim),
             None,
         );
+        if app.shift_held {
+            let x = right.saturating_sub(1);
+            let hot = app.hover == Some(Action::LibraryRemove(index));
+            let remove = Rect::new(x, y, 1, row_h);
+            if hot {
+                fill(buf, remove, pal.error);
+            }
+            put(
+                buf,
+                x,
+                y,
+                "×",
+                color(if hot { pal.bg } else { pal.error }),
+                None,
+            );
+            // Se registra al final para ganar al clic de fila y al artista.
+            app.hit.add(remove, Action::LibraryRemove(index));
+        }
     }
 }
 
@@ -458,7 +487,8 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
         let thumb = Rect::new(inner.x + 1, y, 6, card_h);
         draw_thumb(app, buf, thumb, &row.track, pal);
         let text_x = thumb.x + thumb.width + 2;
-        let text_w = (inner.x + inner.width).saturating_sub(text_x + 1);
+        let remove_w = if app.shift_held { 2 } else { 0 };
+        let text_w = (inner.x + inner.width).saturating_sub(text_x + 1 + remove_w);
         let playing = app
             .now
             .track
@@ -525,6 +555,23 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
                     Action::OpenAlbum(album.to_string(), row.track.artist.clone()),
                 );
             }
+        }
+        if app.shift_held {
+            let x = (inner.x + inner.width).saturating_sub(2);
+            let hot = app.hover == Some(Action::LibraryRemove(index));
+            let remove = Rect::new(x, y, 2, card_h);
+            if hot {
+                fill(buf, remove, pal.error);
+            }
+            put(
+                buf,
+                x,
+                y + 1,
+                "×",
+                color(if hot { pal.bg } else { pal.error }),
+                None,
+            );
+            app.hit.add(remove, Action::LibraryRemove(index));
         }
         y += card_h;
     }

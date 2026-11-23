@@ -271,6 +271,9 @@ pub enum Action {
     ArtMode,
     ArtFullscreen,
     SelectRow(usize),
+    /// Quita la fila de la biblioteca (× con shift o tecla X), sin tocar el
+    /// fichero de audio.
+    LibraryRemove(usize),
     AlbumOpen(usize),
     Resize(Pane),
     AlbumDownload,
@@ -1129,6 +1132,9 @@ pub struct App {
     pub mosaic_time: f32,
     pub hit: HitMap,
     pub hover: Option<Action>,
+    /// Shift detectado en el último evento de ratón. La biblioteca lo usa para
+    /// enseñar la × de borrado rápido en cada fila.
+    pub shift_held: bool,
     pub last_click: Option<(Instant, usize)>,
     pub toasts: Vec<Toast>,
     pub status: String,
@@ -1359,6 +1365,7 @@ impl App {
             mosaic_time: 0.0,
             hit: HitMap::default(),
             hover: None,
+            shift_held: false,
             last_click: None,
             toasts: Vec::new(),
             status: String::new(),

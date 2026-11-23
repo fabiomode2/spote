@@ -21,6 +21,17 @@ impl App {
     }
 
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        // Shift no genera eventos de teclado por sí solo (el terminal no manda
+        // la tecla suelta), pero los eventos de ratón sí traen los modifiers.
+        // Con shift se enseña la × de borrado; al soltarlo y mover el ratón
+        // desaparece. Un clic sin el bit de shift no la apaga: algunos
+        // terminales no mandan modifiers en el clic y romperían el borrado
+        // seguido.
+        if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+            self.shift_held = true;
+        } else if matches!(mouse.kind, MouseEventKind::Moved) {
+            self.shift_held = false;
+        }
         match mouse.kind {
             MouseEventKind::Moved => {
                 self.hover = self.hit.hit(mouse.column, mouse.row).cloned();
@@ -414,6 +425,7 @@ impl App {
             Action::SelectRow(index) => {
                 self.selected = index.min(self.view.len().saturating_sub(1));
             }
+            Action::LibraryRemove(index) => self.remove_library_row(index),
             Action::AlbumOpen(index) => {
                 self.album_selected = index.min(self.albums.len().saturating_sub(1));
                 self.open_album_selected();

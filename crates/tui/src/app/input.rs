@@ -456,7 +456,10 @@ impl App {
                     self.open_delete_playlist();
                 }
             }
-            KeyCode::Char('x') => self.remove_queue_selected(),
+            KeyCode::Char('x' | 'X') if upper && self.tab == Tab::Library => {
+                self.remove_library_selected()
+            }
+            KeyCode::Char('x') if !upper => self.remove_queue_selected(),
             KeyCode::Char('z') => self.list_cards = !self.list_cards,
             KeyCode::Char('b') => {
                 if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
