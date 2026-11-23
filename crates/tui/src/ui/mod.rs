@@ -18,6 +18,7 @@ mod albums;
 mod art;
 mod audio;
 mod chrome;
+mod detail;
 mod layout;
 mod lists;
 mod now;
@@ -69,6 +70,7 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         app.show_viz,
         app.fullscreen,
         art_ratio,
+        app.detail.is_some(),
     );
     app.last_main = layout.main;
     app.hit.clear();
@@ -176,6 +178,9 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if layout.viz.height > 0 {
         draw_viz(app, buf, &layout, &pal);
     }
+    if layout.nowbar.height > 0 {
+        draw_nowbar(app, buf, &layout, &pal);
+    }
     if layout.transport.height > 0 {
         draw_transport(app, buf, &layout, &pal);
     }
@@ -197,8 +202,8 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if let Some(split) = layout.nav_split {
         app.hit.add(split, Action::Resize(Pane::Nav));
     }
-    if let Some(split) = layout.side_split {
-        app.hit.add(split, Action::Resize(Pane::Side));
+    if let Some(split) = layout.side_split.filter(|_| app.detail.is_none()) {
+        app.hit.add(split, Action::Resize(crate::app::Pane::Side));
     }
     draw_toasts(app, buf, &layout, &pal);
     draw_overlay(app, buf, &layout, &pal);

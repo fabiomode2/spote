@@ -14,8 +14,10 @@ impl App {
         self.artist_selected = 0;
         self.artist_loading = true;
         self.artist_status = format!("buscando {name}…");
+        self.detail = Some(Detail::Artist);
+        self.artist_album_scroll = 0;
+        self.overlay = Overlay::None;
         self.meta_worker.artist(name);
-        self.overlay = Overlay::Artist;
     }
 
     /// Abre un artista de la búsqueda por su id de proveedor.
@@ -25,12 +27,14 @@ impl App {
         self.artist_selected = 0;
         self.artist_loading = true;
         self.artist_status = format!("buscando {}…", artist.name);
+        self.detail = Some(Detail::Artist);
+        self.artist_album_scroll = 0;
+        self.overlay = Overlay::None;
         self.meta_worker.artist_by_id(
             artist.provider.clone(),
             artist.id.clone(),
             artist.name.clone(),
         );
-        self.overlay = Overlay::Artist;
     }
 
     /// Abre el perfil del artista de la pista sonando o de la seleccionada.
@@ -87,18 +91,32 @@ impl App {
         self.artist_selected = 0;
         self.artist_loading = true;
         self.artist_status = format!("buscando {name}…");
+        self.detail = Some(Detail::Artist);
+        self.artist_album_scroll = 0;
+        self.overlay = Overlay::None;
         self.meta_worker.artist(name);
-        self.overlay = Overlay::Artist;
     }
 
-    pub(super) fn handle_artist_key(&mut self, key: KeyEvent) {
+    /// Enruta el teclado al panel de detalle activo. Devuelve `false` para
+    /// dejar pasar atajos globales (espacio, tab, q…).
+    pub fn handle_detail_key(&mut self, key: KeyEvent) -> bool {
+        match self.detail {
+            Some(Detail::Artist) => self.handle_artist_key(key),
+            Some(Detail::Album) => self.handle_album_key(key),
+            None => false,
+        }
+    }
+
+    pub(super) fn handle_artist_key(&mut self, key: KeyEvent) -> bool {
         let len = self
             .artist
             .as_ref()
             .map(|profile| profile.top_tracks.len())
             .unwrap_or(0);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.overlay = Overlay::None,
+            KeyCode::Esc | KeyCode::Backspace => {
+                self.close_detail();
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.artist_selected = self.artist_selected.saturating_sub(1);
             }
@@ -107,6 +125,8 @@ impl App {
                     self.artist_selected = (self.artist_selected + 1).min(len - 1);
                 }
             }
+            KeyCode::Left | KeyCode::Char('[') => self.scroll_artist_albums(-1),
+            KeyCode::Right | KeyCode::Char(']') => self.scroll_artist_albums(1),
             KeyCode::Enter => self.play_artist_selected(),
             KeyCode::Char('a') => {
                 if let Some(profile) = self.artist.clone() {
@@ -115,8 +135,39 @@ impl App {
                     }
                 }
             }
-            _ => {}
+            _ => return false,
         }
+        true
+    }
+
+    /// Mueve la tira horizontal de discografía. Cuenta las tarjetas visibles
+    /// para no dejar huecos al final.
+    pub fn scroll_artist_albums(&mut self, delta: i32) {
+        let total = self
+            .artist
+            .as_ref()
+            .map(|profile| profile.albums.len())
+            .unwrap_or(0);
+        if total == 0 {
+            return;
+        }
+        let visible = self.detail_album_visible.max(1);
+        let max = total.saturating_sub(visible);
+        let next = (self.artist_album_scroll as i32 + delta).clamp(0, max as i32) as usize;
+        if next != self.artist_album_scroll {
+            self.artist_album_scroll = next;
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Cierra el panel persistente de detalle sin tocar la pestaña actual.
+    pub fn close_detail(&mut self) {
+        self.detail = None;
+        self.detail_albums_area = Rect::default();
+        self.album_page = None;
+        self.album_page_loading = false;
+        self.album_page_status.clear();
+        self.needs_redraw = true;
     }
 
     pub(super) fn play_artist_selected(&mut self) {
@@ -137,7 +188,6 @@ impl App {
             })
             .collect();
         self.set_context(entries, self.artist_selected);
-        self.overlay = Overlay::None;
         self.play_external_track(spotify_track_ref(track));
     }
 

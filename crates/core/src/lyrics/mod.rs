@@ -45,6 +45,7 @@ pub enum LyricsSource {
     Plain,
     Estimated,
     Local,
+    Manual,
 }
 
 impl LyricsSource {
@@ -57,6 +58,7 @@ impl LyricsSource {
             Self::Plain => "plain",
             Self::Estimated => "approx",
             Self::Local => "local",
+            Self::Manual => "manual",
         }
     }
 
@@ -70,6 +72,7 @@ impl LyricsSource {
             "plain" => Some(Self::Plain),
             "approx" => Some(Self::Estimated),
             "local" => Some(Self::Local),
+            "manual" => Some(Self::Manual),
             _ => None,
         }
     }
@@ -329,6 +332,49 @@ pub struct LyricsHit {
     pub duration_ms: u64,
 }
 
+/// Candidato de una búsqueda manual de letras. No pasa por el filtro
+/// automático: lo elige y lo acepta el usuario.
+#[derive(Debug, Clone, Default)]
+pub struct LyricsCandidate {
+    pub id: i64,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: u64,
+    pub synced: bool,
+    pub source: String,
+    pub lrc: Option<String>,
+    pub plain: Option<String>,
+}
+
+impl LyricsCandidate {
+    /// Texto que se enseña en la previsualización, sin marcas de tiempo.
+    pub fn preview_lines(&self) -> Vec<String> {
+        let text = self
+            .lrc
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .or(self.plain.as_deref())
+            .unwrap_or("");
+        let doc = parse_lrc(text);
+        let mut lines: Vec<String> = doc
+            .lines
+            .into_iter()
+            .map(|line| line.text.trim().to_string())
+            .filter(|line| !line.is_empty() && line != INSTRUMENTAL_MARK)
+            .collect();
+        if lines.is_empty() {
+            lines = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        lines
+    }
+}
+
 /// Error de la capa de letras. Nunca debe tumbar la UI.
 #[derive(Debug, thiserror::Error)]
 pub enum LyricsError {
@@ -472,6 +518,15 @@ impl LyricsService {
     /// Igual que [`fetch`](Self::fetch) pero sin red: solo parsea texto LRC.
     pub fn from_local_lrc(text: &str) -> LyricsDoc {
         parse_lrc(text)
+    }
+
+    /// Busca candidatos para la elección manual desde la pestaña de letra.
+    /// No aplica el ranking automático: el usuario decide cuál es la buena.
+    pub async fn search_candidates(
+        &self,
+        query: &str,
+    ) -> Result<Vec<LyricsCandidate>, LyricsError> {
+        remote::search_candidates(&self.client, query).await
     }
 }
 

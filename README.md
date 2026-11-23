@@ -32,10 +32,17 @@ la propia TUI.
   sincronizada; LRCLIB y Genius siguen como respaldo. Un LRC sincronizado bueno
   no se toca; el estimado se afina solo con el audio. La barra de la letra
   permite zoom (`A−`/`A+`), ajuste fino de ±100/±250 ms por pista, scroll
-  manual con rueda o flechas y volver a la línea actual. `⟳` descarta la caché
-  y busca otra letra si la que había no era la canción.
+  manual con rueda o flechas y volver a la línea actual. `⌕`/`b` abre una
+  búsqueda manual: lista las versiones de LRCLIB, las previsualiza y deja
+  aceptar a mano la que sea correcta. `⟳` descarta la caché y busca otra letra.
 - **Karaoke**: palabra a palabra, frases largas en dos filas y la última palabra
   se llena antes de cambiar de línea.
+- **Ficha de artista y álbum**: se abren en un panel fijo a la derecha, no en
+  un popup. El artista muestra su discografía en una tira horizontal
+  scrolleable y sus canciones populares; el álbum, portada, ficha y tracklist.
+  Se cierran solo con `‹ volver`/`esc`.
+- **Barra de canción actual**: portada, título, artista, álbum, corazón de
+  favorita y estado de reproducción, siempre encima del transporte.
 - **Fondo mosaico**: la portada de la pista actual repetida en mosaico detrás
   de toda la interfaz, con opacidad de 5–50 %, movimiento en deriva, filas,
   columnas o giro, velocidad ajustable y saltos al compás del bombo.

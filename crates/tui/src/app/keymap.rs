@@ -37,6 +37,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("±250 / ±100", "offset de letra (clic)"),
                 ("⟲", "volver a la línea actual"),
                 ("⟳", "buscar otra letra y borrar la caché"),
+                ("b / ⌕", "búsqueda manual con candidatos y vista previa"),
                 ("M", "siguiente modo de arte"),
                 ("r", "rotación automática del arte"),
                 ("F", "portada a pantalla completa"),
@@ -142,12 +143,42 @@ impl App {
                 _ => vec![Hint { key: "esc", label: "cerrar" }],
             };
         }
+        if let Some(detail) = self.detail {
+            return match detail {
+                crate::app::Detail::Artist => vec![
+                    Hint { key: "↑↓", label: "elegir" },
+                    Hint { key: "enter", label: "sonar" },
+                    Hint { key: "a", label: "cola" },
+                    Hint { key: "[ ]", label: "discografía" },
+                    Hint { key: "esc", label: "volver" },
+                    Hint { key: "?", label: "ayuda" },
+                ],
+                crate::app::Detail::Album => vec![
+                    Hint { key: "↑↓", label: "elegir" },
+                    Hint { key: "enter", label: "sonar" },
+                    Hint { key: "a", label: "cola" },
+                    Hint { key: "d", label: "bajar" },
+                    Hint { key: "s", label: "lista" },
+                    Hint { key: "esc", label: "volver" },
+                ],
+            };
+        }
         if self.center_focus == CenterFocus::Lyrics && self.tab == Tab::Now {
+            if self.lyrics_search.is_some() {
+                return vec![
+                    Hint { key: "escribe", label: "consulta" },
+                    Hint { key: "enter", label: "buscar / aceptar" },
+                    Hint { key: "↑↓", label: "elegir versión" },
+                    Hint { key: "PgUp/Dn", label: "preview" },
+                    Hint { key: "esc", label: "volver" },
+                ];
+            }
             return vec![
                 Hint { key: "espacio", label: "play" },
                 Hint { key: ", .", label: "offset ±100 ms" },
                 Hint { key: "↑↓", label: "scroll letra" },
                 Hint { key: "+ −", label: "zoom letra" },
+                Hint { key: "b", label: "buscar letra a mano" },
                 Hint { key: "rueda", label: "scroll letra" },
                 Hint { key: "clic", label: "salta a la frase" },
                 Hint { key: "alt/der", label: "sincronizar letra" },

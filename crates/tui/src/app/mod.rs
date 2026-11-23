@@ -43,6 +43,7 @@ mod input;
 mod keymap;
 mod layout_editor;
 pub use keymap::help_sections;
+mod lyrics_search;
 mod playlists;
 mod settings;
 mod spotify;
@@ -154,6 +155,14 @@ pub enum Fullscreen {
     Viz,
 }
 
+/// Panel persistente de la derecha: perfil de artista o ficha de álbum.
+/// No es un overlay: se queda abierto hasta que se pulsa volver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Artist,
+    Album,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
@@ -177,8 +186,10 @@ pub enum Overlay {
     /// Menú contextual de una pista (clic derecho).
     Context,
     /// Perfil de artista de Spotify/Deezer.
+    #[allow(dead_code)]
     Artist,
     /// Álbum abierto (biblioteca o catálogo remoto).
+    #[allow(dead_code)]
     Album,
     /// Editor de recorte de intro/outro.
     Trim,
@@ -295,6 +306,12 @@ pub enum Action {
     LyricsFollow,
     /// Borra la caché de la letra de esta pista y la busca de nuevo.
     LyricsRefetch,
+    /// Abre la búsqueda manual dentro de la zona de letra.
+    LyricsSearchOpen,
+    LyricsSearchRun,
+    LyricsSearchClose,
+    LyricsSearchSelect(usize),
+    LyricsAcceptCandidate,
     Help,
     Effects,
     CloseOverlay,
@@ -312,6 +329,9 @@ pub enum Action {
     OpenAlbum(String, String),
     ArtistAlbum(usize),
     ArtistTrack(usize),
+    ArtistAlbumsScroll(i32),
+    CloseDetail,
+    FavoriteNow,
     RefreshLibrary,
     DeletePlaylist(i64),
     AddToPlaylist,
@@ -478,6 +498,19 @@ pub struct SearchState {
     pub last_query_id: u64,
     pub last_query: String,
     pub message: String,
+}
+
+/// Búsqueda manual de letras dentro de la pestaña de letra.
+#[derive(Debug, Clone, Default)]
+pub struct LyricsSearchState {
+    pub query: String,
+    pub query_id: u64,
+    pub last_search_query: String,
+    pub loading: bool,
+    pub results: Vec<spote_core::lyrics::LyricsCandidate>,
+    pub selected: usize,
+    pub preview_scroll: usize,
+    pub status: String,
 }
 
 /// Efecto de las miniaturas de las listas: paleta del tema, foto literal o
@@ -895,6 +928,14 @@ pub struct App {
     pub artist_loading: bool,
     pub artist_selected: usize,
     pub artist_status: String,
+    /// Desplazamiento horizontal de la discografía del artista.
+    pub artist_album_scroll: usize,
+    /// Tarjetas de álbum que caben en el panel; lo fija el dibujo.
+    pub detail_album_visible: usize,
+    /// Zona de las tarjetas de álbum para la rueda del ratón.
+    pub detail_albums_area: Rect,
+    /// Panel persistente de detalle (artista o álbum), a la derecha.
+    pub detail: Option<Detail>,
     pub metadata_requests: std::collections::HashSet<String>,
     pub metadata_tried: std::collections::HashSet<String>,
     pub metadata_manual: std::collections::HashSet<String>,
@@ -991,6 +1032,8 @@ pub struct App {
     pub lyrics_status: String,
     pub lyrics_key: String,
     pub lyrics_loading: bool,
+    pub lyrics_search: Option<LyricsSearchState>,
+    pub lyrics_search_worker: crate::fetch::LyricsSearchWorker,
     pub lyrics_offset_ms: i64,
     /// Desplazamiento calculado con el mapa de audio (no persistido).
     pub lyrics_auto_offset: Option<i64>,
@@ -1161,6 +1204,10 @@ impl App {
             artist_loading: false,
             artist_selected: 0,
             artist_status: String::new(),
+            artist_album_scroll: 0,
+            detail_album_visible: 1,
+            detail_albums_area: Rect::default(),
+            detail: None,
             metadata_requests: std::collections::HashSet::new(),
             metadata_tried: std::collections::HashSet::new(),
             metadata_manual: std::collections::HashSet::new(),
@@ -1237,6 +1284,8 @@ impl App {
             lyrics_status: String::new(),
             lyrics_key: String::new(),
             lyrics_loading: false,
+            lyrics_search: None,
+            lyrics_search_worker: crate::fetch::LyricsSearchWorker::start(cfg.lyrics.clone()),
             lyrics_offset_ms: 0,
             lyrics_auto_offset: None,
             lyrics_retry: std::collections::HashSet::new(),
@@ -2152,6 +2201,7 @@ impl App {
         self.lyrics_scroll = Spring::new(0.0);
         self.lyrics_scroll_index = None;
         self.lyrics_follow = true;
+        self.lyrics_search = None;
         self.lyrics_debug_last = None;
     }
 
@@ -2751,20 +2801,24 @@ impl App {
                     .count()
                     >= 2;
             self.lyrics_offset_ms = doc.offset_ms;
+            let source = doc.source;
             self.lyrics = Some(doc);
             self.lyrics_status = if stale_alignment || broken_sync {
                 "afinando de nuevo…".to_string()
             } else if row.aligned {
                 "asr".to_string()
-            } else if row.synced {
-                "lrclib".to_string()
             } else {
-                "aprox".to_string()
+                match source {
+                    spote_core::lyrics::LyricsSource::Plain
+                    | spote_core::lyrics::LyricsSource::Estimated => "aprox".to_string(),
+                    source => source.label().to_string(),
+                }
             };
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
             if ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
+                && row.source != "manual"
                 && audio.is_some()
                 && !self.lyrics_retry.contains(&track.key)
             {
@@ -3203,6 +3257,7 @@ impl App {
         self.poll_meta();
         self.poll_song_map();
         self.poll_lyrics();
+        self.poll_lyrics_search();
         self.poll_spotify(dt);
         self.poll_mini();
         self.poll_mpris();
@@ -3906,6 +3961,7 @@ impl App {
                 spote_core::lyrics::LyricsSource::Estimated
                     | spote_core::lyrics::LyricsSource::Plain
                     | spote_core::lyrics::LyricsSource::Local
+                    | spote_core::lyrics::LyricsSource::Manual
                     | spote_core::lyrics::LyricsSource::Captions
             )
         {

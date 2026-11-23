@@ -22,7 +22,7 @@ use super::text::{
     primary_artist, search_title, similarity, split_artist_title, starts_with_version_marker,
     version_kind, VersionKind,
 };
-use crate::lyrics::{parse_lrc, LyricLine, LyricsDoc, LyricsError, LyricsSource};
+use crate::lyrics::{parse_lrc, LyricLine, LyricsCandidate, LyricsDoc, LyricsError, LyricsSource};
 use spote_protocol::TrackRef;
 
 /// API pública de LRCLIB (gratis y sin auth).
@@ -161,6 +161,50 @@ pub async fn fetch_track(
         }
     }
     Ok(best.or(fallback))
+}
+
+/// Busca candidatos libres en LRCLIB para elegir a mano. Devuelve todos los
+/// que tengan texto, en el orden del proveedor y sin filtro de duración.
+pub(crate) async fn search_candidates(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<LyricsCandidate>, LyricsError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!("{API_BASE}/search?q={}", url_encode(query));
+    let response = client
+        .get(url)
+        .timeout(Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(map_error)?;
+    if !response.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let entries: Vec<RemoteLyrics> = response.json().await.map_err(map_error)?;
+    let mut out = Vec::new();
+    for raw in entries {
+        if !has_text(raw.synced_lyrics.as_deref()) && !has_text(raw.plain_lyrics.as_deref()) {
+            continue;
+        }
+        out.push(LyricsCandidate {
+            id: raw.id,
+            title: raw.track_name,
+            artist: raw.artist_name,
+            album: raw.album_name,
+            duration_ms: (raw.duration.max(0.0) * 1000.0).round() as u64,
+            synced: has_text(raw.synced_lyrics.as_deref()),
+            source: "lrclib".to_string(),
+            lrc: raw.synced_lyrics.filter(|text| !text.trim().is_empty()),
+            plain: raw.plain_lyrics.filter(|text| !text.trim().is_empty()),
+        });
+        if out.len() >= 14 {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Guarda un documento: los sincronizados compiten por el primer puesto, los

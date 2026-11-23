@@ -21,6 +21,8 @@ pub struct Layout {
     pub viz: Rect,
     pub transport: Rect,
     pub hint: Rect,
+    /// Barra de canción actual, justo encima del transporte.
+    pub nowbar: Rect,
     pub art: Rect,
     pub content: Rect,
     /// Asas de 1 celda para redimensionar con el ratón.
@@ -37,6 +39,7 @@ impl Layout {
         show_viz: bool,
         fullscreen: Fullscreen,
         art_ratio: u16,
+        detail_open: bool,
     ) -> Self {
         let mut out = Self {
             full: area,
@@ -81,9 +84,18 @@ impl Layout {
             area.width,
             transport_h,
         );
+        // Barra de "suena ahora" tipo Spotify. En terminales bajos se omite
+        // para no comerse el contenido.
+        let nowbar_h = if transport_h > 0 && area.height >= 28 { 2 } else { 0 };
+        out.nowbar = Rect::new(
+            area.x,
+            out.transport.y.saturating_sub(nowbar_h),
+            area.width,
+            nowbar_h,
+        );
         out.viz = Rect::new(
             area.x,
-            out.transport.y.saturating_sub(viz_h),
+            out.nowbar.y.saturating_sub(viz_h),
             area.width,
             viz_h,
         );
@@ -116,17 +128,32 @@ impl Layout {
         } else {
             0
         };
-        // El centro manda: si no caben los laterales, se colapsan por orden
-        // de importancia (primero el lateral, luego la nav).
-        let min_center = 42u16;
-        if nav_w + side_w + min_center > area.width {
-            side_w = 0;
+        let mut nav_left = cfg.nav_left();
+        let mut side_left = cfg.side_left();
+        if detail_open {
+            // El detalle ocupa siempre el lateral derecho y manda sobre la
+            // cola/amigos. Si la nav estorba, se oculta para dejar sitio al
+            // centro y a la ficha.
+            side_left = false;
+            nav_left = true;
+            side_w = ((main.width as u32 * 46 / 100) as u16).clamp(34, 86);
+            if nav_w + side_w + 40 > main.width {
+                nav_w = 0;
+            }
+            if side_w + 40 > main.width {
+                side_w = main.width.saturating_sub(40).max(30);
+            }
+        } else {
+            // El centro manda: si no caben los laterales, se colapsan por orden
+            // de importancia (primero el lateral, luego la nav).
+            let min_center = 42u16;
+            if nav_w + side_w + min_center > area.width {
+                side_w = 0;
+            }
+            if nav_w + side_w + min_center > area.width {
+                nav_w = 0;
+            }
         }
-        if nav_w + side_w + min_center > area.width {
-            nav_w = 0;
-        }
-        let nav_left = cfg.nav_left();
-        let side_left = cfg.side_left();
         let same_side = nav_w > 0 && side_w > 0 && nav_left == side_left;
         // Si comparten lado, comparten columna: si no, se solaparían.
         let dock_w = if same_side { nav_w.max(side_w) } else { 0 };
@@ -313,7 +340,7 @@ mod tests {
             (80, 24),
             (30, 10),
         ] {
-            let layout = Layout::compute(Rect::new(0, 0, w, h), &cfg(), true, Fullscreen::None, 6);
+            let layout = Layout::compute(Rect::new(0, 0, w, h), &cfg(), true, Fullscreen::None, 6, false);
             assert!(layout.center.width > 0, "{w}x{h}");
             assert!(layout.center.right() <= w, "{w}x{h}");
             assert!(layout.main.bottom() <= h, "{w}x{h}");
@@ -326,7 +353,7 @@ mod tests {
 
     #[test]
     fn art_keeps_square_pixel_aspect() {
-        let layout = Layout::compute(Rect::new(0, 0, 200, 60), &cfg(), true, Fullscreen::None, 6);
+        let layout = Layout::compute(Rect::new(0, 0, 200, 60), &cfg(), true, Fullscreen::None, 6, false);
         if layout.art.width > 0 {
             let ratio = layout.art.width as f32 / layout.art.height as f32;
             assert!(ratio >= 1.5 && ratio <= 2.5, "ratio {ratio}");
@@ -335,7 +362,7 @@ mod tests {
 
     #[test]
     fn search_art_fills_the_block_and_stays_flush() {
-        let layout = Layout::compute(Rect::new(0, 0, 200, 56), &cfg(), true, Fullscreen::None, 10);
+        let layout = Layout::compute(Rect::new(0, 0, 200, 56), &cfg(), true, Fullscreen::None, 10, false);
         assert!(layout.art.width > 0);
         // La altura es el límite: celdas 1:2 => ancho = 2 * alto.
         assert_eq!(layout.art.height, layout.center.height - 2);
@@ -348,7 +375,7 @@ mod tests {
 
     #[test]
     fn art_ratio_caps_width_before_positioning() {
-        let wide = Layout::compute(Rect::new(0, 0, 220, 70), &cfg(), true, Fullscreen::None, 6);
+        let wide = Layout::compute(Rect::new(0, 0, 220, 70), &cfg(), true, Fullscreen::None, 6, false);
         assert!(wide.art.width <= wide.center.width * 6 / 10 + 2);
         assert_eq!(wide.art.right() + 1, wide.center.right());
         assert!(wide.content.width >= 24);
@@ -359,7 +386,7 @@ mod tests {
         let mut c = cfg();
         c.nav_dock = "right".into();
         c.side_dock = "left".into();
-        let layout = Layout::compute(Rect::new(0, 0, 220, 60), &c, true, Fullscreen::None, 6);
+        let layout = Layout::compute(Rect::new(0, 0, 220, 60), &c, true, Fullscreen::None, 6, false);
         assert_eq!(layout.nav.x + layout.nav.width, 220);
         assert_eq!(layout.side.x, 0);
     }
@@ -369,7 +396,7 @@ mod tests {
         let mut c = cfg();
         c.nav_dock = "right".into();
         c.side_dock = "right".into();
-        let layout = Layout::compute(Rect::new(0, 0, 200, 60), &c, true, Fullscreen::None, 6);
+        let layout = Layout::compute(Rect::new(0, 0, 200, 60), &c, true, Fullscreen::None, 6, false);
         assert_eq!(layout.nav.x, layout.side.x);
         assert_eq!(layout.nav.width, layout.side.width);
         assert_eq!(layout.nav.x, layout.center.x + layout.center.width);
@@ -383,7 +410,7 @@ mod tests {
         c.queue = false;
         c.info = false;
         c.viz = false;
-        let layout = Layout::compute(Rect::new(0, 0, 140, 40), &c, true, Fullscreen::None, 6);
+        let layout = Layout::compute(Rect::new(0, 0, 140, 40), &c, true, Fullscreen::None, 6, false);
         assert_eq!(layout.nav.width, 0);
         assert_eq!(layout.side.width, 0);
         assert_eq!(layout.viz.height, 0);
@@ -392,14 +419,30 @@ mod tests {
 
     #[test]
     fn zero_art_ratio_leaves_full_center_for_lists() {
-        let layout = Layout::compute(Rect::new(0, 0, 160, 50), &cfg(), true, Fullscreen::None, 0);
+        let layout = Layout::compute(Rect::new(0, 0, 160, 50), &cfg(), true, Fullscreen::None, 0, false);
         assert_eq!(layout.art.width, 0);
         assert_eq!(layout.content, layout.center);
     }
 
     #[test]
     fn fullscreen_removes_viz_strip() {
-        let layout = Layout::compute(Rect::new(0, 0, 160, 50), &cfg(), true, Fullscreen::Viz, 6);
+        let layout = Layout::compute(Rect::new(0, 0, 160, 50), &cfg(), true, Fullscreen::Viz, 6, false);
         assert_eq!(layout.viz.height, 0);
+    }
+
+    #[test]
+    fn detail_takes_the_right_dock_and_leaves_center_room() {
+        let layout = Layout::compute(
+            Rect::new(0, 0, 160, 50),
+            &cfg(),
+            true,
+            Fullscreen::None,
+            6,
+            true,
+        );
+        assert_eq!(layout.side.right(), 160);
+        assert!(layout.side.width >= 34);
+        assert!(layout.center.width >= 40);
+        assert!(layout.queue.height == 0 || layout.queue.right() <= 160);
     }
 }

@@ -7,8 +7,12 @@ impl App {
             Overlay::None => {}
             Overlay::Context => self.handle_context_key(key),
             Overlay::Layout => self.handle_layout_key(key),
-            Overlay::Artist => self.handle_artist_key(key),
-            Overlay::Album => self.handle_album_key(key),
+            Overlay::Artist => {
+                self.handle_artist_key(key);
+            }
+            Overlay::Album => {
+                self.handle_album_key(key);
+            }
             Overlay::Update => match key.code {
                 KeyCode::Enter | KeyCode::Char('u') => self.start_update(),
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {

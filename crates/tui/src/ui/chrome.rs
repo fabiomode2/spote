@@ -338,6 +338,121 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
 // Ahora suena
 // ---------------------------------------------------------------------------
 
+/// Barra inferior de canción actual, al estilo de Spotify: portada pequeña,
+/// título/artista/álbum, corazón para favorita y estado de reproducción.
+pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let rect = layout.nowbar;
+    if rect.height == 0 || rect.width < 24 {
+        return;
+    }
+    fill_soft(buf, rect, mix(pal.bg_deep, pal.surface, 0.62), 0.88, pal.bg_deep);
+    for x in rect.x..rect.x + rect.width {
+        put(buf, x, rect.y, "─", color(pal.border_dim), None);
+    }
+    let art = Rect::new(rect.x + 2, rect.y, 4, rect.height);
+    let Some(track) = app.now.track.clone() else {
+        text_at(
+            buf,
+            Rect::new(art.x + 5, rect.y, rect.width.saturating_sub(8), rect.height),
+            "nada sonando · enter reproduce lo seleccionado",
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+        app.hit.add(rect, Action::Tab(Tab::Now));
+        return;
+    };
+    draw_thumb(app, buf, art, &track, pal);
+    let text_x = art.x + art.width + 2;
+    let right = rect.x + rect.width.saturating_sub(2);
+    let status = if rect.width < 72 {
+        String::new()
+    } else if app.now.loading {
+        "cargando…".to_string()
+    } else if app.now.playing {
+        format!(
+            "▶ {} / {}",
+            format_ms(app.display_position_ms()),
+            format_ms(app.now.duration_ms)
+        )
+    } else if app.now.track.is_some() {
+        format!(
+            "⏸ {} / {}",
+            format_ms(app.now.position_ms),
+            format_ms(app.now.duration_ms)
+        )
+    } else {
+        String::new()
+    };
+    let status_w = status.chars().count() as u16;
+    let favorite = app
+        .lib
+        .track_by_key(&track.key)
+        .ok()
+        .flatten()
+        .map(|row| row.favorite)
+        .unwrap_or(false);
+    let fav_w = 3u16;
+    let reserve = status_w + fav_w + 4;
+    let title_w = (right.saturating_sub(text_x + reserve)) as usize;
+    let mut title = track.title.clone();
+    truncate_chars(&mut title, title_w);
+    put(buf, text_x, rect.y, &title, color(pal.text), None);
+    let artist_hit_w = (track.artist.chars().count() as u16).min(title_w as u16);
+    let meta = match track.album.as_deref().filter(|album| !album.is_empty()) {
+        Some(album) => format!("{}  ·  {}", track.artist, album),
+        None => track.artist.clone(),
+    };
+    let mut meta = meta;
+    truncate_chars(&mut meta, title_w);
+    put(
+        buf,
+        text_x,
+        rect.y + 1,
+        &meta,
+        color(pal.secondary),
+        None,
+    );
+    let fav_x = right.saturating_sub(status_w + fav_w + 1);
+    put(
+        buf,
+        fav_x,
+        rect.y,
+        if favorite { "✓" } else { "♡" },
+        color(if favorite { pal.ok } else { pal.muted }),
+        None,
+    );
+    app.hit.add(
+        Rect::new(fav_x.saturating_sub(1), rect.y, 3, rect.height),
+        Action::FavoriteNow,
+    );
+    if status_w > 0 && right > status_w {
+        text_at(
+            buf,
+            Rect::new(right - status_w, rect.y, status_w, 1),
+            status,
+            Style::new().fg(color(pal.dim)),
+            Alignment::Right,
+        );
+    }
+    app.hit.add(rect, Action::Tab(Tab::Now));
+    if artist_hit_w > 1 {
+        app.hit.add(
+            Rect::new(text_x, rect.y + 1, artist_hit_w, 1),
+            Action::OpenArtist(track.artist.clone()),
+        );
+    }
+    if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
+        let album_x = text_x + artist_hit_w + 5;
+        let album_w = (text_x + title_w as u16).saturating_sub(album_x);
+        if album_w > 2 {
+            app.hit.add(
+                Rect::new(album_x, rect.y + 1, album_w, 1),
+                Action::OpenAlbum(album.to_string(), track.artist.clone()),
+            );
+        }
+    }
+}
+
 pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.transport;
     if rect.height == 0 || rect.width < 12 {
@@ -954,17 +1069,27 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         "descargando…".to_string()
     } else if app.now.loading {
         "cargando…".to_string()
-    } else if let Some(track) = &app.now.track {
-        format!(
-            "♪ {}  ·  {}{}",
-            track.title,
-            track.artist,
-            if app.follow_spotify {
-                "  ·  sistema"
-            } else {
-                ""
-            }
-        )
+    } else if layout.nowbar.height == 0 {
+        if let Some(track) = &app.now.track {
+            format!(
+                "♪ {}  ·  {}{}",
+                track.title,
+                track.artist,
+                if app.follow_spotify {
+                    "  ·  sistema"
+                } else {
+                    ""
+                }
+            )
+        } else if app.follow_spotify {
+            "modo acompañante del sistema (MPRIS)".to_string()
+        } else {
+            format!(
+                "{} pistas · {} descargadas",
+                app.lib.count().unwrap_or(0),
+                app.lib.ready_count().unwrap_or(0)
+            )
+        }
     } else if app.follow_spotify {
         "modo acompañante del sistema (MPRIS)".to_string()
     } else {
@@ -984,10 +1109,12 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             Style::new().fg(color(pal.dim)),
             Alignment::Right,
         );
-        if let Some(track) = &app.now.track {
-            if !track.artist.is_empty() {
-                app.hit
-                    .add(right_rect, Action::OpenArtist(track.artist.clone()));
+        if layout.nowbar.height == 0 {
+            if let Some(track) = &app.now.track {
+                if !track.artist.is_empty() {
+                    app.hit
+                        .add(right_rect, Action::OpenArtist(track.artist.clone()));
+                }
             }
         }
     }
