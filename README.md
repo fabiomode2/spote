@@ -28,9 +28,10 @@ la propia TUI.
   paleta del tema sale de la carátula.
 - **Visuales**: `clean`, `aurora`, `bloom`, `inferno`, `crt`, `lcd`, `rack`,
   `braille` y `stage`; `v` cicla y `V` los pone a pantalla completa.
-- **Letras**: LRCLIB, lrcmux, Genius y ASR local. lrcmux añade cobertura
-  sincronizada; LRCLIB y Genius siguen como respaldo. Un LRC sincronizado bueno
-  no se toca; el estimado se afina solo con el audio. La barra de la letra
+- **Letras**: Genius es la referencia de texto. LRCLIB, lrcmux y las captions
+  de YouTube solo aportan tiempos cuando su letra coincide; las captions no
+  generan texto y el ASR solo alinea una letra existente. Si no hay una fuente
+  fiable, se muestra “sin letra” antes que inventarla. La barra de la letra
   permite zoom (`A−`/`A+`), ajuste fino de ±100/±250 ms por pista, scroll
   manual con rueda o flechas y volver a la línea actual. `⟳` descarta la caché
   y busca otra letra si la que había no era la canción.
@@ -41,8 +42,9 @@ la propia TUI.
   columnas o giro, velocidad ajustable y saltos al compás del bombo.
 - **Búsqueda y reproducción**: Spotify y Deezer como catálogo, sin cuenta. El
   audio sale de `yt-dlp`. Si una pista no está descargada, se resuelve una URL
-  y suena al momento mientras se guarda la copia local. `I` importa playlists y
-  álbumes.
+  y suena al momento mientras se guarda la copia local. Los títulos simbólicos
+  (`(_8(|)`) conservan su núcleo para no confundirlos con homónimos. `I` importa
+  playlists y álbumes.
 - **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
   locales. `z` alterna tarjetas con portada y lista compacta. `/` en la
   biblioteca abre un filtro inline por título, artista o álbum.
