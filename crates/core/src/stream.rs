@@ -1278,6 +1278,12 @@ fn normalize_text(text: &str) -> String {
 /// llegan sin paréntesis: "Official Video", "Lyric Video", "Audio", "HD"…
 fn normalize_title(text: &str) -> String {
     let mut out = normalize_text(text);
+    // Títulos que son solo símbolos/paréntesis, como "(_8(|)", se quedaban en
+    // vacío y ningún candidato podía puntuar. En ese caso se conserva el
+    // contenido alfanumérico (el 8) y se descarta el resto.
+    if out.is_empty() {
+        out = symbolic_title(text);
+    }
     const NOISE_SUFFIXES: &[&str] = &[
         " official music video",
         " official video",
@@ -1313,6 +1319,29 @@ fn normalize_title(text: &str) -> String {
         }
     }
     out
+}
+
+/// Normaliza un título conservando el contenido de paréntesis. Se usa solo
+/// cuando `normalize_text` lo deja vacío ("(_8(|)", "[_8 [|] ...]").
+fn symbolic_title(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for raw in text.chars() {
+        for lower in raw.to_lowercase() {
+            let plain = deaccent(lower);
+            if plain.is_alphanumeric() {
+                out.push(plain);
+            } else {
+                out.push(' ');
+            }
+        }
+    }
+    let tokens: Vec<&str> = out.split_whitespace().collect();
+    let cut = tokens
+        .iter()
+        .position(|token| matches!(*token, "feat" | "ft" | "featuring"))
+        .filter(|index| *index > 0)
+        .unwrap_or(tokens.len());
+    tokens[..cut].join(" ")
 }
 
 /// Texto para detectar palabras de variante sin perder el contenido de los
@@ -2158,6 +2187,12 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_titles_keep_their_alphanumeric_core() {
+        assert_eq!(normalize_title("(_8(|) (feat. superreservao)"), "8");
+        assert_eq!(normalize_title("[_8 [|] [feat. superreservao]"), "8");
+    }
+
+    #[test]
     fn title_matching_distinguishes_exact_and_loose() {
         assert_eq!(
             title_match_score("get lucky", "get lucky"),
@@ -2207,10 +2242,65 @@ mod tests {
 
     #[test]
     #[ignore = "diagnóstico manual con red"]
+    fn live_finds_biberon_symbol_song() {
+        let id = find_video_id("Biberon", "(_8(|) (feat. superreservao)", 139_000)
+            .expect("debe encontrar el tema de Biberon");
+        eprintln!("biberon id={id}");
+        assert_eq!(id, "MV0tXxfV5kg");
+    }
+
+    #[test]
+    #[ignore = "diagnóstico manual con red"]
     fn live_finds_superreservao_visualizer() {
         let id = find_video_id("Superreservao", "Alma en pena", 118_000)
             .expect("debe encontrar el visualizer");
         assert_eq!(id, "jExWbhJqRU0");
+    }
+
+    #[test]
+    fn symbolic_title_prefers_the_topic_audio() {
+        let correct = candidate(
+            "MV0tXxfV5kg",
+            "[_8 [|] [feat. superreservao]",
+            "Biberon - Topic",
+            140_000,
+        );
+        let score = score_candidate(
+            &correct,
+            "Biberon",
+            "(_8(|) (feat. superreservao)",
+            139_000,
+        )
+        .expect("el tema simbólico debe puntuar");
+        assert!(score >= MIN_MATCH_SCORE, "score={score}");
+
+        let other = candidate(
+            "sbjgRAmv1Rc",
+            "Biberon - XIAOMI FREESTYLE",
+            "zz (z)",
+            110_000,
+        );
+        assert!(score_candidate(
+            &other,
+            "Biberon",
+            "(_8(|) (feat. superreservao)",
+            139_000
+        )
+        .is_none());
+
+        let nightcore = candidate(
+            "B9Ci7K5-jos",
+            "biberon, superreservao - (_8(|) *nightcore*",
+            "trankimazin",
+            115_000,
+        );
+        assert!(score_candidate(
+            &nightcore,
+            "Biberon",
+            "(_8(|) (feat. superreservao)",
+            139_000
+        )
+        .is_none());
     }
 
     #[test]
