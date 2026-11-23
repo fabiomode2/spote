@@ -78,24 +78,24 @@ impl Layout {
             area.width,
             hint_h,
         );
-        out.transport = Rect::new(
-            area.x,
-            area.y + area.height.saturating_sub(hint_h + transport_h),
-            area.width,
-            transport_h,
-        );
-        // Barra de "suena ahora" tipo Spotify. En terminales bajos se omite
-        // para no comerse el contenido.
+        // Barra de "suena ahora" tipo Spotify. Va debajo del transporte, pegada
+        // al pie; en terminales bajos se omite.
         let nowbar_h = if transport_h > 0 && area.height >= 28 { 2 } else { 0 };
         out.nowbar = Rect::new(
             area.x,
-            out.transport.y.saturating_sub(nowbar_h),
+            area.y + area.height.saturating_sub(hint_h + nowbar_h),
             area.width,
             nowbar_h,
         );
+        out.transport = Rect::new(
+            area.x,
+            out.nowbar.y.saturating_sub(transport_h),
+            area.width,
+            transport_h,
+        );
         out.viz = Rect::new(
             area.x,
-            out.nowbar.y.saturating_sub(viz_h),
+            out.transport.y.saturating_sub(viz_h),
             area.width,
             viz_h,
         );

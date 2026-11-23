@@ -3308,7 +3308,6 @@ impl App {
             || !self.lyrics_scroll.settled()
             || self.pulse.value > 0.0
             || (self.art_rotate && self.now.track.is_some())
-            || self.cfg.ui.fx.ambient == "mosaic"
             || self.downloads.iter().any(DownloadInfo::active)
             || self.search.loading
             || self.album_page_loading
