@@ -586,6 +586,9 @@ mod tests {
     #[test]
     fn compat_parses_plain_lyrics() {
         let value = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "albumName": "AM",
             "duration": 120.0,
             "plainLyrics": "uno\r\n\r\ndos\r\ntres",
             "syncedLyrics": null
@@ -607,6 +610,9 @@ mod tests {
     fn compat_without_usable_sync_falls_back_to_plain() {
         // Una sola línea sincronizada no da para karaoke: se usa la plana.
         let value = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "albumName": "AM",
             "duration": 20.0,
             "syncedLyrics": "[00:01.00]solo una línea",
             "plainLyrics": "uno\ndos"
@@ -652,7 +658,12 @@ mod tests {
     #[test]
     fn native_without_start_is_plain_text() {
         let value = json!({
-            "track": { "duration": 90.0 },
+            "track": {
+                "title": "Do I Wanna Know?",
+                "artist": "Arctic Monkeys",
+                "album": "AM",
+                "duration": 90.0
+            },
             "lines": [
                 { "text": "uno" },
                 { "text": "dos" },
@@ -676,6 +687,9 @@ mod tests {
     fn empty_lines_and_crlf_are_normalized() {
         // Compat: CRLF, líneas en blanco y espacios se descartan.
         let compat = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "albumName": "AM",
             "duration": 8.0,
             "plainLyrics": "\r\nuno\r\n\r\n  dos  \r\n"
         });
@@ -689,7 +703,12 @@ mod tests {
         // Nativo: una línea vacía no rompe la detección de sincronizada ni el
         // reparto temporal de las que sí tienen texto.
         let native = json!({
-            "track": { "duration": 20.0 },
+            "track": {
+                "title": "Do I Wanna Know?",
+                "artist": "Arctic Monkeys",
+                "album": "AM",
+                "duration": 20.0
+            },
             "lines": [
                 { "text": "", "start": 0.0 },
                 { "text": "  uno  ", "start": 2.0 },

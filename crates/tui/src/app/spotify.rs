@@ -222,8 +222,13 @@ impl App {
                 }
             }
             let changed = self.now.track.as_ref().map(|t| &t.key) != Some(&track.key);
+            let known_duration = track.duration_ms;
             self.now.track = Some(track.clone());
-            self.now.duration_ms = track.duration_ms;
+            // MPRIS puede no publicar `mpris:length` (Stremio). En ese caso no
+            // se pisa la duración local ya conocida en cada sondeo.
+            if changed || known_duration > 0 {
+                self.now.duration_ms = known_duration;
+            }
             // MPRIS informa con ~400 ms de retraso. Si se aplica tal cual en
             // cada sondeo, la posición retrocede y la letra se queda clavada.
             // Solo se resincroniza cuando la deriva es de verdad.

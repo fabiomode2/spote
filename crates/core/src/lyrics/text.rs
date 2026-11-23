@@ -701,6 +701,11 @@ mod tests {
     }
 
     #[test]
+    fn clean_title_keeps_symbolic_titles() {
+        assert_eq!(clean_title("(_8(|) (feat. superreservao)"), "(_8(|)");
+    }
+
+    #[test]
     fn clean_title_drops_collaborations() {
         assert_eq!(clean_title("Song feat. Someone"), "Song");
         assert_eq!(clean_title("Song (feat. Someone)"), "Song");

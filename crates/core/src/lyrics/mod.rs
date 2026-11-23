@@ -1,8 +1,14 @@
-//! Letras sincronizadas: LRCLIB primero, LRC plano/estimado después.
+//! Letras sincronizadas: Genius manda en el texto, los proveedores con tiempos
+//! (LRCLIB, lrcmux, captions) solo aportan la rejilla temporal.
 //!
 //! El parser y el modelo son deliberadamente simples: el render de la TUI
 //! necesita únicamente poder responder "¿qué línea toca en este milisegundo y
 //! cuánto de esa línea se ha cantado?".
+//!
+//! Regla de la cascada: si Genius devuelve letra, ese es el texto que se pinta.
+//! Ningún otro proveedor, caption ni ASR puede sustituirlo; como mucho le
+//! prestan sus tiempos cuando el texto coincide de forma razonable. El ASR
+//! únicamente alinea un documento que ya existe: nunca inventa líneas.
 
 use spote_protocol::TrackRef;
 
@@ -39,6 +45,10 @@ pub struct LyricLine {
 pub enum LyricsSource {
     #[default]
     None,
+    /// Texto autoritativo de Genius. Si está sincronizado, los tiempos vienen
+    /// de otro proveedor (LRCLIB, lrcmux o captions) y el texto sigue siendo el
+    /// de Genius.
+    Genius,
     Lrclib,
     Lrcmux,
     Captions,
@@ -51,6 +61,7 @@ impl LyricsSource {
     pub fn label(self) -> &'static str {
         match self {
             Self::None => "",
+            Self::Genius => "genius",
             Self::Lrclib => "lrclib",
             Self::Lrcmux => "lrcmux",
             Self::Captions => "captions",
@@ -64,6 +75,7 @@ impl LyricsSource {
     /// la que dedujo el parser, para no perder el estado al recargar.
     pub fn from_label(label: &str) -> Option<Self> {
         match label.trim().to_ascii_lowercase().as_str() {
+            "genius" => Some(Self::Genius),
             "lrclib" => Some(Self::Lrclib),
             "lrcmux" => Some(Self::Lrcmux),
             "captions" => Some(Self::Captions),
@@ -409,6 +421,12 @@ impl LyricsService {
     /// Variante cancelable que usa el worker de la TUI. `cancel` se consulta
     /// entre lecturas del ASR; al cambiar de pista se activa y el proceso del
     /// transcriptor se mata en vez de bloquear la cola.
+    ///
+    /// El ASR solo aporta tiempos: si no hay documento (Genius, LRCLIB, lrcmux
+    /// o captions), devuelve `None` y no se inventa letra a partir de la
+    /// transcripción. Las líneas que se alinean son siempre las del documento
+    /// de entrada ([`asr_reference_lines`]); el reconocedor no puede añadir ni
+    /// cambiar texto.
     pub async fn fetch_with_audio_cancellable(
         &self,
         track: &TrackRef,
@@ -417,6 +435,8 @@ impl LyricsService {
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Option<LyricsDoc>, LyricsError> {
         let doc = remote::fetch_track(&self.client, track).await?;
+        // Sin letra conocida no hay nada que alinear: el ASR no es una fuente
+        // de texto y no debe rellenar líneas que nadie ha escrito.
         let Some(mut doc) = doc else {
             return Ok(None);
         };
@@ -1379,6 +1399,49 @@ mod tests {
         let doc = parse_lrc(LRC);
         let (start, end) = doc.window(12_400, 2, 2);
         assert_eq!((start, end), (0, 3));
+    }
+
+    #[test]
+    fn genius_source_survives_cache_labels() {
+        // La caché guarda `doc.source.label()`: Genius debe distinguirse de un
+        // `plain` o un `captions` genérico para poder invalidar solo estos.
+        assert_eq!(LyricsSource::Genius.label(), "genius");
+        assert_eq!(
+            LyricsSource::from_label("genius"),
+            Some(LyricsSource::Genius)
+        );
+        assert_eq!(
+            LyricsSource::from_label("  GENIUS "),
+            Some(LyricsSource::Genius)
+        );
+        // Un texto de Genius con tiempos de otro proveedor conserva la fuente
+        // Genius; el parser devuelve Lrclib y la capa de caché la restaura.
+        let mut doc = LyricsDoc::from_lrc("[00:10.00]uno\n[00:12.00]dos", true);
+        assert!(doc.synced);
+        doc.source = LyricsSource::Genius;
+        assert_eq!(doc.source.label(), "genius");
+    }
+
+    #[test]
+    fn asr_reference_keeps_the_existing_text_and_times() {
+        // El ASR recibe exactamente las líneas ya escritas, sin palabras
+        // sintetizadas: no puede convertirse en una fuente de texto.
+        let mut doc = LyricsDoc::from_lrc(
+            "[00:10.00]uno\n[00:12.00](oh oh)\n[00:14.00]dos",
+            true,
+        );
+        doc.offset_ms = 500;
+        let reference = asr_reference_lines(&doc);
+        let texts: Vec<&str> = reference
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["uno", "(oh oh)", "dos"]);
+        assert!(reference.iter().all(|line| line.words.is_empty()));
+        assert!(!reference.iter().any(|line| line.words_exact));
+        // Se quita el offset de usuario: el ASR devuelve tiempos del audio.
+        assert_eq!(reference[0].start_ms, 9_500);
+        assert_eq!(reference[2].start_ms, 13_500);
     }
 }
 

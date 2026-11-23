@@ -12,7 +12,7 @@
 //! cualquier LRC sincronizado con tiempos imposibles.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -66,18 +66,36 @@ const SYNC_MAX_OVERRUN_MS: u64 = 15_000;
 /// Mínimo de versos con texto para considerar fiable una letra sincronizada.
 const SYNC_MIN_LINES: usize = 2;
 
+/// Parecido mínimo (Dice sobre palabras) entre el texto de Genius y el de un
+/// proveedor sincronizado para aceptar sus tiempos. Por debajo se considera
+/// otra letra y se prefiere el texto de Genius sin sincronizar antes que una
+/// letra ajena con karaoke.
+const GENIUS_TEXT_MATCH: f64 = 0.55;
+/// Parecido mínimo entre dos líneas para anclarlas durante la alineación.
+const LINE_MATCH_MIN: f64 = 0.55;
+/// Fracción mínima de líneas de Genius que deben quedar ancladas a un tiempo.
+const MIN_TEXT_COVERAGE: f64 = 0.28;
+
 // ---------------------------------------------------------------------------
 // API pública
 // ---------------------------------------------------------------------------
 
-/// Busca letra en LRCLIB, lrcmux, Genius y captions de YouTube. `Ok(None)` = no
-/// hay nada.
+/// Busca letra con esta prioridad:
 ///
-/// La cascada está acotada por tramos: un proveedor lento no puede agotar el
-/// presupuesto de los siguientes. Si la pista viene de YouTube y hay un
-/// `videoId` exacto, las captions de ese vídeo se usan para reajustar la letra
-/// al audio descargado aunque LRCLIB ya devolviera un LRC sincronizado: el
-/// vídeo suele llevar intro/outro y el LRC de estudio queda desplazado.
+/// 1. **Genius primero** y autoritativo en texto, con su propio tramo de
+///    presupuesto. Si devuelve letra, ese texto es el que se pinta: LRCLIB,
+///    lrcmux y las captions solo pueden prestarle tiempos.
+/// 2. Sin Genius, LRCLIB y lrcmux siguen siendo fuentes de texto fiables. Un
+///    LRC sincronizado se devuelve tal cual; uno plano queda como respaldo.
+/// 3. Las captions nunca aportan texto: solo alinean una letra ya conocida
+///    (Genius, LRCLIB o lrcmux) contra el audio del vídeo. Sin letra conocida
+///    no se consultan, porque las auto-captions pueden inventar líneas.
+///
+/// Cuando Genius es plano y un proveedor trae LRC sincronizado, se comprueba
+/// que el texto coincida (Dice sobre palabras y alineación por líneas). Si
+/// coincide, se conservan las líneas de Genius y se les aplican esos tiempos;
+/// si no, se devuelve Genius plano antes que una letra sincronizada de otra
+/// canción. El ASR, más abajo, solo puede reafinar esos mismos tiempos.
 pub async fn fetch_track(
     client: &reqwest::Client,
     track: &TrackRef,
@@ -89,42 +107,37 @@ pub async fn fetch_track(
     let variants = query_variants(track);
     let deadline = Instant::now() + TOTAL_BUDGET;
     let prefer_captions = youtube_hint(track).is_some();
-    let mut best: Option<LyricsDoc> = None;
-    let mut fallback: Option<LyricsDoc> = None;
 
-    // 1) Metadatos exactos y búsqueda libre de LRCLIB, con su propio tramo.
+    // 1) Genius: texto autoritativo. Se consulta antes que nadie para que un
+    //    LRC de otra versión no pueda decidir qué letra se muestra.
+    let mut genius = {
+        let genius_deadline = slice(deadline, GENIUS_BUDGET);
+        if has_budget(genius_deadline, MIN_REQUEST_BUDGET) {
+            match fetch_genius(client, track, &target, genius_deadline).await {
+                Ok(doc) => doc,
+                Err(err) => {
+                    tracing::debug!(target: "spote::lyrics", "genius: {err}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(doc) = &genius {
+        tracing::info!(
+            target: "spote::lyrics",
+            "genius: texto autoritativo, {} líneas (synced={})",
+            doc.lines.len(),
+            doc.synced
+        );
+    }
+
+    // 2) Tiempos y, si no hay Genius, texto de los proveedores fiables.
     let lrclib_deadline = slice(deadline, LRCLIB_BUDGET);
-    for variant in &variants {
-        if !has_budget(lrclib_deadline, MIN_REQUEST_BUDGET) {
-            break;
-        }
-        if let Ok(Some(doc)) = fetch_exact(client, variant, &target, lrclib_deadline).await {
-            if absorb(&mut best, &mut fallback, doc) {
-                if !prefer_captions {
-                    return Ok(best);
-                }
-                break;
-            }
-        }
-    }
-    if best.is_none() {
-        for variant in &variants {
-            if !has_budget(lrclib_deadline, MIN_REQUEST_BUDGET) {
-                break;
-            }
-            if let Ok(Some(doc)) = fetch_search(client, variant, &target, lrclib_deadline).await {
-                if absorb(&mut best, &mut fallback, doc) {
-                    if !prefer_captions {
-                        return Ok(best);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    // 2) lrcmux: agregador compatible con LRCLIB, a veces con más cobertura.
-    if best.is_none() {
+    let (mut timing, mut fallback) =
+        fetch_lrclib(client, &variants, &target, lrclib_deadline).await;
+    if timing.is_none() {
         let lrcmux_deadline = slice(deadline, LRCMUX_BUDGET);
         if has_budget(lrcmux_deadline, MIN_REQUEST_BUDGET) {
             // Se consulta con la variante limpia: un título de YouTube con
@@ -132,48 +145,542 @@ pub async fn fetch_track(
             let query = variants.first().unwrap_or(track);
             if let Ok(Some(doc)) = super::lrcmux::fetch_before(client, query, lrcmux_deadline).await
             {
-                if absorb(&mut best, &mut fallback, doc) && !prefer_captions {
-                    return Ok(best);
+                if doc.synced {
+                    timing = Some(doc);
+                } else if genius.is_none() && fallback.is_none() {
+                    fallback = Some(doc);
                 }
             }
         }
     }
 
-    // 3) Genius: letra plana como respaldo.
-    if best.is_none() {
-        let genius_deadline = slice(deadline, GENIUS_BUDGET);
-        if has_budget(genius_deadline, MIN_REQUEST_BUDGET) {
-            if let Ok(Some(doc)) = fetch_genius(client, track, &target, genius_deadline).await {
-                if absorb(&mut best, &mut fallback, doc) && !prefer_captions {
-                    return Ok(best);
-                }
-            }
-        }
-    }
-
-    // 4) Captions de YouTube: alinean la letra conocida contra el audio exacto
-    //    o, si no hay letra, sirven de letra sincronizada de emergencia.
-    let known = best.as_ref().or(fallback.as_ref());
-    let youtube_deadline = slice(deadline, YOUTUBE_BUDGET);
-    if has_budget(youtube_deadline, Duration::from_secs(2)) {
-        if let Some(doc) = super::youtube::fetch(track, known, youtube_deadline).await {
+    // Sin Genius y con tiempos ya resueltos, no hace falta YouTube salvo que
+    // la pista venga de un vídeo exacto: ahí las captions ajustan mejor.
+    if !prefer_captions {
+        // Genius manda: si hay tiempos de proveedor, se mezclan ya y se evita
+        // gastar el tramo de YouTube.
+        if genius.is_some() && timing.is_some() {
+            let genius = genius.take().expect("genius comprobado");
+            let timing = timing.take();
+            let (doc, resolution) = resolve_genius(genius, None, timing);
+            log_resolution(&doc, resolution);
             return Ok(Some(doc));
         }
+        if genius.is_none() {
+            if let Some(doc) = timing.take() {
+                tracing::info!(
+                    target: "spote::lyrics",
+                    "letra: {} sincronizada (sin genius)",
+                    doc.source.label()
+                );
+                return Ok(Some(doc));
+            }
+        }
+    } else if genius.is_some() {
+        if let Some(timing) = timing.as_ref() {
+            tracing::debug!(
+                target: "spote::lyrics",
+                "genius: tiempos candidatos de {}; se intentan captions del vídeo",
+                timing.source.label()
+            );
+        }
     }
-    Ok(best.or(fallback))
+
+    // 3) Captions: solo con letra conocida y solo para poner tiempos. Nunca
+    //    se usan como fuente de texto, ni siquiera como último recurso.
+    let known = genius.as_ref().or(timing.as_ref()).or(fallback.as_ref());
+    let known_source = known.map(|doc| doc.source.label()).unwrap_or("");
+    let mut captions = None;
+    if known.is_some() {
+        let youtube_deadline = slice(deadline, YOUTUBE_BUDGET);
+        if has_budget(youtube_deadline, Duration::from_secs(2)) {
+            captions = super::youtube::fetch(track, known, youtube_deadline).await;
+        }
+    }
+
+    if let Some(genius) = genius {
+        let (doc, resolution) = resolve_genius(genius, captions, timing);
+        log_resolution(&doc, resolution);
+        return Ok(Some(doc));
+    }
+    if let Some(doc) = captions {
+        tracing::info!(
+            target: "spote::lyrics",
+            "letra: captions aportan tiempos sobre texto de {known_source}"
+        );
+        return Ok(Some(doc));
+    }
+    let doc = timing.or(fallback);
+    if let Some(doc) = &doc {
+        tracing::info!(
+            target: "spote::lyrics",
+            "letra: {} (sin genius ni captions)",
+            doc.source.label()
+        );
+    } else {
+        tracing::info!(
+            target: "spote::lyrics",
+            "letra: sin texto fiable; no se usan captions como letra"
+        );
+    }
+    Ok(doc)
 }
 
-/// Guarda un documento: los sincronizados compiten por el primer puesto, los
-/// planos solo rellenan el respaldo si aún no hay ninguno.
-fn absorb(best: &mut Option<LyricsDoc>, fallback: &mut Option<LyricsDoc>, doc: LyricsDoc) -> bool {
-    if doc.synced {
-        *best = Some(doc);
-        true
-    } else {
-        if fallback.is_none() {
-            *fallback = Some(doc);
+/// Recorre las variantes de LRCLIB (metadatos exactos y luego búsqueda libre)
+/// y devuelve el primer documento sincronizado y el primer texto plano. Se
+/// detiene en cuanto encuentra una sincronizada: es la que mejores tiempos da
+/// y no compensa seguir gastando presupuesto.
+async fn fetch_lrclib(
+    client: &reqwest::Client,
+    variants: &[TrackRef],
+    target: &MatchTarget,
+    deadline: Instant,
+) -> (Option<LyricsDoc>, Option<LyricsDoc>) {
+    let mut synced: Option<LyricsDoc> = None;
+    let mut plain: Option<LyricsDoc> = None;
+
+    for variant in variants {
+        if !has_budget(deadline, MIN_REQUEST_BUDGET) {
+            break;
         }
-        false
+        if let Ok(Some(doc)) = fetch_exact(client, variant, target, deadline).await {
+            if doc.synced {
+                synced = Some(doc);
+                break;
+            }
+            if plain.is_none() {
+                plain = Some(doc);
+            }
+        }
+    }
+    if synced.is_none() {
+        for variant in variants {
+            if !has_budget(deadline, MIN_REQUEST_BUDGET) {
+                break;
+            }
+            if let Ok(Some(doc)) = fetch_search(client, variant, target, deadline).await {
+                if doc.synced {
+                    synced = Some(doc);
+                    break;
+                }
+                if plain.is_none() {
+                    plain = Some(doc);
+                }
+            }
+        }
+    }
+    (synced, plain)
+}
+
+// ---------------------------------------------------------------------------
+// Genius como texto autoritativo
+// ---------------------------------------------------------------------------
+
+/// Cómo se resolvió el texto de Genius contra los tiempos disponibles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    /// No hubo tiempos compatibles: se conserva la letra de Genius tal cual.
+    Plain,
+    /// Las captions del vídeo solo aportaron tiempos; el texto es de Genius.
+    CaptionTiming,
+    /// Un LRC sincronizado (LRCLIB/lrcmux) solo aportó tiempos; texto Genius.
+    ProviderTiming,
+}
+
+impl Resolution {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "genius: texto plano conservado (sin tiempos fiables)",
+            Self::CaptionTiming => "genius: texto + tiempos de captions",
+            Self::ProviderTiming => "genius: texto + tiempos de proveedor",
+        }
+    }
+}
+
+/// Decide el documento final cuando Genius dio texto. Las captions y el LRC
+/// de otros proveedores son solo una fuente de tiempos: sus líneas nunca
+/// sustituyen a las de Genius.
+fn resolve_genius(
+    genius: LyricsDoc,
+    captions: Option<LyricsDoc>,
+    timing: Option<LyricsDoc>,
+) -> (LyricsDoc, Resolution) {
+    if let Some(mut doc) = captions {
+        // `youtube::build_doc` devuelve exactamente las líneas del texto
+        // conocido. Si por cualquier motivo no fuera así, se reutilizan sus
+        // tiempos sobre el texto de Genius en vez de aceptar sus líneas.
+        if doc.synced && same_lyric_lines(&genius, &doc) {
+            doc.source = genius.source;
+            doc.instrumental = genius.instrumental;
+            doc.offset_ms = 0;
+            return (doc, Resolution::CaptionTiming);
+        }
+        if doc.synced {
+            if let Some(mut merged) = merge_text_with_timing(&genius, &doc) {
+                merged.source = genius.source;
+                return (merged, Resolution::CaptionTiming);
+            }
+        }
+        tracing::debug!(
+            target: "spote::lyrics",
+            "genius: captions descartadas; su texto no coincide y no puede sustituir a Genius"
+        );
+    }
+    if let Some(timing) = timing {
+        if let Some(mut doc) = merge_text_with_timing(&genius, &timing) {
+            doc.source = genius.source;
+            return (doc, Resolution::ProviderTiming);
+        }
+        tracing::debug!(
+            target: "spote::lyrics",
+            "genius: {} no coincide con el texto (similitud {:.2}); se mantiene Genius plano",
+            timing.source.label(),
+            doc_text_similarity(&genius, &timing)
+        );
+    }
+    (genius, Resolution::Plain)
+}
+
+fn log_resolution(doc: &LyricsDoc, resolution: Resolution) {
+    tracing::info!(
+        target: "spote::lyrics",
+        "letra: {} · {} líneas · synced={} · offset={}",
+        resolution.label(),
+        doc.lines.len(),
+        doc.synced,
+        doc.offset_ms
+    );
+}
+
+/// Similitud de texto entre dos documentos (Dice multiconjunto sobre palabras
+/// normalizadas). Es insensible al orden de las líneas y a la puntuación, que
+/// es justo lo que cambia entre Genius y un LRC de otro proveedor.
+pub(crate) fn doc_text_similarity(left: &LyricsDoc, right: &LyricsDoc) -> f64 {
+    let left = doc_tokens(left);
+    let right = doc_tokens(right);
+    token_dice(&left, &right)
+}
+
+/// Aplica los tiempos de `timing_doc` al texto de `text_doc`, conservando las
+/// líneas del primero. Devuelve `None` si el texto no coincide lo suficiente:
+/// en ese caso es preferible mostrar la letra plana antes que una sincronizada
+/// de otra canción.
+pub(crate) fn merge_text_with_timing(
+    text_doc: &LyricsDoc,
+    timing_doc: &LyricsDoc,
+) -> Option<LyricsDoc> {
+    if !timing_doc.synced || text_doc.lines.len() < 2 || timing_doc.lines.len() < 2 {
+        return None;
+    }
+    let text_lines = comparable_lines(text_doc);
+    let timing_lines = comparable_lines(timing_doc);
+    if text_lines.len() < 2 || timing_lines.len() < 2 {
+        return None;
+    }
+    let text_tokens: Vec<String> = text_lines
+        .iter()
+        .flat_map(|(_, tokens)| tokens.iter().cloned())
+        .collect();
+    let timing_tokens: Vec<String> = timing_lines
+        .iter()
+        .flat_map(|(_, tokens)| tokens.iter().cloned())
+        .collect();
+    if token_dice(&text_tokens, &timing_tokens) < GENIUS_TEXT_MATCH {
+        return None;
+    }
+
+    let pairs = align_lyric_lines(&text_lines, &timing_lines);
+    if pairs.len() < 2 {
+        return None;
+    }
+    if pairs.len() as f64 / (text_lines.len() as f64) < MIN_TEXT_COVERAGE {
+        return None;
+    }
+    let anchors: Vec<(usize, usize)> = pairs
+        .into_iter()
+        .map(|(text_index, timing_index)| (text_lines[text_index].0, timing_lines[timing_index].0))
+        .collect();
+    Some(build_timed_from_anchors(text_doc, timing_doc, &anchors))
+}
+
+/// Líneas con texto comparable, con sus palabras normalizadas.
+fn comparable_lines(doc: &LyricsDoc) -> Vec<(usize, Vec<String>)> {
+    doc.lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            if !has_lyric_text(&line.text) {
+                return None;
+            }
+            let tokens = lyric_tokens(&line.text);
+            (!tokens.is_empty()).then_some((index, tokens))
+        })
+        .collect()
+}
+
+/// `true` si los dos documentos tienen exactamente las mismas líneas de letra
+/// (normalizadas), en el mismo orden. Es la garantía de que las captions
+/// devolvieron el texto conocido y no otro.
+fn same_lyric_lines(left: &LyricsDoc, right: &LyricsDoc) -> bool {
+    let normalize = |doc: &LyricsDoc| -> Vec<String> {
+        comparable_lines(doc)
+            .into_iter()
+            .map(|(_, tokens)| tokens.join(" "))
+            .collect()
+    };
+    let left = normalize(left);
+    let right = normalize(right);
+    !left.is_empty() && left == right
+}
+
+fn doc_tokens(doc: &LyricsDoc) -> Vec<String> {
+    comparable_lines(doc)
+        .into_iter()
+        .flat_map(|(_, tokens)| tokens)
+        .collect()
+}
+
+/// Palabras de una línea para comparar: minúsculas, sin acentos, sin
+/// puntuación y sin adlibs entre paréntesis (no son la frase principal).
+fn lyric_tokens(text: &str) -> Vec<String> {
+    let mut stripped = String::with_capacity(text.len());
+    let mut depth = 0i32;
+    for ch in text.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth > 0 => {}
+            _ => stripped.push(ch),
+        }
+    }
+    stripped
+        .split_whitespace()
+        .map(super::align::normalize_word)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+/// Coeficiente de Dice sobre multiconjuntos de palabras. Cuenta las repeticiones
+/// (un estribillo repetido no se colapsa) y no depende del orden.
+fn token_dice(left: &[String], right: &[String]) -> f64 {
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for token in left {
+        *counts.entry(token.as_str()).or_default() += 1;
+    }
+    let mut common = 0usize;
+    for token in right {
+        if let Some(count) = counts.get_mut(token.as_str()) {
+            if *count > 0 {
+                *count -= 1;
+                common += 1;
+            }
+        }
+    }
+    2.0 * common as f64 / (left.len() + right.len()) as f64
+}
+
+/// Alineación global (Needleman-Wunsch) entre líneas de dos letras. Solo
+/// empareja líneas con parecido suficiente y deja huecos para las que faltan,
+/// así una línea extra o un estribillo repetido no desplaza toda la rejilla.
+fn align_lyric_lines(
+    text: &[(usize, Vec<String>)],
+    timing: &[(usize, Vec<String>)],
+) -> Vec<(usize, usize)> {
+    const GAP: f64 = -0.35;
+    const MISMATCH: f64 = -0.9;
+    let rows = text.len();
+    let columns = timing.len();
+    if rows == 0 || columns == 0 || rows.saturating_mul(columns) > 1_000_000 {
+        return Vec::new();
+    }
+    let stride = columns + 1;
+    let mut scores = vec![0.0f64; (rows + 1) * stride];
+    for row in 1..=rows {
+        scores[row * stride] = GAP * row as f64;
+    }
+    for (column, score) in scores.iter_mut().enumerate().take(columns + 1).skip(1) {
+        *score = GAP * column as f64;
+    }
+    for row in 1..=rows {
+        for column in 1..=columns {
+            let similarity = token_dice(&text[row - 1].1, &timing[column - 1].1);
+            let diagonal = scores[(row - 1) * stride + column - 1]
+                + if similarity >= LINE_MATCH_MIN {
+                    similarity
+                } else {
+                    MISMATCH
+                };
+            let up = scores[(row - 1) * stride + column] + GAP;
+            let left = scores[row * stride + column - 1] + GAP;
+            scores[row * stride + column] = diagonal.max(up).max(left);
+        }
+    }
+
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let (mut row, mut column) = (rows, columns);
+    while row > 0 && column > 0 {
+        let similarity = token_dice(&text[row - 1].1, &timing[column - 1].1);
+        let diagonal = scores[(row - 1) * stride + column - 1]
+            + if similarity >= LINE_MATCH_MIN {
+                similarity
+            } else {
+                MISMATCH
+            };
+        let up = scores[(row - 1) * stride + column] + GAP;
+        let left = scores[row * stride + column - 1] + GAP;
+        let current = scores[row * stride + column];
+        if similarity >= LINE_MATCH_MIN && (current - diagonal).abs() < 1e-9 {
+            pairs.push((row - 1, column - 1));
+            row -= 1;
+            column -= 1;
+        } else if (current - up).abs() < 1e-9 {
+            row -= 1;
+        } else if (current - left).abs() < 1e-9 {
+            column -= 1;
+        } else if similarity >= LINE_MATCH_MIN {
+            pairs.push((row - 1, column - 1));
+            row -= 1;
+            column -= 1;
+        } else {
+            break;
+        }
+    }
+    pairs.reverse();
+    pairs
+}
+
+/// Construye el documento final: líneas de `text_doc` con la rejilla temporal
+/// que marcan las líneas ancladas de `timing_doc`. Las líneas sin ancla se
+/// interpolan entre las vecinas usando el reparto estimado original.
+fn build_timed_from_anchors(
+    text_doc: &LyricsDoc,
+    timing_doc: &LyricsDoc,
+    anchors: &[(usize, usize)],
+) -> LyricsDoc {
+    const MIN_LINE_GAP_MS: u64 = 120;
+    let mut lines = text_doc.lines.clone();
+    let count = lines.len();
+    let mut starts = vec![0u64; count];
+    let mut ends: Vec<Option<u64>> = vec![None; count];
+    let mut anchored = vec![false; count];
+
+    for &(text_index, timing_index) in anchors {
+        let Some(timing) = timing_doc.lines.get(timing_index) else {
+            continue;
+        };
+        let start = timing.start_ms;
+        starts[text_index] = start;
+        ends[text_index] = Some(timing.end_ms.max(start.saturating_add(100)));
+        anchored[text_index] = true;
+    }
+
+    let anchor_positions: Vec<usize> = (0..count).filter(|index| anchored[*index]).collect();
+    if anchor_positions.is_empty() {
+        return text_doc.clone();
+    }
+
+    let mut previous_anchor: Option<usize> = None;
+    for index in 0..count {
+        if anchored[index] {
+            previous_anchor = Some(index);
+            continue;
+        }
+        let next_anchor = anchor_positions
+            .iter()
+            .copied()
+            .find(|candidate| *candidate > index);
+        match (previous_anchor, next_anchor) {
+            (Some(previous), Some(next)) => {
+                let previous_end = ends[previous].unwrap_or(starts[previous] + 1_000);
+                let next_start = starts[next];
+                let span = next_start.saturating_sub(previous_end);
+                let estimate_previous = lines[previous].start_ms;
+                let estimate_next = lines[next].start_ms;
+                let estimate_here = lines[index].start_ms;
+                let weight = estimate_next.saturating_sub(estimate_previous).max(1);
+                let offset = estimate_here.saturating_sub(estimate_previous).min(weight);
+                starts[index] =
+                    previous_end + (span as u128 * offset as u128 / weight as u128) as u64;
+            }
+            (None, Some(next)) => {
+                let next_start = starts[next];
+                let estimate_next = lines[next].start_ms;
+                let estimate_here = lines[index].start_ms;
+                starts[index] =
+                    next_start.saturating_sub(estimate_next.saturating_sub(estimate_here));
+            }
+            (Some(previous), None) => {
+                let previous_end = ends[previous].unwrap_or(starts[previous] + 1_000);
+                let estimate_previous = lines[previous].start_ms;
+                let estimate_here = lines[index].start_ms;
+                starts[index] =
+                    previous_end.saturating_add(estimate_here.saturating_sub(estimate_previous));
+            }
+            (None, None) => starts[index] = index as u64 * 4_000,
+        }
+    }
+
+    // La rejilla tiene que ser monótona aunque el proveedor traiga marcas
+    // repetidas o una interpolación se quede corta.
+    let mut previous = starts.first().copied().unwrap_or(0);
+    for (index, start) in starts.iter_mut().enumerate() {
+        if index > 0 {
+            *start = (*start).max(previous.saturating_add(MIN_LINE_GAP_MS));
+            previous = *start;
+        }
+    }
+
+    for index in 0..count {
+        if ends[index].is_some() {
+            continue;
+        }
+        let start = starts[index];
+        let estimate = lines[index]
+            .end_ms
+            .saturating_sub(lines[index].start_ms)
+            .max(1_000);
+        let end = starts
+            .get(index + 1)
+            .copied()
+            .map(|next| next.saturating_sub(40).max(start.saturating_add(250)))
+            .unwrap_or(start.saturating_add(estimate));
+        ends[index] = Some(end.max(start.saturating_add(100)));
+    }
+    for index in 0..count.saturating_sub(1) {
+        let next = starts[index + 1];
+        let start = starts[index];
+        if next > start {
+            let end = ends[index]
+                .unwrap_or(start.saturating_add(100))
+                .min(next.saturating_sub(40).max(start.saturating_add(50)))
+                .max(start.saturating_add(50));
+            ends[index] = Some(end);
+        }
+    }
+    if let Some(last) = ends.last_mut() {
+        *last = Some(
+            last.unwrap_or(starts[count - 1].saturating_add(250))
+                .max(starts[count - 1].saturating_add(250)),
+        );
+    }
+
+    for (index, line) in lines.iter_mut().enumerate() {
+        line.start_ms = starts[index];
+        line.end_ms = ends[index].unwrap_or(starts[index] + 1_000);
+        line.words.clear();
+        line.words_exact = false;
+    }
+
+    LyricsDoc {
+        lines,
+        synced: true,
+        instrumental: text_doc.instrumental,
+        source: text_doc.source,
+        offset_ms: 0,
+        aligned: false,
     }
 }
 
@@ -610,7 +1117,9 @@ pub(crate) fn metadata_matches(
     duration_seconds: f64,
 ) -> bool {
     if title.trim().is_empty() && artist.trim().is_empty() {
-        return true;
+        // Un proveedor sin metadatos no puede validarse contra una pista que
+        // sí los tiene. Antes se aceptaba cualquier letra en este caso.
+        return track.title.trim().is_empty() && track.artist.trim().is_empty();
     }
     let target = MatchTarget::from_track(track);
     let cand = Candidate {
@@ -655,6 +1164,35 @@ fn is_generic_title(title: &str) -> bool {
     let words = cleaned.split_whitespace().count();
     let letters = cleaned.chars().filter(|ch| ch.is_alphanumeric()).count();
     words <= 2 || letters <= 8
+}
+
+/// Título con símbolos que lo identifican aunque tenga pocas letras o palabras
+/// (`(_8(|)`, `#1`, `R U Mine?`). No es genérico: el símbolo forma parte del
+/// nombre. Exige un núcleo alfanumérico (`$$$` no identifica nada).
+pub(crate) fn is_symbolic_title(title: &str) -> bool {
+    let cleaned = clean_title(title);
+    if !cleaned.chars().any(|ch| ch.is_alphanumeric()) {
+        return false;
+    }
+    cleaned
+        .chars()
+        .any(|ch| !ch.is_alphanumeric() && !ch.is_whitespace())
+}
+
+/// Compara títulos conservando los símbolos. [`similarity`] normaliza el texto
+/// y se come los paréntesis, así que `(_8(|)` quedaría vacío; para títulos
+/// simbólicos hace falta una igualdad literal (sin espacios ni mayúsculas).
+pub(crate) fn titles_match_exactly(left: &str, right: &str) -> bool {
+    fn canonical(text: &str) -> String {
+        clean_title(text)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    let left = canonical(left);
+    let right = canonical(right);
+    !left.is_empty() && left == right
 }
 
 /// Cuánto se parece la duración del candidato a la de la pista.
@@ -909,6 +1447,14 @@ pub(crate) fn sync_problem(doc: &LyricsDoc, duration_ms: u64) -> Option<&'static
 
 /// Letra sin tiempos: líneas repartidas a lo largo de la canción.
 fn plain_doc(raw: &RemoteLyrics, track: &TrackRef) -> Option<LyricsDoc> {
+    plain_doc_with_source(raw, track, LyricsSource::Plain)
+}
+
+fn plain_doc_with_source(
+    raw: &RemoteLyrics,
+    track: &TrackRef,
+    source: LyricsSource,
+) -> Option<LyricsDoc> {
     let text = raw
         .plain_lyrics
         .as_deref()
@@ -944,7 +1490,7 @@ fn plain_doc(raw: &RemoteLyrics, track: &TrackRef) -> Option<LyricsDoc> {
         lines: Vec::with_capacity(texts.len()),
         synced: false,
         instrumental: false,
-        source: LyricsSource::Plain,
+        source,
         offset_ms: 0,
         aligned: false,
     };
@@ -1146,7 +1692,16 @@ async fn fetch_genius(
         plain_lyrics: Some(text),
         synced_lyrics: None,
     };
-    Ok(plain_doc(&raw, track))
+    let doc = plain_doc_with_source(&raw, track, LyricsSource::Genius);
+    if let Some(doc) = &doc {
+        tracing::debug!(
+            target: "spote::lyrics",
+            "genius: {} líneas extraídas de {}",
+            doc.lines.len(),
+            song.title
+        );
+    }
+    Ok(doc)
 }
 
 async fn genius_get(
@@ -1174,11 +1729,16 @@ async fn genius_get(
 }
 
 fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Option<&'a GeniusSong> {
+    let generic = is_generic_title(&target.title);
+    // Un título con símbolos y poco texto (`(_8(|)`) es genérico por longitud
+    // pero el símbolo lo identifica. En ese caso se exige coincidencia literal
+    // con Genius; el resto de títulos siguen el parecido normal.
+    let symbolic_generic = generic && is_symbolic_title(&target.title);
     // Genius no publica duración: para títulos de una sola palabra no hay
     // forma de distinguir dos canciones homónimas del mismo artista. Es
     // exactamente el caso de «Regular» (dos versiones de Biberon), así que se
     // prefiere no arriesgar una letra ajena.
-    if target.duration_ms > 0 && is_generic_title(&target.title) {
+    if target.duration_ms > 0 && generic && !symbolic_generic {
         return None;
     }
     let mut best: Option<(f64, &GeniusSong)> = None;
@@ -1202,8 +1762,18 @@ fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Optio
             if offered != target.version && offered.is_incompatible() {
                 continue;
             }
-            let title_score = title_similarity_for(&song.title, target);
-            let minimum = if target.artist.trim().is_empty() {
+            let mut title_score = title_similarity_for(&song.title, target);
+            if symbolic_generic {
+                // `similarity` normaliza y descarta paréntesis: para `(_8(|)`
+                // daría 0 incluso consigo mismo. Solo vale el título idéntico.
+                if !titles_match_exactly(&song.title, &target.title) {
+                    continue;
+                }
+                title_score = 1.0;
+            }
+            let minimum = if symbolic_generic {
+                0.95
+            } else if target.artist.trim().is_empty() {
                 0.80
             } else {
                 MIN_TITLE
@@ -1447,6 +2017,241 @@ mod tests {
     fn scored(mut cand: Candidate, track: &TrackRef) -> Candidate {
         cand.score = score_candidate(&cand, track);
         cand
+    }
+
+    /// Letra plana con reparto estimado, como la que devuelve Genius.
+    fn plain_lyrics(lines: &[&str], source: LyricsSource) -> LyricsDoc {
+        let mut doc = LyricsDoc {
+            synced: false,
+            source,
+            ..LyricsDoc::default()
+        };
+        for (index, text) in lines.iter().enumerate() {
+            let start = index as u64 * 4_000;
+            doc.lines.push(LyricLine {
+                start_ms: start,
+                end_ms: start + 4_000,
+                text: (*text).to_string(),
+                ..LyricLine::default()
+            });
+        }
+        doc
+    }
+
+    /// Letra sincronizada de otro proveedor, solo para prestar tiempos.
+    fn timed_lyrics(lines: &[(u64, &str)], source: LyricsSource) -> LyricsDoc {
+        let mut doc = build_test_doc(lines);
+        doc.source = source;
+        doc
+    }
+
+    const GENIUS_LINES: [&str; 6] = [
+        "Cuando salgo de fiesta con mi gente",
+        "La noche se nos pasa volando",
+        "Bailando hasta que salga el sol",
+        "No pienso parar hasta el amanecer",
+        "Porque la vida es una sola",
+        "Y hay que vivirla sin miedo",
+    ];
+
+    const OTHER_LINES: [&str; 4] = [
+        "I love you forever and ever",
+        "You are the only one for me",
+        "Nothing else matters in this world",
+        "Stay with me until the morning light",
+    ];
+
+    #[test]
+    fn genius_text_keeps_provider_timing_when_it_matches() {
+        let genius = plain_lyrics(&GENIUS_LINES, LyricsSource::Genius);
+        let timing = timed_lyrics(
+            &[
+                (12_000, "cuando salgo de fiesta con mi gente"),
+                (16_000, "la noche se nos pasa volando"),
+                (20_000, "bailando hasta que salga el sol"),
+                (24_000, "no pienso parar hasta el amanecer"),
+                (28_000, "porque la vida es una sola"),
+                (32_000, "y hay que vivirla sin miedo"),
+            ],
+            LyricsSource::Lrclib,
+        );
+        let merged = merge_text_with_timing(&genius, &timing).expect("el texto coincide");
+        assert!(merged.synced);
+        assert_eq!(merged.source, LyricsSource::Genius);
+        let texts: Vec<&str> = merged.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, GENIUS_LINES);
+        // Los tiempos sí son los del proveedor.
+        assert_eq!(merged.lines[0].start_ms, 12_000);
+        assert_eq!(merged.lines[5].start_ms, 32_000);
+    }
+
+    #[test]
+    fn genius_plain_is_not_replaced_by_unrelated_synced_lyrics() {
+        let genius = plain_lyrics(&GENIUS_LINES, LyricsSource::Genius);
+        let timing = timed_lyrics(
+            &[
+                (10_000, OTHER_LINES[0]),
+                (14_000, OTHER_LINES[1]),
+                (18_000, OTHER_LINES[2]),
+                (22_000, OTHER_LINES[3]),
+            ],
+            LyricsSource::Lrclib,
+        );
+        assert!(
+            merge_text_with_timing(&genius, &timing).is_none(),
+            "otra letra no puede prestar tiempos"
+        );
+        let (doc, resolution) = resolve_genius(genius, None, Some(timing));
+        assert_eq!(resolution, Resolution::Plain);
+        assert!(!doc.synced);
+        assert_eq!(doc.source, LyricsSource::Genius);
+        let texts: Vec<&str> = doc.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, GENIUS_LINES);
+    }
+
+    #[test]
+    fn captions_with_other_text_cannot_override_genius() {
+        let genius = plain_lyrics(&GENIUS_LINES, LyricsSource::Genius);
+        let captions = timed_lyrics(
+            &[
+                (10_000, OTHER_LINES[0]),
+                (14_000, OTHER_LINES[1]),
+                (18_000, OTHER_LINES[2]),
+            ],
+            LyricsSource::Captions,
+        );
+        let (doc, resolution) = resolve_genius(genius, Some(captions), None);
+        assert_eq!(resolution, Resolution::Plain);
+        let texts: Vec<&str> = doc.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, GENIUS_LINES);
+        assert!(!doc.synced);
+    }
+
+    #[test]
+    fn captions_timing_over_genius_text_is_kept() {
+        let genius = plain_lyrics(&GENIUS_LINES, LyricsSource::Genius);
+        let captions = timed_lyrics(
+            &[
+                (1_000, GENIUS_LINES[0]),
+                (2_000, GENIUS_LINES[1]),
+                (3_000, GENIUS_LINES[2]),
+                (4_000, GENIUS_LINES[3]),
+                (5_000, GENIUS_LINES[4]),
+                (6_000, GENIUS_LINES[5]),
+            ],
+            LyricsSource::Captions,
+        );
+        let (doc, resolution) = resolve_genius(genius, Some(captions), None);
+        assert_eq!(resolution, Resolution::CaptionTiming);
+        assert!(doc.synced);
+        assert_eq!(doc.source, LyricsSource::Genius);
+        assert_eq!(doc.lines[0].start_ms, 1_000);
+        assert_eq!(doc.lines[5].start_ms, 6_000);
+    }
+
+    #[test]
+    fn merge_skips_an_extra_line_without_losing_genius_text() {
+        let mut lines = GENIUS_LINES.to_vec();
+        lines.insert(2, "Oh oh");
+        let genius = plain_lyrics(&lines, LyricsSource::Genius);
+        let timing = timed_lyrics(
+            &[
+                (12_000, GENIUS_LINES[0]),
+                (16_000, GENIUS_LINES[1]),
+                (20_000, GENIUS_LINES[2]),
+                (24_000, GENIUS_LINES[3]),
+                (28_000, GENIUS_LINES[4]),
+                (32_000, GENIUS_LINES[5]),
+            ],
+            LyricsSource::Lrcmux,
+        );
+        let merged = merge_text_with_timing(&genius, &timing).expect("coincide lo suficiente");
+        assert_eq!(merged.lines.len(), lines.len());
+        assert_eq!(merged.source, LyricsSource::Genius);
+        let texts: Vec<&str> = merged.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, lines);
+        // El adlib interpolado no rompe la monotonía de la rejilla.
+        assert!(merged
+            .lines
+            .windows(2)
+            .all(|pair| pair[0].start_ms < pair[1].start_ms));
+        assert!(merged.lines.iter().all(|line| line.end_ms > line.start_ms));
+    }
+
+    #[test]
+    fn lyric_text_similarity_ignores_punctuation_and_line_order() {
+        let original = plain_lyrics(&GENIUS_LINES, LyricsSource::Genius);
+        let mut reordered = plain_lyrics(&GENIUS_LINES, LyricsSource::Plain);
+        reordered.lines.reverse();
+        for line in &mut reordered.lines {
+            line.text = line.text.replace('a', "á").replace('e', "é");
+        }
+        assert!(
+            doc_text_similarity(&original, &reordered) > 0.95,
+            "la puntuación y el orden no deben cambiar la similitud"
+        );
+        let other = plain_lyrics(&OTHER_LINES, LyricsSource::Lrclib);
+        assert!(doc_text_similarity(&original, &other) < GENIUS_TEXT_MATCH);
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnóstico manual con red: Genius/LRCLIB/YouTube"]
+    async fn live_biberon_symbol_lyrics_prefer_genius() {
+        let track = TrackRef {
+            key: "diag:biberon-symbol".into(),
+            title: "(_8(|) (feat. superreservao)".into(),
+            artist: "Bíberon".into(),
+            duration_ms: 139_000,
+            ..TrackRef::default()
+        };
+        let service = crate::lyrics::LyricsService::new();
+        let doc = service
+            .fetch(&track)
+            .await
+            .expect("sin error de red")
+            .expect("debe haber letra");
+        eprintln!(
+            "biberon: fuente={} synced={} lineas={}",
+            doc.source.label(),
+            doc.synced,
+            doc.lines.len()
+        );
+        assert_eq!(doc.source, LyricsSource::Genius);
+        assert!(doc.lines.len() >= 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnóstico manual con red: Genius/LRCLIB/YouTube"]
+    async fn diagnose_superreservao_sources() {
+        let service = crate::lyrics::LyricsService::new();
+        for (title, artist) in [
+            ("Superreservao", "Biberon"),
+            ("(_8(|) (feat. superreservao)", "Biberon"),
+        ] {
+            let track = TrackRef {
+                key: format!("diag:{title}"),
+                title: title.into(),
+                artist: artist.into(),
+                ..TrackRef::default()
+            };
+            println!("\n== {title} · {artist} ==");
+            match service.fetch(&track).await {
+                Ok(Some(doc)) => {
+                    println!(
+                        "fuente={} synced={} lineas={} offset={}",
+                        doc.source.label(),
+                        doc.synced,
+                        doc.lines.len(),
+                        doc.offset_ms
+                    );
+                    for line in doc.lines.iter().take(12) {
+                        println!("{:>7} ms | {}", line.start_ms, line.text);
+                    }
+                }
+                Ok(None) => println!("sin letra"),
+                Err(err) => println!("error: {err}"),
+            }
+        }
     }
 
     #[test]
@@ -1722,8 +2527,9 @@ mod tests {
             "AM",
             272.0,
         ));
-        // Sin metadatos no se puede juzgar: no se rompe la compatibilidad.
-        assert!(metadata_matches(&track(), "", "", "", 0.0));
+        // Una respuesta sin metadatos no puede validarse contra una pista
+        // que sí los tiene.
+        assert!(!metadata_matches(&track(), "", "", "", 0.0));
     }
 
     #[test]
@@ -1848,6 +2654,69 @@ mod tests {
         let page = r#"<div class="Lyrics__Container" data-lyrics-container="true">[Verse 1]<br/>Hola &amp; adiós<br/>Otra línea<div data-exclude-from-selection="true">You might also like</div></div>"#;
         let text = extract_genius_lyrics(page);
         assert_eq!(text, "Hola & adiós\nOtra línea");
+    }
+
+    fn genius_search(title: &str, artist: &str) -> GeniusSearch {
+        GeniusSearch {
+            response: GeniusResponse {
+                sections: vec![GeniusSection {
+                    hits: vec![GeniusHit {
+                        result: Some(GeniusSong {
+                            id: 1,
+                            title: title.into(),
+                            artist_names: artist.into(),
+                            path: "/biberon/song".into(),
+                            kind: "song".into(),
+                            lyrics_state: "complete".into(),
+                        }),
+                    }],
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn symbolic_titles_are_distinguished_from_generic_ones() {
+        assert!(is_symbolic_title("(_8(|)"));
+        assert!(is_symbolic_title("#1"));
+        assert!(is_symbolic_title("R U Mine?"));
+        // Sin núcleo alfanumérico o sin símbolos no hay nada distintivo.
+        assert!(!is_symbolic_title("$$$"));
+        assert!(!is_symbolic_title("(((("));
+        // Una palabra corta sin símbolos sigue siendo genérica.
+        assert!(!is_symbolic_title("Regular"));
+        assert!(!is_symbolic_title("Love"));
+        assert!(titles_match_exactly("(_8(|)", "(_8(|)"));
+        assert!(!titles_match_exactly("(_8(|)", "(_9(|)"));
+    }
+
+    #[test]
+    fn symbolic_genius_title_is_accepted_while_regular_stays_ambiguous() {
+        // Caso real: Genius tiene `(_8(|)` de Biberon & JOHNNYFUU. El título
+        // limpio es `(_8(|)`: una sola «palabra» de un carácter alfanumérico,
+        // pero el símbolo lo identifica y debe aceptarse.
+        let search = genius_search("(_8(|)", "Biberon & JOHNNYFUU (Ft. superreservao)");
+        let mut input = TrackRef {
+            title: "(_8(|) (feat. superreservao)".into(),
+            artist: "Biberon".into(),
+            duration_ms: 180_000,
+            ..TrackRef::default()
+        };
+        let target = MatchTarget::from_track(&input);
+        assert_eq!(target.title, "(_8(|)");
+        let chosen = best_genius_song(&search, &target).expect("el título simbólico se acepta");
+        assert_eq!(chosen.title, "(_8(|)");
+
+        // El título exacto no basta si el artista no es compatible.
+        let impostor = genius_search("(_8(|)", "Otro Artista Cualquiera");
+        assert!(best_genius_song(&impostor, &target).is_none());
+
+        // «Regular» sigue siendo un homónimo sin duración en Genius: no se
+        // arriesga una letra ajena.
+        let regular = genius_search("Regular", "Biberon");
+        input.title = "Regular".into();
+        let target = MatchTarget::from_track(&input);
+        assert!(best_genius_song(&regular, &target).is_none());
     }
 
     #[test]

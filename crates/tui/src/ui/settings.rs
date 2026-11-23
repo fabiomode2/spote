@@ -171,6 +171,10 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
                     None,
                 );
 
+                // La fila se registra antes que las flechas: el HitMap se
+                // queda con la última acción y, si no, el clic en ◀/▶ caía en
+                // SettingsRow en vez de ajustar.
+                app.hit.add(row, Action::SettingsRow(*index));
                 let value_width = value.chars().count() as u16;
                 let arrows = is_adjustable && !is_toggle;
                 let reserve = if arrows { 3 } else { 0 };
@@ -210,7 +214,6 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
                     }),
                     None,
                 );
-                app.hit.add(row, Action::SettingsRow(*index));
                 y += 2;
             }
         }
@@ -224,6 +227,9 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
             1,
             list_bottom.saturating_sub(inner.y + 2),
         );
+        if track.height == 0 {
+            return;
+        }
         let total = rows.len().max(1);
         let thumb_h = ((track.height as usize * rows_drawn.max(1)) / total)
             .clamp(1, track.height as usize) as u16;

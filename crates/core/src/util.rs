@@ -27,6 +27,12 @@ pub fn format_ms_precise(ms: u64) -> String {
 /// Normaliza texto para comparar canciones: minúsculas, sin acentos, sin
 /// sufijos de vídeo/remaster y sin puntuación.
 pub fn normalize(text: &str) -> String {
+    normalize_impl(text, true)
+}
+
+/// `fallback_key` conserva el `feat.` para no cambiar las claves ya guardadas
+/// de pistas antiguas. La normalización pública sí lo corta para el matching.
+fn normalize_impl(text: &str, cut_collab: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut depth = 0usize;
     for ch in text.chars() {
@@ -53,7 +59,17 @@ pub fn normalize(text: &str) -> String {
         }
     }
     let lower = out.to_lowercase();
-    let mut cleaned: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    let cut = if cut_collab {
+        tokens
+            .iter()
+            .position(|token| matches!(*token, "feat" | "ft" | "featuring"))
+            .filter(|index| *index > 0)
+            .unwrap_or(tokens.len())
+    } else {
+        tokens.len()
+    };
+    let mut cleaned: String = tokens[..cut].join(" ");
     for noise in [
         " official video",
         " official music video",
@@ -70,7 +86,29 @@ pub fn normalize(text: &str) -> String {
     ] {
         cleaned = cleaned.replace(noise, "");
     }
-    cleaned.trim().to_string()
+    let cleaned = cleaned.trim().to_string();
+    if !cleaned.is_empty() {
+        return cleaned;
+    }
+    // Títulos como "(_8(|)" quedan vacíos al quitar los grupos. Si no queda
+    // nada fuera de paréntesis, se conserva el núcleo alfanumérico interior
+    // para no colisionar con cualquier otro título del mismo artista.
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        let ch = deaccent(ch);
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(' ');
+        }
+    }
+    let tokens: Vec<&str> = out.split_whitespace().collect();
+    let cut = tokens
+        .iter()
+        .position(|token| matches!(*token, "feat" | "ft" | "featuring"))
+        .filter(|index| *index > 0)
+        .unwrap_or(tokens.len());
+    tokens[..cut].join(" ")
 }
 
 fn deaccent(ch: char) -> char {
@@ -91,8 +129,8 @@ pub fn fallback_key(artist: &str, title: &str, duration_ms: u64) -> String {
     let seconds = duration_ms / 1000;
     let raw = format!(
         "{}|{}|{}",
-        normalize(artist),
-        normalize(title),
+        normalize_impl(artist, false),
+        normalize_impl(title, false),
         seconds
     );
     format!("sha1:{}", hex_sha1(raw.as_bytes()))
@@ -306,6 +344,20 @@ fn oklab_to_rgb((l, a, b): (f32, f32, f32)) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbolic_titles_keep_their_core() {
+        assert_eq!(normalize("(_8(|) (feat. superreservao)"), "8");
+        assert_eq!(normalize("[_8 [|] [feat. superreservao]"), "8");
+        assert_ne!(
+            fallback_key("Biberon", "(_8(|)", 139_000),
+            fallback_key("Biberon", "Regular", 139_000)
+        );
+        // El matching corta feat.; la clave estable no, para no invalidar
+        // claves antiguas de pistas con colaboraciones.
+        assert_eq!(normalize("Song feat. X"), "song");
+        assert_eq!(normalize_impl("Song feat. X", false), "song feat x");
+    }
 
     #[test]
     fn formats_durations() {

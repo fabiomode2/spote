@@ -142,8 +142,10 @@ impl Library {
         lib.configure()?;
         lib.migrate()?;
         // Limpiezas silenciosas de datos viejos. Si fallan, la biblioteca
-        // sigue funcionando igual.
-        lib.merge_duplicates().ok();
+        // sigue funcionando igual. `merge_duplicates` NO se ejecuta aquí:
+        // dos versiones de estudio/directo con duración parecida podían
+        // fusionarse y perder fuente/letra/historial. Queda como operación
+        // explícita.
         lib.clear_shared_art().ok();
         lib.clear_imported_albums().ok();
         Ok(lib)

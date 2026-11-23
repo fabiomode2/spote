@@ -385,14 +385,24 @@ impl Config {
         let path = config_path();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                let mut cfg: Config = toml::from_str(&text).unwrap_or_else(|err| {
-                    eprintln!("spote: config inválida en {}: {err}", path.display());
-                    Self::default()
-                });
+                let parsed = toml::from_str::<Config>(&text);
+                let mut valid = true;
+                let mut cfg = match parsed {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        valid = false;
+                        eprintln!("spote: config inválida en {}: {err}", path.display());
+                        // Se conserva una copia para que el usuario pueda
+                        // recuperar sus ajustes si el siguiente save() escribe
+                        // los defaults.
+                        let _ = std::fs::copy(&path, path.with_extension("toml.bak"));
+                        Self::default()
+                    }
+                };
                 cfg.audio = cfg.audio.sanitized();
                 // Configs anteriores al rediseño: la rotación venía encendida y
-                // no existía `[ui.layout]`. Se migra una vez, sin tocar el resto.
-                if !text.contains("[ui.layout]") {
+                // no existía `[ui.layout]`. Solo se migra si el TOML era válido.
+                if valid && !text.contains("[ui.layout]") {
                     cfg.ui.layout = LayoutCfg::default();
                     cfg.ui.layout.vcenter = true;
                     cfg.ui.art_rotate = false;

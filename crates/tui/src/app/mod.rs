@@ -387,6 +387,11 @@ pub struct NowPlaying {
     /// de `duration_ms` (la de la pista): un visualizer es más largo, un vídeo
     /// corto es más corto. Se usa para decidir el fin real.
     pub stream_duration_ms: u64,
+    /// Generación de mpv del fichero cargado; sirve para descartar EOF/errores
+    /// de la pista anterior.
+    pub player_entry: i64,
+    /// Hay un loadfile en vuelo: los TimePos/Duration viejos no se aplican.
+    pub awaiting_load: bool,
     pub playing: bool,
     pub volume: f32,
     pub loading: bool,
@@ -407,6 +412,8 @@ impl Default for NowPlaying {
             position_seen_ms: 0,
             position_unknown: false,
             stream_duration_ms: 0,
+            player_entry: 0,
+            awaiting_load: false,
             playing: false,
             volume: 0.0,
             loading: false,
@@ -1618,6 +1625,8 @@ impl App {
         self.streaming = false;
         self.stream_cache_pending = None;
         if let Some(player) = &self.player {
+            self.now.player_entry = 0;
+            self.now.awaiting_load = true;
             player.set_volume(self.now.volume);
             player.set_loop(self.repeat_mode == RepeatMode::One);
             player.load(path.clone(), start_ms as f64 / 1000.0);
@@ -1708,6 +1717,7 @@ impl App {
         self.stream_cache_pending = None;
         // La pista anterior no debe seguir sonando mientras se resuelve.
         if let Some(player) = &self.player {
+            self.now.awaiting_load = true;
             player.set_loop(self.repeat_mode == RepeatMode::One);
             player.stop();
         }
@@ -1816,6 +1826,8 @@ impl App {
                         }
                     }
                     if let Some(player) = &self.player {
+                        self.now.player_entry = 0;
+                        self.now.awaiting_load = true;
                         player.load_url(source.url, start_ms as f64 / 1000.0);
                         if !self.stream_autoplay {
                             player.pause(true);
@@ -2750,27 +2762,40 @@ impl App {
                     })
                     .count()
                     >= 2;
+            // Las captions antiguas pudieron entrar como texto de emergencia
+            // (auto-captions inventadas). Con la política Genius-first se
+            // revalidan una vez por sesión y se sustituyen si hay mejor letra.
+            let stale_captions = row.source.eq_ignore_ascii_case("captions");
+            // Antes Genius se cacheaba como "plain" y no se distinguía de una
+            // letra plana genérica. Se revalida una vez por sesión.
+            let stale_plain = row.source.eq_ignore_ascii_case("plain") && !row.synced;
             self.lyrics_offset_ms = doc.offset_ms;
+            let source_label = doc.source.label().to_string();
             self.lyrics = Some(doc);
             self.lyrics_status = if stale_alignment || broken_sync {
                 "afinando de nuevo…".to_string()
             } else if row.aligned {
                 "asr".to_string()
-            } else if row.synced {
-                "lrclib".to_string()
-            } else {
+            } else if source_label.is_empty() {
                 "aprox".to_string()
+            } else {
+                source_label
             };
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-            if ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
-                && audio.is_some()
+            let needs_audio = ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
+                && audio.is_some();
+            if (needs_audio || stale_captions || stale_plain)
                 && !self.lyrics_retry.contains(&track.key)
             {
                 self.lyrics_retry.insert(track.key.clone());
                 self.lyrics_loading = true;
-                self.lyrics_status = "afinando con el audio…".into();
+                self.lyrics_status = if needs_audio {
+                    "afinando con el audio…".into()
+                } else {
+                    "verificando la letra…".into()
+                };
                 let request_track = self.lyrics_track(&track);
                 self.lyrics_worker.request(
                     request_track,
@@ -2791,6 +2816,7 @@ impl App {
                 if self.lyrics_offset_ms != 0 {
                     doc.offset_ms = self.lyrics_offset_ms;
                 }
+                doc.source = spote_core::lyrics::LyricsSource::Local;
                 self.lyrics = Some(doc);
                 self.lyrics_status = "local".into();
                 self.lyrics_key = track.key.clone();
@@ -2981,6 +3007,7 @@ impl App {
         self.lyrics_loading = false;
         self.lyrics_offset_ms = 0;
         self.lyrics_retry.remove(&track.key);
+        self.lyrics_worker.forget(&track.key);
         self.reset_lyrics_view();
         self.load_lyrics(&track);
         self.toast("caché de letra borrada · buscando de nuevo", ToastKind::Info);
@@ -3346,7 +3373,14 @@ impl App {
         }
         for event in events {
             match event {
+                PlayerEvent::FileLoaded(entry) => {
+                    self.now.player_entry = entry;
+                    self.now.awaiting_load = false;
+                }
                 PlayerEvent::TimePos(position) => {
+                    if self.now.awaiting_load {
+                        continue;
+                    }
                     self.now.position_ms = (position.max(0.0) * 1000.0) as u64;
                     // Anclar aquí, no detectando el cambio en `tick`: así el
                     // interpolador no adelanta un frame el playhead de la letra.
@@ -3397,7 +3431,16 @@ impl App {
                     }
                 }
                 PlayerEvent::Paused(paused) => self.now.playing = !paused,
-                PlayerEvent::Eof => {
+                PlayerEvent::Eof(entry) => {
+                    if self.now.awaiting_load {
+                        continue;
+                    }
+                    if entry != 0
+                        && self.now.player_entry != 0
+                        && entry != self.now.player_entry
+                    {
+                        continue;
+                    }
                     // Un end-file de la pista anterior puede llegar después de
                     // cargar la siguiente. Si la posición actual está lejos
                     // del final lógico/real, el evento es obsoleto.
@@ -3414,7 +3457,14 @@ impl App {
                     }
                     self.auto_next();
                 }
-                PlayerEvent::Error(message) => {
+                PlayerEvent::Error(message, entry) => {
+                    if entry != 0
+                        && self.now.player_entry != 0
+                        && entry != self.now.player_entry
+                    {
+                        continue;
+                    }
+                    self.now.awaiting_load = false;
                     self.toast(format!("mpv: {message}"), ToastKind::Error);
                     // Un error de la URL anterior puede llegar después de
                     // empezar a resolver la siguiente: mientras `loading` esté

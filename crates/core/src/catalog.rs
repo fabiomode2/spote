@@ -339,8 +339,8 @@ pub fn pick_best<'a>(
 
         // Variantes que no son el tema del catálogo: live, remix, cover…
         // Solo penaliza si la pista buscada no es ya de ese tipo.
-        let raw_title = item.title.to_lowercase();
-        let wanted_lower = title.to_lowercase();
+        let raw_title = crate::util::normalize(&item.title);
+        let wanted_lower = crate::util::normalize(title);
         for noise in [
             "live",
             "remix",
@@ -356,7 +356,7 @@ pub fn pick_best<'a>(
             "extended",
             "1 hour",
         ] {
-            if raw_title.contains(noise) && !wanted_lower.contains(noise) {
+            if contains_word(&raw_title, noise) && !contains_word(&wanted_lower, noise) {
                 score -= 25;
             }
         }
@@ -389,43 +389,9 @@ pub fn pick_best<'a>(
 
 /// Minúsculas, sin acentos, sin paréntesis ni "feat.", espacios colapsados.
 fn normalize(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut depth = 0i32;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth > 0 => {}
-            '&' => out.push_str(" and "),
-            _ => out.push(ch),
-        }
-    }
-    // Corta colaboraciones: "feat. X", "ft. X", "with X".
-    let lower = out.to_lowercase();
-    for cut in [" feat. ", " feat ", " ft. ", " ft ", " with "] {
-        if let Some(index) = lower.find(cut) {
-            out.truncate(index);
-            break;
-        }
-    }
-    let mut normalized = String::with_capacity(out.len());
-    for ch in out.chars() {
-        let mapped = match ch {
-            'a'..='z' | '0'..='9' => ch,
-            'A'..='Z' => ch.to_ascii_lowercase(),
-            'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' => 'a',
-            'é' | 'è' | 'ë' | 'ê' => 'e',
-            'í' | 'ì' | 'ï' | 'î' => 'i',
-            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
-            'ú' | 'ù' | 'ü' | 'û' => 'u',
-            'ñ' => 'n',
-            'ç' => 'c',
-            _ => ' ',
-        };
-        normalized.push(mapped);
-    }
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Misma normalización que el resto de spote: conserva el núcleo de
+    // títulos simbólicos como "(_8(|)" y corta colaboraciones.
+    crate::util::normalize(text)
 }
 
 /// Nombres de fichero seguros para la colección.
@@ -436,6 +402,15 @@ pub fn playlist_slug(name: &str) -> String {
     } else {
         slug
     }
+}
+
+/// Palabra/frase completa: "live" no debe activarse dentro de "deliver" ni
+/// "cover" dentro de "discover".
+fn contains_word(text: &str, phrase: &str) -> bool {
+    if text.is_empty() || phrase.is_empty() {
+        return false;
+    }
+    format!(" {text} ").contains(&format!(" {phrase} "))
 }
 
 #[cfg(test)]
@@ -565,6 +540,15 @@ mod tests {
     fn descarta_duraciones_muy_distintas() {
         let items = vec![item("Cancion", "Artista", "Artista - Topic", 400_000)];
         assert!(pick_best(&items, "Artista", "Cancion", 180_000).is_none());
+    }
+
+    #[test]
+    fn noise_detection_uses_whole_words() {
+        assert!(!contains_word("deliver", "live"));
+        assert!(!contains_word("alive", "live"));
+        assert!(!contains_word("discover", "cover"));
+        assert!(contains_word("song live version", "live"));
+        assert!(contains_word("undercover", "cover") == false);
     }
 
     #[test]

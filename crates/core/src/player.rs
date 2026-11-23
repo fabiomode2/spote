@@ -25,15 +25,17 @@ use tokio::time::sleep;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlayerEvent {
-    FileLoaded(String),
+    /// `playlist_entry_id` del fichero que mpv acaba de cargar.
+    FileLoaded(i64),
     TimePos(f64),
     Duration(f64),
     Paused(bool),
     Idle(bool),
     Volume(f64),
     Speed(f64),
-    Eof,
-    Error(String),
+    /// `playlist_entry_id` del fichero que terminó.
+    Eof(i64),
+    Error(String, i64),
     /// mpv ha muerto o se ha perdido el socket.
     Disconnected,
 }
@@ -387,13 +389,21 @@ fn handle_line(line: &str, events: &broadcast::Sender<PlayerEvent>) {
             }
         }
         "file-loaded" => {
-            let _ = events.send(PlayerEvent::FileLoaded(String::new()));
+            let entry = value
+                .get("playlist_entry_id")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let _ = events.send(PlayerEvent::FileLoaded(entry));
         }
         "end-file" => {
             let reason = value.get("reason").and_then(Value::as_str).unwrap_or("");
+            let entry = value
+                .get("playlist_entry_id")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             match reason {
                 "eof" => {
-                    let _ = events.send(PlayerEvent::Eof);
+                    let _ = events.send(PlayerEvent::Eof(entry));
                 }
                 "error" => {
                     let message = value
@@ -401,7 +411,7 @@ fn handle_line(line: &str, events: &broadcast::Sender<PlayerEvent>) {
                         .and_then(Value::as_str)
                         .unwrap_or("mpv no pudo abrir el fichero")
                         .to_string();
-                    let _ = events.send(PlayerEvent::Error(message));
+                    let _ = events.send(PlayerEvent::Error(message, entry));
                 }
                 _ => {}
             }
@@ -470,7 +480,12 @@ mod tests {
         );
         assert_eq!(rx.try_recv().unwrap(), PlayerEvent::Paused(true));
         handle_line(r#"{"event":"end-file","reason":"eof"}"#, &tx);
-        assert_eq!(rx.try_recv().unwrap(), PlayerEvent::Eof);
+        assert_eq!(rx.try_recv().unwrap(), PlayerEvent::Eof(0));
+        handle_line(
+            r#"{"event":"file-loaded","playlist_entry_id":7}"#,
+            &tx,
+        );
+        assert_eq!(rx.try_recv().unwrap(), PlayerEvent::FileLoaded(7));
         handle_line("basura", &tx);
         assert!(rx.try_recv().is_err());
     }

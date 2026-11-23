@@ -353,7 +353,9 @@ impl SharedState {
 
 fn snapshot_diff(old: &MprisSnapshot, new: &MprisSnapshot) -> HashMap<&'static str, OwnedVariant> {
     let mut changed = HashMap::new();
-    if old.playing != new.playing {
+    // `Stopped` no depende solo de `playing`: un cambio de pista con el
+    // reproductor pausado también puede pasar de Stopped a Paused.
+    if old.playback_status() != new.playback_status() {
         changed.insert("PlaybackStatus", owned_str(new.playback_status()));
     }
     if old.repeat != new.repeat {
@@ -847,6 +849,20 @@ mod tests {
 
         snapshot.volume = f32::NAN;
         assert_eq!(snapshot.normalized().volume, 0.0);
+    }
+
+    #[test]
+    fn paused_track_after_stopped_emits_playback_status() {
+        let old = MprisSnapshot::default();
+        let mut next = old.clone();
+        next.title = "Nueva".into();
+        next.track_key = "sha1:nueva".into();
+        next.playing = false;
+        let diff = snapshot_diff(&old, &next);
+        assert_eq!(
+            string(diff.get("PlaybackStatus").unwrap()),
+            "Paused"
+        );
     }
 
     #[test]
