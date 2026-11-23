@@ -115,6 +115,11 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     };
     let clock = clock_now();
     let mut items: Vec<(String, Rgb)> = Vec::new();
+    if app.update_run.is_some() {
+        items.push(("↻ actualizando".into(), pal.warn));
+    } else if app.update_finished == Some(false) {
+        items.push(("↻ actualización falló".into(), pal.error));
+    }
     if let Some(fps) = fps {
         items.push((fps, pal.dim));
     }
@@ -349,21 +354,26 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     for x in rect.x..rect.x + rect.width {
         put(buf, x, rect.y, "─", color(pal.border_dim), None);
     }
-    let art = Rect::new(rect.x + 2, rect.y, 4, rect.height);
+    let art = Rect::new(
+        rect.x + rect.width.saturating_sub(6),
+        rect.y,
+        4,
+        rect.height,
+    );
+    let right = rect.x + rect.width.saturating_sub(2);
     let Some(track) = app.now.track.clone() else {
         text_at(
             buf,
-            Rect::new(art.x + 5, rect.y, rect.width.saturating_sub(8), rect.height),
+            Rect::new(rect.x + 2, rect.y, right.saturating_sub(rect.x + 2), rect.height),
             "nada sonando · enter reproduce lo seleccionado",
             Style::new().fg(color(pal.dim)),
-            Alignment::Left,
+            Alignment::Right,
         );
         app.hit.add(rect, Action::Tab(Tab::Now));
         return;
     };
     draw_thumb(app, buf, art, &track, pal);
-    let text_x = art.x + art.width + 2;
-    let right = rect.x + rect.width.saturating_sub(2);
+    let text_right = art.x.saturating_sub(2);
     let status = if rect.width < 72 {
         String::new()
     } else if app.now.loading {
@@ -374,16 +384,26 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
             format_ms(app.display_position_ms()),
             format_ms(app.now.duration_ms)
         )
-    } else if app.now.track.is_some() {
+    } else {
         format!(
             "⏸ {} / {}",
             format_ms(app.now.position_ms),
             format_ms(app.now.duration_ms)
         )
-    } else {
-        String::new()
     };
-    let status_w = status.chars().count() as u16;
+    // La canción actual vive en el extremo derecho, con la portada pegada al
+    // borde. El estado de reproducción queda a la izquierda para no competir
+    // con el título.
+    if !status.is_empty() {
+        let status_w = status.chars().count() as u16;
+        text_at(
+            buf,
+            Rect::new(rect.x + 3, rect.y, status_w.min(rect.width), 1),
+            status,
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+    }
     let favorite = app
         .lib
         .track_by_key(&track.key)
@@ -391,64 +411,57 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         .flatten()
         .map(|row| row.favorite)
         .unwrap_or(false);
-    let fav_w = 3u16;
-    let reserve = status_w + fav_w + 4;
-    let title_w = (right.saturating_sub(text_x + reserve)) as usize;
+    let heart = if favorite { "✓" } else { "♡" };
+    put(
+        buf,
+        text_right,
+        rect.y,
+        heart,
+        color(if favorite { pal.ok } else { pal.muted }),
+        None,
+    );
+    app.hit.add(
+        Rect::new(text_right.saturating_sub(1), rect.y, 3, rect.height),
+        Action::FavoriteNow,
+    );
+    let text_w = text_right.saturating_sub(rect.x + 2).saturating_sub(2);
+    let title_right = text_right.saturating_sub(2);
     let mut title = track.title.clone();
-    truncate_chars(&mut title, title_w);
-    put(buf, text_x, rect.y, &title, color(pal.text), None);
-    let artist_hit_w = (track.artist.chars().count() as u16).min(title_w as u16);
+    truncate_chars(&mut title, text_w as usize);
+    let title_x = title_right.saturating_sub(title.chars().count() as u16);
+    put(buf, title_x, rect.y, &title, color(pal.text), None);
     let meta = match track.album.as_deref().filter(|album| !album.is_empty()) {
         Some(album) => format!("{}  ·  {}", track.artist, album),
         None => track.artist.clone(),
     };
     let mut meta = meta;
-    truncate_chars(&mut meta, title_w);
+    truncate_chars(&mut meta, text_w as usize);
+    let meta_x = title_right.saturating_sub(meta.chars().count() as u16);
     put(
         buf,
-        text_x,
+        meta_x,
         rect.y + 1,
         &meta,
         color(pal.secondary),
         None,
     );
-    let fav_x = right.saturating_sub(status_w + fav_w + 1);
-    put(
-        buf,
-        fav_x,
-        rect.y,
-        if favorite { "✓" } else { "♡" },
-        color(if favorite { pal.ok } else { pal.muted }),
-        None,
-    );
-    app.hit.add(
-        Rect::new(fav_x.saturating_sub(1), rect.y, 3, rect.height),
-        Action::FavoriteNow,
-    );
-    if status_w > 0 && right > status_w {
-        text_at(
-            buf,
-            Rect::new(right - status_w, rect.y, status_w, 1),
-            status,
-            Style::new().fg(color(pal.dim)),
-            Alignment::Right,
-        );
-    }
     app.hit.add(rect, Action::Tab(Tab::Now));
-    if artist_hit_w > 1 {
+    let artist_w = (track.artist.chars().count() as u16).min(text_w);
+    if artist_w > 1 {
+        let artist_x = meta_x.min(title_right.saturating_sub(artist_w));
         app.hit.add(
-            Rect::new(text_x, rect.y + 1, artist_hit_w, 1),
+            Rect::new(artist_x, rect.y + 1, artist_w, 1),
             Action::OpenArtist(track.artist.clone()),
         );
-    }
-    if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
-        let album_x = text_x + artist_hit_w + 5;
-        let album_w = (text_x + title_w as u16).saturating_sub(album_x);
-        if album_w > 2 {
-            app.hit.add(
-                Rect::new(album_x, rect.y + 1, album_w, 1),
-                Action::OpenAlbum(album.to_string(), track.artist.clone()),
-            );
+        if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
+            let album_x = artist_x + artist_w + 5;
+            let album_w = title_right.saturating_sub(album_x);
+            if album_w > 2 {
+                app.hit.add(
+                    Rect::new(album_x, rect.y + 1, album_w, 1),
+                    Action::OpenAlbum(album.to_string(), track.artist.clone()),
+                );
+            }
         }
     }
 }
@@ -1063,7 +1076,15 @@ pub(super) fn draw_progress_bar(
 pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.hint;
     fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
-    let right_text = if let Some(download) = app.downloads.iter().find(|info| info.active()) {
+    let right_text = if app.update_run.is_some() {
+        let secs = app
+            .update_started
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        format!("↻ actualizando spote… {secs}s · no cierres")
+    } else if app.update_finished == Some(false) {
+        "↻ actualización fallida · esc para cerrar".to_string()
+    } else if let Some(download) = app.downloads.iter().find(|info| info.active()) {
         format!("↓ {:.0}% · {}", download.percent, download.stage)
     } else if app.pending_play.is_some() {
         "descargando…".to_string()

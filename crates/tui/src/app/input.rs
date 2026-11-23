@@ -14,6 +14,13 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // Salida de emergencia: aunque un overlay se atasque o falte su
+        // contenido, ctrl-c siempre cierra la app.
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.persist_volume();
+            self.should_quit = true;
+            return;
+        }
         if self.overlay != Overlay::None {
             self.handle_overlay_key(key);
             return;

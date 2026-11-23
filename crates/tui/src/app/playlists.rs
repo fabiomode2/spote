@@ -14,7 +14,12 @@ impl App {
                 self.handle_album_key(key);
             }
             Overlay::Update => match key.code {
-                KeyCode::Enter | KeyCode::Char('u') => self.start_update(),
+                KeyCode::Enter | KeyCode::Char('u') => {
+                    if self.update_run.is_none() {
+                        self.update_finished = None;
+                        self.start_update();
+                    }
+                }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
                     self.update_dismissed = true;
                     self.overlay = Overlay::None;

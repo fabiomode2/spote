@@ -3,6 +3,16 @@ use super::*;
 
 pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let overlay = app.overlay.clone();
+    // Un modal sin datos dejaría el velo negro y capturaría el teclado: si el
+    // álbum/artista desapareció, se cierra solo en vez de bloquear la app.
+    if matches!(overlay, Overlay::Album) && app.album_page.is_none() {
+        app.overlay = Overlay::None;
+        return;
+    }
+    if matches!(overlay, Overlay::Artist) && app.artist.is_none() && !app.artist_loading {
+        app.overlay = Overlay::None;
+        return;
+    }
     if overlay != Overlay::None {
         // Velo de fondo sólido: los overlays antiguos dejaban traslucir la
         // lista de debajo en terminales con celdas de fondo incompletas.
@@ -1014,7 +1024,7 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
 /// Aviso de versión nueva. Si el usuario acepta, el actualizador corre en
 /// segundo plano; aquí solo se explica qué va a pasar.
 fn draw_update(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
-    let rect = overlay_frame(layout, pal, buf, 66, 11, "actualización");
+    let rect = overlay_frame(layout, pal, buf, 68, 12, "actualización");
     let inner = inset(rect, 3, 2);
     let local = crate::version::LOCAL_SHA;
     let latest = app
@@ -1022,11 +1032,22 @@ fn draw_update(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
         .as_ref()
         .map(|info| info.latest.chars().take(12).collect::<String>())
         .unwrap_or_default();
+    let running = app.update_run.is_some();
+    let failed = app.update_finished == Some(false);
+    let title = if running {
+        "actualizando spote…"
+    } else if failed {
+        "la actualización falló"
+    } else {
+        "hay una versión nueva en github"
+    };
     text_at(
         buf,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        "hay una versión nueva en github",
-        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        title,
+        Style::new()
+            .fg(color(if failed { pal.error } else { pal.text }))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     text_at(
@@ -1043,20 +1064,49 @@ fn draw_update(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) 
         Style::new().fg(color(pal.text)),
         Alignment::Left,
     );
-    let message = if app.update_run.is_some() {
-        "actualizando… la app se cerrará al terminar"
+    if running {
+        let secs = app
+            .update_started
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+        let spin = frames[(app.viz.time * 10.0) as usize % frames.len()];
+        text_at(
+            buf,
+            Rect::new(inner.x, inner.y + 5, inner.width, 1),
+            format!("{spin} descargando, compilando e instalando… {secs}s"),
+            Style::new().fg(color(pal.warn)),
+            Alignment::Left,
+        );
+        text_at(
+            buf,
+            Rect::new(inner.x, inner.y + 6, inner.width, 1),
+            "puedes seguir usando spote; se cerrará solo al terminar",
+            Style::new().fg(color(pal.dim)),
+            Alignment::Left,
+        );
+    } else if failed {
+        text_at(
+            buf,
+            Rect::new(inner.x, inner.y + 5, inner.width, 1),
+            "revisa ~/.cache/spote/update.log",
+            Style::new().fg(color(pal.error)),
+            Alignment::Left,
+        );
+        text_at(
+            buf,
+            Rect::new(inner.x, inner.y + 6, inner.width, 1),
+            "enter reintentar  ·  esc cerrar",
+            Style::new().fg(color(pal.primary)),
+            Alignment::Left,
+        );
     } else {
-        "enter actualizar  ·  esc luego"
-    };
-    text_at(
-        buf,
-        Rect::new(inner.x, inner.y + 6, inner.width, 1),
-        message,
-        Style::new().fg(color(if app.update_run.is_some() {
-            pal.warn
-        } else {
-            pal.primary
-        })),
-        Alignment::Left,
-    );
+        text_at(
+            buf,
+            Rect::new(inner.x, inner.y + 6, inner.width, 1),
+            "enter actualizar  ·  esc luego",
+            Style::new().fg(color(pal.primary)),
+            Alignment::Left,
+        );
+    }
 }

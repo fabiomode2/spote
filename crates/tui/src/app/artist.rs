@@ -14,6 +14,7 @@ impl App {
         self.artist_selected = 0;
         self.artist_loading = true;
         self.artist_status = format!("buscando {name}…");
+        self.artist_request = name.clone();
         self.detail = Some(Detail::Artist);
         self.artist_album_scroll = 0;
         self.overlay = Overlay::None;
@@ -27,6 +28,7 @@ impl App {
         self.artist_selected = 0;
         self.artist_loading = true;
         self.artist_status = format!("buscando {}…", artist.name);
+        self.artist_request = artist.name.clone();
         self.detail = Some(Detail::Artist);
         self.artist_album_scroll = 0;
         self.overlay = Overlay::None;
@@ -91,6 +93,7 @@ impl App {
         self.artist_selected = 0;
         self.artist_loading = true;
         self.artist_status = format!("buscando {name}…");
+        self.artist_request = name.clone();
         self.detail = Some(Detail::Artist);
         self.artist_album_scroll = 0;
         self.overlay = Overlay::None;
@@ -163,6 +166,7 @@ impl App {
     /// Cierra el panel persistente de detalle sin tocar la pestaña actual.
     pub fn close_detail(&mut self) {
         self.detail = None;
+        self.overlay = Overlay::None;
         self.detail_albums_area = Rect::default();
         self.album_page = None;
         self.album_page_loading = false;

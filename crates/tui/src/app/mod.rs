@@ -928,6 +928,8 @@ pub struct App {
     pub artist_loading: bool,
     pub artist_selected: usize,
     pub artist_status: String,
+    /// Nombre que se está pidiendo; las respuestas de otro artista se ignoran.
+    pub artist_request: String,
     /// Desplazamiento horizontal de la discografía del artista.
     pub artist_album_scroll: usize,
     /// Tarjetas de álbum que caben en el panel; lo fija el dibujo.
@@ -1025,6 +1027,7 @@ pub struct App {
     pub update_info: Option<crate::version::UpdateInfo>,
     /// Actualizador en marcha: `true` si terminó bien.
     pub update_run: Option<std::sync::mpsc::Receiver<bool>>,
+    pub update_started: Option<Instant>,
     pub update_dismissed: bool,
     pub update_finished: Option<bool>,
 
@@ -1204,6 +1207,7 @@ impl App {
             artist_loading: false,
             artist_selected: 0,
             artist_status: String::new(),
+            artist_request: String::new(),
             artist_album_scroll: 0,
             detail_album_visible: 1,
             detail_albums_area: Rect::default(),
@@ -1278,6 +1282,7 @@ impl App {
             update_check: crate::version::spawn_check(),
             update_info: None,
             update_run: None,
+            update_started: None,
             update_dismissed: false,
             update_finished: None,
             lyrics: None,
@@ -2103,7 +2108,9 @@ impl App {
         match crate::version::spawn_update() {
             Some(rx) => {
                 self.update_run = Some(rx);
-                self.overlay = Overlay::None;
+                self.update_started = Some(Instant::now());
+                self.update_finished = None;
+                self.overlay = Overlay::Update;
                 self.set_status("actualizando spote… se cerrará al terminar");
             }
             None => {
@@ -3209,13 +3216,19 @@ impl App {
                     if ok {
                         self.should_quit = true;
                     } else {
+                        self.update_started = None;
+                        self.overlay = Overlay::Update;
                         self.toast(
                             "la actualización falló; mira ~/.cache/spote/update.log",
                             ToastKind::Error,
                         );
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_run = None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.update_run = None;
+                    self.update_started = None;
+                    self.update_finished = Some(false);
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
@@ -3825,6 +3838,13 @@ impl App {
         while let Some(event) = self.meta_worker.try_recv() {
             match event {
                 MetaEvent::Artist { name, result } => {
+                    // Una respuesta lenta del artista anterior no debe pintarse
+                    // como si fuera el nuevo: eso mezclaba discografías enteras.
+                    if !self.artist_request.is_empty()
+                        && util::normalize(&name) != util::normalize(&self.artist_request)
+                    {
+                        continue;
+                    }
                     if self.artist_loading {
                         self.artist_loading = false;
                     }
@@ -3870,7 +3890,6 @@ impl App {
                         match result {
                             Ok(info) => {
                                 self.open_album_info(info);
-                                self.overlay = Overlay::Album;
                             }
                             Err(err) => {
                                 self.album_page_status = format!("álbum: {err}");
@@ -3896,7 +3915,6 @@ impl App {
                         match result {
                             Ok(info) => {
                                 self.open_album_info(info);
-                                self.overlay = Overlay::Album;
                             }
                             Err(err) => {
                                 self.album_page_status = format!("álbum: {err}");

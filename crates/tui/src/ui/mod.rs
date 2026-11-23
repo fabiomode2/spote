@@ -543,10 +543,21 @@ fn draw_mosaic_cover(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette)
         return;
     }
     let speed = app.cfg.ui.fx.mosaic_speed.clamp(1, 10) as f32 * 0.11;
-    let t = app.mosaic_time * speed;
+    // El mosaico mueve todas las celdas de la pantalla. A 60 fps eso es un
+    // repintado completo constante y algunos terminales parpadean; se avanza
+    // en pasos de ~15 fps, que sigue viéndose fluido y reduce muchísimo el
+    // tráfico por frame.
+    let step = 1.0 / 15.0;
+    let t = ((app.mosaic_time / step).floor() * step) * speed;
     let motion = app.cfg.ui.fx.mosaic_motion.as_str();
-    let beat = if app.cfg.ui.fx.mosaic_beat {
-        app.audio.kick_pulse.clamp(0.0, 1.0)
+    let beat: f32 = if app.cfg.ui.fx.mosaic_beat {
+        // Salto binario al bombo: mantenerlo estable entre frames evita que
+        // todo el fondo cambie de color cada 16 ms.
+        if app.audio.kick_pulse > 0.65 {
+            1.0
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
