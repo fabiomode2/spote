@@ -10,7 +10,7 @@ MPRIS, SQLite) vive en un worker.
 | --- | --- |
 | `crates/protocol` | tipos compartidos (`TrackRef`, salas, cola). Sin I/O. |
 | `crates/core` | biblioteca SQLite, descargas, catálogo, letras, MPRIS, arte, resolución de streaming y política de cola. |
-| `crates/server` | `spoted`: presencia, salas y cola ordenada por servidor. |
+| `crates/server` | `spoted`: presencia, salas, cola ordenada por servidor y sync de biblioteca por cuenta. API cerrada por clave de cliente, sesiones hasheadas y caducables. |
 | `crates/tui` | binario `spote`: estado de la app y dibujo en el terminal. |
 | `crates/mini` | binario `spote-mini`: ventana egui opcional, cliente del socket NDJSON de la TUI. |
 

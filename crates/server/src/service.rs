@@ -17,6 +17,13 @@ pub const START_DELAY_MS: i64 = 800;
 pub const MAX_CHAT_CHARS: usize = 2_000;
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_ROOM_NAME_CHARS: usize = 48;
+pub const MAX_TRACK_KEY_CHARS: usize = 256;
+pub const MAX_TRACK_TITLE_CHARS: usize = 512;
+pub const MAX_TRACK_ARTIST_CHARS: usize = 256;
+pub const MAX_TRACK_ALBUM_CHARS: usize = 256;
+pub const MAX_TRACK_URL_CHARS: usize = 2_048;
+pub const MAX_SOURCE_ID_CHARS: usize = 256;
+pub const MAX_TRACK_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 /// Chat que se manda al entrar en una sala.
 pub const CHAT_HISTORY_LIMIT: u32 = 50;
 
@@ -44,19 +51,18 @@ pub enum ReadyOutcome {
 // Auth y usuarios
 // ---------------------------------------------------------------------------
 
-pub fn login(state: &AppState, req: &LoginRequest) -> Result<LoginResponse, AppError> {
-    if req.invite.trim() != state.config.invite {
-        return Err(AppError::Unauthorized("invalid invite".to_string()));
+pub fn login(
+    state: &AppState,
+    req: &LoginRequest,
+    client_key_fp: &str,
+) -> Result<LoginResponse, AppError> {
+    if !state.config.verify_invite(&req.invite) {
+        return Err(AppError::Unauthorized("login rejected".to_string()));
     }
-    let name = req.name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("name required".to_string()));
-    }
-    if name.chars().count() > MAX_NAME_CHARS {
-        return Err(AppError::BadRequest("name too long".to_string()));
-    }
+    let name = validate_text("name", &req.name, MAX_NAME_CHARS)?;
 
-    let (user, token, invite) = state.db.login(name, &state.config.invite)?;
+    let expires_at = now_ms() + state.config.session_days * 24 * 60 * 60 * 1_000;
+    let (user, token) = state.db.login(name, client_key_fp, expires_at)?;
     // Presencia conocida (offline si nunca se conectó) para /users.
     let presence = state
         .db
@@ -68,11 +74,15 @@ pub fn login(state: &AppState, req: &LoginRequest) -> Result<LoginResponse, AppE
             now_playing: None,
         });
     state.hub.ensure_presence(presence);
-    tracing::info!(user = %user.name, "login");
+    let client = state
+        .config
+        .client_key_label(client_key_fp)
+        .unwrap_or("unknown");
+    tracing::info!(user = %user.name, client = %client, "login");
     Ok(LoginResponse {
         token,
         user,
-        invite,
+        invite: String::new(),
     })
 }
 
@@ -109,6 +119,9 @@ pub fn touch_presence(
     playing: bool,
     immediate: bool,
 ) -> Result<(), AppError> {
+    if let Some(track) = &now_playing {
+        validate_track(track)?;
+    }
     let presence = Presence {
         user: user.clone(),
         online: true,
@@ -130,13 +143,7 @@ pub fn create_room(
     host: &User,
     req: &CreateRoomRequest,
 ) -> Result<Room, AppError> {
-    let name = req.name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("room name required".to_string()));
-    }
-    if name.chars().count() > MAX_ROOM_NAME_CHARS {
-        return Err(AppError::BadRequest("room name too long".to_string()));
-    }
+    let name = validate_text("room name", &req.name, MAX_ROOM_NAME_CHARS)?;
     let room = state.db.create_room(name, req.is_public, &host.id)?;
     tracing::info!(room = %room.id, name = %room.name, host = %host.name, "sala creada");
     Ok(room)
@@ -152,14 +159,82 @@ pub fn room(state: &AppState, user_id: &str, room_id: &str) -> Result<Room, AppE
         .db
         .room(room_id)?
         .ok_or_else(|| AppError::NotFound("room not found".to_string()))?;
-    if !room.is_public && !state.db.is_member(room_id, user_id)? {
+    if !room.is_public && room.host_id != user_id && !state.db.is_member(room_id, user_id)? {
         return Err(AppError::Forbidden("room is private".to_string()));
     }
     Ok(room)
 }
 
 pub fn join_room(state: &AppState, user: &User, room_id: &str) -> Result<Room, AppError> {
+    let existing = state
+        .db
+        .room(room_id)?
+        .ok_or_else(|| AppError::NotFound("room not found".to_string()))?;
+    if !existing.is_public
+        && existing.host_id != user.id
+        && !state.db.is_member(room_id, &user.id)?
+    {
+        return Err(AppError::Forbidden("room is private".to_string()));
+    }
     let room = state.db.join_room(room_id, &user.id)?;
+    broadcast_room_state(state, &room);
+    Ok(room)
+}
+
+/// Añade a un usuario a una sala privada. Solo el host puede hacerlo.
+pub fn add_member(
+    state: &AppState,
+    host_id: &str,
+    room_id: &str,
+    target_id: &str,
+) -> Result<Room, AppError> {
+    let room = state
+        .db
+        .room(room_id)?
+        .ok_or_else(|| AppError::NotFound("room not found".to_string()))?;
+    if room.host_id != host_id {
+        return Err(AppError::Forbidden(
+            "only the host can add members".to_string(),
+        ));
+    }
+    if target_id == host_id {
+        return Err(AppError::BadRequest("host is already a member".to_string()));
+    }
+    if state.db.user_by_id(target_id)?.is_none() {
+        return Err(AppError::NotFound("user not found".to_string()));
+    }
+    let room = state.db.join_room(room_id, target_id)?;
+    broadcast_room_state(state, &room);
+    Ok(room)
+}
+
+/// Expulsa a un miembro. Solo el host puede hacerlo.
+pub fn kick_member(
+    state: &AppState,
+    host_id: &str,
+    room_id: &str,
+    target_id: &str,
+) -> Result<Room, AppError> {
+    let room = state
+        .db
+        .room(room_id)?
+        .ok_or_else(|| AppError::NotFound("room not found".to_string()))?;
+    if room.host_id != host_id {
+        return Err(AppError::Forbidden(
+            "only the host can kick members".to_string(),
+        ));
+    }
+    if target_id == host_id {
+        return Err(AppError::BadRequest("host cannot kick itself".to_string()));
+    }
+    if !state.db.kick_member(room_id, target_id)? {
+        return Err(AppError::NotFound("member not found".to_string()));
+    }
+    state.hub.evict_user_from_room(target_id, room_id);
+    let room = state
+        .db
+        .room(room_id)?
+        .ok_or_else(|| AppError::NotFound("room not found".to_string()))?;
     broadcast_room_state(state, &room);
     Ok(room)
 }
@@ -315,9 +390,7 @@ pub fn queue_add(
     track: TrackRef,
 ) -> Result<QueueItem, AppError> {
     ensure_member(state, room_id, user_id)?;
-    if track.key.trim().is_empty() {
-        return Err(AppError::BadRequest("track.key required".to_string()));
-    }
+    validate_track(&track)?;
     let item = state.db.queue_add(room_id, &track, user_id)?;
     broadcast_queue(state, room_id)?;
     Ok(item)
@@ -330,6 +403,19 @@ pub fn queue_remove(
     item_id: &str,
 ) -> Result<Vec<QueueItem>, AppError> {
     ensure_member(state, room_id, user_id)?;
+    let added_by = state
+        .db
+        .queue_item_added_by(room_id, item_id)?
+        .ok_or_else(|| AppError::NotFound("queue item not found".to_string()))?;
+    let room = state
+        .db
+        .room(room_id)?
+        .ok_or_else(|| AppError::NotFound("room not found".to_string()))?;
+    if added_by != user_id && room.host_id != user_id {
+        return Err(AppError::Forbidden(
+            "only the owner or the host can remove this item".to_string(),
+        ));
+    }
     if !state.db.queue_remove(room_id, item_id)? {
         return Err(AppError::NotFound("queue item not found".to_string()));
     }
@@ -475,16 +561,104 @@ pub fn chat_add(
     text: &str,
 ) -> Result<ChatMsg, AppError> {
     ensure_member(state, room_id, &user.id)?;
-    let text = text.trim();
-    if text.is_empty() {
-        return Err(AppError::BadRequest("empty message".to_string()));
-    }
-    if text.chars().count() > MAX_CHAT_CHARS {
-        return Err(AppError::BadRequest("message too long".to_string()));
-    }
+    let text = validate_text("message", text, MAX_CHAT_CHARS)?;
     let msg = state.db.chat_add(room_id, user, text)?;
     state
         .hub
         .broadcast_room(room_id, ServerMsg::Chat { msg: msg.clone() });
     Ok(msg)
+}
+
+// ---------------------------------------------------------------------------
+// Validación de texto de usuario
+// ---------------------------------------------------------------------------
+
+/// Recorta, limita y rechaza caracteres de control.
+///
+/// Los mensajes acaban en una terminal: un `\x1b]52;…` o un `\r` pueden cambiar
+/// el portapapeles o reescribir la interfaz. Se rechazan en la puerta.
+pub(crate) fn validate_text<'a>(
+    field: &str,
+    value: &'a str,
+    max_chars: usize,
+) -> Result<&'a str, AppError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(AppError::BadRequest(format!("{field} required")));
+    }
+    if value.chars().count() > max_chars {
+        return Err(AppError::BadRequest(format!("{field} too long")));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(format!(
+            "{field} contains control characters"
+        )));
+    }
+    Ok(value)
+}
+
+pub(crate) fn validate_optional_text(
+    field: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<(), AppError> {
+    if let Some(value) = value {
+        if value.is_empty() {
+            return Ok(());
+        }
+        if value.chars().count() > max_chars {
+            return Err(AppError::BadRequest(format!("{field} too long")));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(AppError::BadRequest(format!(
+                "{field} contains control characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_track(track: &TrackRef) -> Result<(), AppError> {
+    validate_text("track.key", &track.key, MAX_TRACK_KEY_CHARS)?;
+    validate_optional_text("track.title", Some(&track.title), MAX_TRACK_TITLE_CHARS)?;
+    validate_optional_text("track.artist", Some(&track.artist), MAX_TRACK_ARTIST_CHARS)?;
+    validate_optional_text("track.album", track.album.as_deref(), MAX_TRACK_ALBUM_CHARS)?;
+
+    if track.duration_ms > MAX_TRACK_DURATION_MS {
+        return Err(AppError::BadRequest(
+            "track.duration_ms too large".to_string(),
+        ));
+    }
+    validate_optional_url(
+        "track.art_url",
+        track.art_url.as_deref(),
+        MAX_TRACK_URL_CHARS,
+    )?;
+    if let Some(hint) = &track.source_hint {
+        validate_text("source_hint.provider", &hint.provider, 64)?;
+        validate_text("source_hint.id", &hint.id, MAX_SOURCE_ID_CHARS)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_optional_url(
+    field: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<(), AppError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.chars().count() > max_chars {
+        return Err(AppError::BadRequest(format!("{field} too long")));
+    }
+    if !(value.starts_with("https://") || value.starts_with("http://")) {
+        return Err(AppError::BadRequest(format!("{field} must be http(s)")));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(AppError::BadRequest(format!(
+            "{field} contains control characters"
+        )));
+    }
+    Ok(())
 }

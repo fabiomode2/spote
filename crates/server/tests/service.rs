@@ -6,24 +6,40 @@ use spote_protocol::{
 };
 use spote_server::{config::Config, service, service::ReadyOutcome, state::AppState};
 
+const INVITE: &str = "test-invite-0123456789abcdef";
+const KEY_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+const KEY_B: &str = "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1";
+
 fn test_state(dir: &tempfile::TempDir) -> AppState {
-    let config = Config {
-        bind: "127.0.0.1:0".parse().expect("addr válida"),
-        db_path: dir.path().join("service-test.db"),
-        invite: "spote".to_string(),
-    };
+    let config = Config::from_lookup(|key| match key {
+        "SPOTE_INVITE" => Some(INVITE.to_string()),
+        "SPOTE_CLIENT_KEYS" => Some(format!("ana:{KEY_A},bea:{KEY_B}")),
+        "SPOTE_DB" => Some(dir.path().join("service-test.db").display().to_string()),
+        "SPOTE_BIND" => Some("127.0.0.1:0".to_string()),
+        _ => None,
+    })
+    .expect("config de test");
     AppState::new(config).expect("estado")
 }
 
-fn login(state: &AppState, name: &str) -> LoginResponse {
+fn login_with(state: &AppState, name: &str, key: &str) -> LoginResponse {
+    let fp = state
+        .config
+        .client_key_fingerprint(key)
+        .expect("clave de test válida");
     service::login(
         state,
         &LoginRequest {
             name: name.to_string(),
-            invite: "spote".to_string(),
+            invite: INVITE.to_string(),
         },
+        &fp,
     )
     .expect("login")
+}
+
+fn login(state: &AppState, name: &str) -> LoginResponse {
+    login_with(state, name, KEY_A)
 }
 
 fn control(
@@ -54,15 +70,16 @@ fn login_creates_user_and_is_idempotent_by_name() {
     assert_eq!(first.user.name, "ana");
     assert!(!first.user.id.is_empty());
     assert!(!first.token.is_empty());
-    assert_eq!(first.invite, "spote");
+    assert!(first.invite.is_empty(), "la invitación no se devuelve");
 
     let second = login(&state, "ana");
     assert_eq!(first.user.id, second.user.id, "mismo usuario por nombre");
     assert_ne!(first.token, second.token, "token nuevo en cada login");
 
+    let fp = state.config.client_key_fingerprint(KEY_A).expect("huella");
     let resolved = state
         .db
-        .user_by_token(&second.token)
+        .user_by_token(&second.token, &fp)
         .expect("consulta")
         .expect("sesión válida");
     assert_eq!(resolved.id, first.user.id);
@@ -72,16 +89,18 @@ fn login_creates_user_and_is_idempotent_by_name() {
 }
 
 #[test]
-fn login_rejects_bad_invite_and_empty_name() {
+fn login_rejects_bad_invite_empty_name_and_other_client_key() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = test_state(&dir);
+    let fp = state.config.client_key_fingerprint(KEY_A).expect("huella");
 
     let bad_invite = service::login(
         &state,
         &LoginRequest {
             name: "ana".to_string(),
-            invite: "otra".to_string(),
+            invite: "otra-invitacion-larga".to_string(),
         },
+        &fp,
     )
     .expect_err("invite inválida");
     assert_eq!(bad_invite.status(), StatusCode::UNAUTHORIZED);
@@ -90,11 +109,128 @@ fn login_rejects_bad_invite_and_empty_name() {
         &state,
         &LoginRequest {
             name: "   ".to_string(),
-            invite: "spote".to_string(),
+            invite: INVITE.to_string(),
         },
+        &fp,
     )
     .expect_err("nombre vacío");
     assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let control_char = service::login(
+        &state,
+        &LoginRequest {
+            name: "ana\r\x1b]0;pwned".to_string(),
+            invite: INVITE.to_string(),
+        },
+        &fp,
+    )
+    .expect_err("caracteres de control");
+    assert_eq!(control_char.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn a_name_cannot_be_reclaimed_with_another_client_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let fp_a = state
+        .config
+        .client_key_fingerprint(KEY_A)
+        .expect("huella A");
+    let fp_b = state
+        .config
+        .client_key_fingerprint(KEY_B)
+        .expect("huella B");
+
+    let first = service::login(
+        &state,
+        &LoginRequest {
+            name: "ana".to_string(),
+            invite: INVITE.to_string(),
+        },
+        &fp_a,
+    )
+    .expect("login A");
+
+    let rejected = service::login(
+        &state,
+        &LoginRequest {
+            name: "ana".to_string(),
+            invite: INVITE.to_string(),
+        },
+        &fp_b,
+    )
+    .expect_err("otra clave no puede usar el nombre");
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_session = state
+        .db
+        .user_by_token(&first.token, &fp_b)
+        .expect("consulta");
+    assert!(wrong_session.is_none(), "el token está atado a la clave");
+}
+
+#[test]
+fn chat_and_track_metadata_reject_terminal_control_characters() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let host = login(&state, "ana").user;
+    let room = service::create_room(
+        &state,
+        &host,
+        &CreateRoomRequest {
+            name: "chat".to_string(),
+            is_public: true,
+        },
+    )
+    .expect("crear sala");
+
+    let escape = service::chat_add(&state, &host, &room.id, "hola\x1b]52;c;cHduZWQ=\x07");
+    assert_eq!(escape.expect_err("ANSI").status(), StatusCode::BAD_REQUEST);
+    let ok = service::chat_add(&state, &host, &room.id, "hola").expect("chat");
+    assert_eq!(ok.text, "hola");
+
+    let bad_url = service::queue_add(
+        &state,
+        &host.id,
+        &room.id,
+        TrackRef {
+            key: "isrc:X".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            art_url: Some("javascript:alert(1)".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(bad_url.expect_err("url").status(), StatusCode::BAD_REQUEST);
+
+    let bad_title = service::queue_add(
+        &state,
+        &host.id,
+        &room.id,
+        TrackRef {
+            key: "isrc:X".into(),
+            title: "T\r\nX".into(),
+            artist: "A".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        bad_title.expect_err("título").status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[test]
+fn expired_sessions_are_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let fp = state.config.client_key_fingerprint(KEY_A).expect("huella");
+    let (_, token) = state
+        .db
+        .login("ana", &fp, service::now_ms() - 1)
+        .expect("login caducado");
+    let resolved = state.db.user_by_token(&token, &fp).expect("consulta");
+    assert!(resolved.is_none());
 }
 
 #[test]
@@ -225,6 +361,61 @@ fn queue_add_and_remove_compact_positions() {
 
     let missing = service::queue_remove(&state, &host.id, &room.id, &b.id);
     assert!(missing.is_err(), "quitar dos veces el mismo item falla");
+}
+
+#[test]
+fn queue_remove_only_allows_owner_or_host() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let host = login(&state, "ana").user;
+    let guest = login(&state, "bea").user;
+    let room = service::create_room(
+        &state,
+        &host,
+        &CreateRoomRequest {
+            name: "cola".to_string(),
+            is_public: true,
+        },
+    )
+    .expect("crear sala");
+    service::join_room(&state, &guest, &room.id).expect("join");
+
+    let item =
+        service::queue_add(&state, &host.id, &room.id, TrackRef::new("a", "A", "X")).expect("add");
+    let denied = service::queue_remove(&state, &guest.id, &room.id, &item.id);
+    assert_eq!(
+        denied.expect_err("guest no puede").status(),
+        StatusCode::FORBIDDEN
+    );
+    let allowed = service::queue_remove(&state, &host.id, &room.id, &item.id).expect("host");
+    assert!(allowed.is_empty());
+}
+
+#[test]
+fn private_rooms_reject_outsiders() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let host = login(&state, "ana").user;
+    let guest = login(&state, "bea").user;
+    let room = service::create_room(
+        &state,
+        &host,
+        &CreateRoomRequest {
+            name: "privada".to_string(),
+            is_public: false,
+        },
+    )
+    .expect("crear sala");
+
+    let denied = service::join_room(&state, &guest, &room.id);
+    assert_eq!(denied.expect_err("privada").status(), StatusCode::FORBIDDEN);
+
+    let added = service::add_member(&state, &host.id, &room.id, &guest.id).expect("add");
+    assert_eq!(added.members.len(), 2);
+    service::join_room(&state, &guest, &room.id).expect("ya es miembro");
+
+    let kicked = service::kick_member(&state, &host.id, &room.id, &guest.id).expect("kick");
+    assert_eq!(kicked.members.len(), 1);
 }
 
 #[test]

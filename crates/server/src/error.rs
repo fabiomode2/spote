@@ -20,6 +20,10 @@ pub enum AppError {
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
+    TooManyRequests(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -30,6 +34,8 @@ impl AppError {
             AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::Forbidden(_) => StatusCode::FORBIDDEN,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -40,6 +46,8 @@ impl AppError {
             | AppError::Unauthorized(m)
             | AppError::Forbidden(m)
             | AppError::NotFound(m)
+            | AppError::TooManyRequests(m)
+            | AppError::Conflict(m)
             | AppError::Internal(m) => m,
         }
     }

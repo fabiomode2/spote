@@ -98,6 +98,8 @@ pub struct ServerCfg {
     pub token: String,
     pub name: String,
     pub invite: String,
+    /// Clave de cliente propia (`SPOTE_CLIENT_KEYS`). Sin ella la API responde 401.
+    pub client_key: String,
 }
 
 impl Default for ServerCfg {
@@ -106,7 +108,8 @@ impl Default for ServerCfg {
             url: String::new(),
             token: String::new(),
             name: String::new(),
-            invite: "spote".to_string(),
+            invite: String::new(),
+            client_key: String::new(),
         }
     }
 }
@@ -416,6 +419,13 @@ impl Config {
         // Escritura atómica: un corte a mitad no deja la config truncada.
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)?;
+        // El fichero guarda token, invitación y clave de cliente: solo el
+        // usuario que ejecuta spote debe poder leerlo.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
         std::fs::rename(&tmp, &path)
     }
 

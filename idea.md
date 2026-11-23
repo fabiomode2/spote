@@ -608,20 +608,33 @@ play/pause/seek con el estado de la sala.
 
 ```
 POST /api/v1/auth/login      {name, invite}        → {token, user}
+POST /api/v1/auth/logout                            → {ok}
 GET  /api/v1/me                                    → user
 GET  /api/v1/users           (amigos + presencia)
 POST /api/v1/friends/{id}
+GET  /api/v1/sync/snapshot                          → biblioteca personal
+GET  /api/v1/sync/pull?since=…                      → cambios desde revisión
+POST /api/v1/sync/push {base_revision, ops}         → {revision, applied}
 GET  /api/v1/rooms                                 → salas visibles
-POST /api/v1/rooms           {name}                → room
+POST /api/v1/rooms           {name, is_public}     → room
 POST /api/v1/rooms/{id}/join | /leave
+POST /api/v1/rooms/{id}/members {user_id}          → solo host
+DEL  /api/v1/rooms/{id}/members/{user}             → solo host
 GET  /api/v1/rooms/{id}                            → snapshot
 POST /api/v1/rooms/{id}/control {action, position_ms?}
 POST /api/v1/rooms/{id}/queue   {track: TrackRef}  → queue_item
-DEL  /api/v1/rooms/{id}/queue/{item}
+DEL  /api/v1/rooms/{id}/queue/{item}               → dueño o host
+GET  /api/v1/rooms/{id}/chat?limit=50
 GET  /api/v1/time                                  → {t}  (sync de reloj)
+GET  /healthz                                      → {ok} (sin datos)
 ```
 
-### 8.2 WebSocket `/api/v1/ws?token=…`
+Todas las rutas de `/api/v1` exigen `X-Spote-Key`; las de usuario exigen
+además `Authorization: Bearer …`.
+
+### 8.2 WebSocket `/api/v1/ws`
+
+Handshake con `X-Spote-Key` y `Authorization: Bearer …` (sin token en la URL).
 
 Mensajes (JSON, `type` como tag):
 
@@ -650,7 +663,8 @@ clientes precargan y cambian todos en ese epoch. `ready` con timeout de 4 s.
 ### 8.4 DB del servidor
 
 ```sql
-user(id, name, avatar, invite_code, created_at)
+user(id, name, avatar, invite_code, client_key_fp, created_at)
+session(token /* sha256 */, user_id, client_key_fp, created_at, expires_at)
 friend(user_id, target_id, accepted)
 room(id, name, host_id, created_at, is_public)
 room_member(room_id, user_id, role)
@@ -658,14 +672,34 @@ room_state(room_id, track_json, position_ms, playing, anchor_ms, updated_by)
 queue_item(id, room_id, track_json, added_by, position, votes)
 chat(id, room_id, user_id, text, ts)
 play_event(id, user_id, track_json, ts, ms_played)   -- feed
+sync_meta(user_id, revision, updated_at)
+sync_tracks(user_id, key, track_json, favorite, play_count, last_played, deleted, revision)
+sync_playlists(user_id, id, name, description, cover_url, deleted, revision)
+sync_playlist_items(user_id, id, playlist_id, track_key, position, deleted, revision)
 ```
 
 Presencia en memoria (`user_id → last_seen, now_playing`), volcada a DB cada 30 s.
 
 ### 8.5 Auth
 
-Invitación (código por usuario) + token Bearer opaco en tabla `session`.
-Sin OAuth, sin emails, sin password. 4 amigos.
+Invitación del grupo + **clave de cliente por persona** (`X-Spote-Key`
+obligatoria en toda la API) + token Bearer hasheado, atado a esa clave y con
+caducidad. El nombre de usuario queda atado a la primera clave que lo usa, así
+que una clave no puede reclamar el nombre de otra. Sin OAuth, sin emails, sin
+password. 4 amigos.
+
+La misma clave personal se usa en el PC y en el móvil para que sean la misma
+cuenta; no es una clave por dispositivo.
+
+### 8.6 Sync PC ↔ móvil
+
+Cada cuenta tiene un contador de revisión monótono. Los clientes suben
+operaciones (`track_upsert`, `playlist_upsert`, `playlist_item_upsert` y sus
+borrados) con `base_revision`; si otro dispositivo escribió antes, el servidor
+responde `409` y el cliente hace pull y reintenta. El pull devuelve solo los
+cambios desde el cursor, con tombstones para los borrados. Se sincronizan
+metadatos, favoritas, contadores e historial y playlists; nunca audio ni rutas
+locales. Ver `docs/social.md`.
 
 ---
 
@@ -967,7 +1001,9 @@ ffmpeg -f lavfi -i "aevalsrc='0.3*sin(2*PI*110*t)*(0.55+0.45*sin(2*PI*2*t))+0.16
 1. Nombre: **spote** se queda (binarios `spote`/`spoted`).
 2. Modo Spotify: **sí**, es de primera clase (`--follow-spotify` / tecla `t`).
 3. Fuente por defecto: YT Music Topic-first; SoundCloud queda como fallback.
-4. VPS: sin decidir; `spoted` acepta `SPOTE_BIND`, `SPOTE_DB`, `SPOTE_INVITE`.
+4. VPS: Docker + nginx (TLS). `spoted` acepta `SPOTE_BIND`, `SPOTE_DB`,
+   `SPOTE_INVITE`, `SPOTE_CLIENT_KEYS` y `SPOTE_SESSION_DAYS`; ver
+   `docs/social.md`.
 5. Diseño: default `half`; `dither` y `braille` disponibles con `A`.
 6. Salas: por ahora seek seco; el micro-ajuste de velocidad es el siguiente paso.
 7. Letras: karaoke por palabra cuando hay tags `<mm:ss.xx>`; si no, progreso de

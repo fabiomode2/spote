@@ -5,18 +5,44 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use spote_protocol::{ClientMsg, ServerMsg};
 use spote_server::{config::Config, router, state::AppState};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+const INVITE: &str = "test-invite-0123456789abcdef";
+const KEY_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+
 fn test_state(dir: &tempfile::TempDir) -> AppState {
-    let config = Config {
-        bind: "127.0.0.1:0".parse().expect("addr válida"),
-        db_path: dir.path().join("ws-test.db"),
-        invite: "spote".to_string(),
-    };
+    let config = Config::from_lookup(|key| match key {
+        "SPOTE_INVITE" => Some(INVITE.to_string()),
+        "SPOTE_CLIENT_KEYS" => Some(format!("ana:{KEY_A}")),
+        "SPOTE_DB" => Some(dir.path().join("ws-test.db").display().to_string()),
+        "SPOTE_BIND" => Some("127.0.0.1:0".to_string()),
+        _ => None,
+    })
+    .expect("config de test");
     AppState::new(config).expect("estado")
+}
+
+fn ws_request(
+    url: &str,
+    token: Option<&str>,
+    key: Option<&str>,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    let mut request = url.into_client_request().expect("request WS");
+    if let Some(token) = token {
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
+        );
+    }
+    if let Some(key) = key {
+        request
+            .headers_mut()
+            .insert("x-spote-key", HeaderValue::from_str(key).expect("header"));
+    }
+    request
 }
 
 async fn send(ws: &mut Ws, msg: ClientMsg) {
@@ -42,10 +68,14 @@ async fn next_server_msg(ws: &mut Ws) -> ServerMsg {
 }
 
 #[tokio::test]
-async fn ws_hello_ping_and_join() {
+async fn ws_requires_client_key_and_bearer_then_works() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = test_state(&dir);
-    let (host, token, _) = state.db.login("ana", "spote").expect("login");
+    let fp = state.config.client_key_fingerprint(KEY_A).expect("huella");
+    let (host, token) = state
+        .db
+        .login("ana", &fp, service_now() + 60_000)
+        .expect("login");
     let room = state.db.create_room("sala", true, &host.id).expect("sala");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -56,8 +86,14 @@ async fn ws_hello_ping_and_join() {
         let _ = axum::serve(listener, router(state)).await;
     });
 
-    let url = format!("ws://{addr}/api/v1/ws?token={token}");
-    let (mut ws, _) = tokio_tungstenite::connect_async(url)
+    let url = format!("ws://{addr}/api/v1/ws");
+    let no_key = tokio_tungstenite::connect_async(ws_request(&url, Some(&token), None)).await;
+    assert!(no_key.is_err(), "sin clave de cliente no hay upgrade");
+
+    let no_token = tokio_tungstenite::connect_async(ws_request(&url, None, Some(KEY_A))).await;
+    assert!(no_token.is_err(), "sin token no hay upgrade");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_request(&url, Some(&token), Some(KEY_A)))
         .await
         .expect("handshake");
 
@@ -109,9 +145,16 @@ async fn ws_hello_ping_and_join() {
     assert_eq!(joined.1[0].user.id, host.id);
 
     let rejected =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/ws?token=nope")).await;
+        tokio_tungstenite::connect_async(ws_request(&url, Some("nope"), Some(KEY_A))).await;
     assert!(rejected.is_err(), "token inválido rechaza el handshake");
 
     let _ = ws.close(None).await;
     server.abort();
+}
+
+fn service_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }

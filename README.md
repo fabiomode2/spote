@@ -57,7 +57,12 @@ la propia TUI.
   el audio completo y deja todas las canciones al mismo volumen; se aplica en
   caliente y se puede apagar desde la propia pestaña o desde ajustes. Dentro de
   la pestaña, `←`/`→` cambia de control y `↑`/`↓` ajusta el valor.
-- **Salas**: `spoted` añade presencia, chat y cola compartida.
+- **Salas**: `spoted` añade presencia, chat y cola compartida. La API exige una
+  clave de cliente por persona (`X-Spote-Key`), las sesiones están atadas a esa
+  clave y caducan. Ver [`docs/social.md`](docs/social.md).
+- **Cuenta y sync**: la misma clave en PC y Android identifica la misma cuenta;
+  `spoted` sincroniza favoritas, escuchas y playlists por revisiones, sin subir
+  audio ni rutas locales.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.
 
@@ -86,9 +91,18 @@ audio local ──▶ mpv (IPC) ──▶ FFT ──▶ UI reactiva
 ```
 
 Config, datos y caché en XDG (`~/.config/spote`, `~/.local/share/spote`,
-`~/.cache/spote`). `SPOTE_HOME` los reubica todos.
+`~/.cache/spote`). `SPOTE_HOME` los reubica todos. Para el VPS hay
+`Dockerfile`, `docker-compose.yml` y `deploy/nginx/spote.conf`; el paso a paso
+está en [`docs/social.md`](docs/social.md).
 
 ```toml
+[server]
+url = "https://spote.example.com"  # vacío = modo local, sin salas
+name = "ana"
+invite = "…"           # la invitación del grupo
+client_key = "…"       # clave personal; sin ella la API responde 401
+token = ""             # se rellena tras el login
+
 [ui]
 art_mode = "default"   # default | half | pixel | braille | off
 viz = "clean"          # clean | aurora | bloom | inferno | crt | lcd | rack | braille | stage
@@ -132,12 +146,15 @@ spote ingest ~/Music                            # indexa audio local
 spote import <url-spotify> --download           # importa y baja
 spote doctor                                    # comprueba dependencias
 spote record [--flac]                           # graba lo que suena
-spoted                                          # backend social en :7070
+spoted                                          # backend social (requiere secretos)
+spoted keygen ana bea                           # genera invitación y claves
+docker compose up -d --build                    # spoted + SQLite en un volumen
 ```
 
 ## Más
 
 - `idea.md` — producto, arquitectura y decisiones.
+- `docs/social.md` — backend `spoted`, seguridad, Docker y nginx.
 - `docs/arquitectura.md` — módulos, layout y mapa de audio.
 - `docs/effects.md` — especificación de los efectos.
 - `docs/rework.md` — estado y limitaciones.
