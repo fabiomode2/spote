@@ -26,14 +26,10 @@ impl App {
                 self.tab = Tab::Now;
                 self.needs_redraw = true;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.audio_selected = (self.audio_selected + 15) % 16;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.audio_selected = (self.audio_selected + 1) % 16;
-            }
-            KeyCode::Left | KeyCode::Char('h') => self.adjust_audio(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.adjust_audio(1),
+            KeyCode::Up | KeyCode::Char('k') => self.adjust_audio(1),
+            KeyCode::Down | KeyCode::Char('j') => self.adjust_audio(-1),
+            KeyCode::Left | KeyCode::Char('h') => self.move_audio_selection(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.move_audio_selection(1),
             KeyCode::Enter => self.toggle_audio_control(),
             KeyCode::Char('0') => self.reset_audio_control(),
             KeyCode::Char('p') => self.cycle_audio_preset(1),
@@ -71,14 +67,10 @@ impl App {
     pub(super) fn handle_audio_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.overlay = Overlay::None,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.audio_selected = (self.audio_selected + 15) % 16;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.audio_selected = (self.audio_selected + 1) % 16;
-            }
-            KeyCode::Left | KeyCode::Char('h') => self.adjust_audio(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.adjust_audio(1),
+            KeyCode::Up | KeyCode::Char('k') => self.adjust_audio(1),
+            KeyCode::Down | KeyCode::Char('j') => self.adjust_audio(-1),
+            KeyCode::Left | KeyCode::Char('h') => self.move_audio_selection(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.move_audio_selection(1),
             KeyCode::Char(' ') | KeyCode::Enter => self.toggle_audio_control(),
             KeyCode::Char('0') => self.reset_audio_control(),
             KeyCode::Char('p') => self.cycle_audio_preset(1),
@@ -99,6 +91,45 @@ impl App {
             _ => {}
         }
         self.needs_redraw = true;
+    }
+
+    pub fn move_audio_selection(&mut self, delta: i32) {
+        self.audio_selected = (self.audio_selected as i32 + delta).rem_euclid(16) as usize;
+        self.needs_redraw = true;
+    }
+
+    /// Texto corto del control seleccionado para que la pestaña diga siempre
+    /// dónde estás y cuánto vale.
+    pub fn audio_selection_label(&self) -> String {
+        match self.audio_selected {
+            i if i < BANDS => format!(
+                "{} Hz · {:+.0} dB",
+                spote_core::audio_fx::BAND_LABELS[i],
+                self.cfg.audio.bands[i]
+            ),
+            PREAMP => format!("preamp · {:+.1} dB", self.cfg.audio.preamp_db),
+            NORMALIZER => format!("directo · {}", self.cfg.audio.normalizer.label()),
+            STRENGTH => format!(
+                "intensidad · {:.0}%",
+                self.cfg.audio.normalizer_strength * 100.0
+            ),
+            LIMITER => format!(
+                "limitador · {}",
+                if self.cfg.audio.limiter { "on" } else { "off" }
+            ),
+            PRESET => {
+                let name = spote_core::audio_fx::EQ_PRESETS
+                    .iter()
+                    .find(|(_, bands)| *bands == self.cfg.audio.bands)
+                    .map(|(name, _)| *name)
+                    .unwrap_or("custom");
+                format!("preset · {name}")
+            }
+            _ => format!(
+                "proceso · {}",
+                if self.cfg.audio.enabled { "on" } else { "off" }
+            ),
+        }
     }
 
     pub fn adjust_audio(&mut self, delta: i32) {

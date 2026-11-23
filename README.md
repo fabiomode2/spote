@@ -55,7 +55,8 @@ la propia TUI.
 - **Audio ajustable**: pestaña `♫ audio` con ecualizador gráfico de 10 bandas,
   preamp, normalizador en directo y limitador. La nivelación entre pistas mide
   el audio completo y deja todas las canciones al mismo volumen; se aplica en
-  caliente y se puede apagar desde la propia pestaña o desde ajustes.
+  caliente y se puede apagar desde la propia pestaña o desde ajustes. Dentro de
+  la pestaña, `←`/`→` cambia de control y `↑`/`↓` ajusta el valor.
 - **Salas**: `spoted` añade presencia, chat y cola compartida.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.

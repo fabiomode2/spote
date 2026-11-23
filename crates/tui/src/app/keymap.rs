@@ -220,8 +220,8 @@ impl App {
                 Hint { key: "?", label: "ayuda" },
             ],
             Tab::Audio => vec![
-                Hint { key: "↑↓", label: "elegir control" },
-                Hint { key: "←→", label: "ajustar" },
+                Hint { key: "←→", label: "cambiar control" },
+                Hint { key: "↑↓", label: "ajustar valor" },
                 Hint { key: "enter", label: "alternar" },
                 Hint { key: "p", label: "preset" },
                 Hint { key: "n", label: "nivelar on/off" },
