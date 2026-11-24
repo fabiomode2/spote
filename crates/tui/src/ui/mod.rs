@@ -25,6 +25,7 @@ mod now;
 mod overlays;
 mod settings;
 mod side;
+mod wrapped;
 use albums::*;
 use art::*;
 use audio::*;
@@ -35,6 +36,7 @@ use now::*;
 use overlays::*;
 use settings::*;
 use side::*;
+use wrapped::*;
 
 const PLAY: &str = "⏵";
 const PAUSE: &str = "⏸";

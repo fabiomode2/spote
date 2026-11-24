@@ -109,6 +109,10 @@ impl MiniApp {
             self.peaks = [0.0; MINI_BAND_COUNT];
             self.seek_preview = None;
             self.play_hold_until = 0.0;
+            // La portada puede llegar después del primer snapshot: al cambiar
+            // de pista se fuerza a releerla aunque la ruta se repita.
+            self.art_source = None;
+            self.texture = None;
         }
         self.snapshot_at = now;
         let optimistic_play = now < self.play_hold_until;
@@ -125,14 +129,18 @@ impl MiniApp {
     }
 
     fn ensure_art(&mut self, ctx: &egui::Context) {
-        let wanted = self.snapshot.art_path.clone();
+        let wanted = self
+            .snapshot
+            .art_path
+            .clone()
+            .map(|path| format!("{}|{path}", self.snapshot.track_key));
         if wanted == self.art_source {
             return;
         }
-        self.art_source = wanted.clone();
+        self.art_source = wanted;
         self.texture = None;
 
-        let Some(path) = wanted else {
+        let Some(path) = self.snapshot.art_path.clone() else {
             return;
         };
 
@@ -446,7 +454,15 @@ impl MiniApp {
             StrokeKind::Inside,
         );
 
-        self.paint_spectrum(painter, spectrum, accent);
+        let has_viz = self.snapshot.viz_rows > 0
+            && self.snapshot.viz_cols > 0
+            && !self.snapshot.viz.is_empty();
+        if has_viz {
+            self.paint_viz(ui, painter, spectrum, accent);
+        } else {
+            self.paint_spectrum(painter, spectrum, accent);
+        }
+        self.paint_viz_chip(ui, painter, spectrum, accent);
 
         if !self.connected {
             let overlay = spectrum.shrink(1.0);
@@ -469,6 +485,89 @@ impl MiniApp {
                 FontId::proportional(10.0),
                 MUTED,
             );
+        }
+    }
+
+    fn paint_viz(
+        &self,
+        _ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        accent: Color32,
+    ) {
+        painter.rect_filled(rect, CornerRadius::same(8), Color32::from_rgb(8, 9, 13));
+        let cols = self.snapshot.viz_cols.max(1) as f32;
+        let rows = self.snapshot.viz_rows.max(1) as f32;
+        let cell_w = rect.width() / cols;
+        let cell_h = rect.height() / rows;
+        let font = FontId::monospace((cell_h * 0.95).min(cell_w * 1.15).max(5.0));
+        for cell in &self.snapshot.viz {
+            if cell.alpha < 8 || cell.ch == ' ' {
+                continue;
+            }
+            let color = Color32::from_rgba_unmultiplied(
+                cell.fg[0],
+                cell.fg[1],
+                cell.fg[2],
+                cell.alpha,
+            );
+            let pos = pos2(
+                rect.left() + cell.x as f32 * cell_w,
+                rect.top() + cell.y as f32 * cell_h,
+            );
+            painter.text(pos, Align2::LEFT_TOP, cell.ch, font.clone(), color);
+        }
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(8),
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
+            StrokeKind::Inside,
+        );
+        // Mantén el acento visible en el borde inferior, como la franja TUI.
+        painter.line_segment(
+            [
+                pos2(rect.left() + 1.0, rect.bottom() - 1.0),
+                pos2(rect.right() - 1.0, rect.bottom() - 1.0),
+            ],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 90)),
+        );
+    }
+
+    fn paint_viz_chip(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        accent: Color32,
+    ) {
+        let label = if self.snapshot.viz_preset.is_empty() {
+            "viz".to_string()
+        } else {
+            format!("viz · {}", self.snapshot.viz_preset)
+        };
+        let width = (label.chars().count() as f32 * 6.2 + 12.0).min(rect.width() - 8.0);
+        let chip = Rect::from_min_size(
+            pos2(rect.left() + 4.0, rect.top() + 4.0),
+            vec2(width.max(30.0), 16.0),
+        );
+        let response = ui.allocate_rect(chip, Sense::click());
+        painter.rect_filled(
+            chip,
+            CornerRadius::same(5),
+            Color32::from_rgba_unmultiplied(8, 9, 12, if response.hovered() { 225 } else { 185 }),
+        );
+        painter.text(
+            pos2(chip.left() + 6.0, chip.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::monospace(8.0),
+            if response.hovered() { TEXT } else { accent },
+        );
+        if response.clicked() {
+            self.link.send(MiniCommand::CycleViz);
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
     }
 
@@ -833,7 +932,7 @@ fn icon_button(
         } else {
             accent
         };
-        painter.circle_filled(rect.center(), rect.width() * 0.5, background);
+        painter.rect_filled(rect, CornerRadius::same(7), background);
         on_accent(background)
     } else if active {
         painter.rect_filled(
@@ -856,151 +955,63 @@ fn icon_button(
     response
 }
 
-fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
-    let center = rect.center();
-    let size = rect.width().min(rect.height());
-    let stroke = Stroke::new(1.6_f32, color);
+const ICON_PLAY: &[&str] = &["█    ", "██   ", "███  ", "██   ", "█    "];
+const ICON_PAUSE: &[&str] = &["█  █", "█  █", "█  █", "█  █", "█  █"];
+const ICON_PREV: &[&str] = &["█  █ ", "██ █ ", "███  ", "██ █ ", "█  █ "];
+const ICON_NEXT: &[&str] = &[" █  █", " █ ██", "  ███", " █ ██", " █  █"];
+const ICON_SHUFFLE: &[&str] = &[
+    "██   ██",
+    " ██ ██ ",
+    "  ███  ",
+    " ██ ██ ",
+    "██   ██",
+];
+const ICON_REPEAT: &[&str] = &[
+    "███████",
+    "█     █",
+    "█     █",
+    "█     █",
+    "███████",
+];
+const ICON_REPEAT_ONE: &[&str] = &[
+    "███████",
+    "█     █",
+    "█  █  █",
+    "█  █  █",
+    "███████",
+];
 
-    match icon {
-        Icon::Play => {
-            let half = size * 0.34;
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(center.x - half * 0.55, center.y - half),
-                    pos2(center.x - half * 0.55, center.y + half),
-                    pos2(center.x + half * 0.85, center.y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Pause => {
-            let bar = vec2(size * 0.11, size * 0.62);
-            for offset in [-0.17f32, 0.17] {
-                painter.rect_filled(
-                    Rect::from_center_size(pos2(center.x + size * offset, center.y), bar),
-                    CornerRadius::same(1),
-                    color,
-                );
+/// Iconos de bloque, los mismos que la barra de transporte de la TUI.
+fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let grid = match icon {
+        Icon::Shuffle => ICON_SHUFFLE,
+        Icon::Previous => ICON_PREV,
+        Icon::Play => ICON_PLAY,
+        Icon::Pause => ICON_PAUSE,
+        Icon::Next => ICON_NEXT,
+        Icon::Repeat(true) => ICON_REPEAT_ONE,
+        Icon::Repeat(false) => ICON_REPEAT,
+    };
+    let rows = grid.len() as f32;
+    let cols = grid.iter().map(|line| line.chars().count()).max().unwrap_or(1) as f32;
+    let cell = (rect.width() / cols).min(rect.height() / rows) * 0.82;
+    if cell <= 0.4 {
+        return;
+    }
+    let width = cols * cell;
+    let height = rows * cell;
+    let x0 = rect.center().x - width * 0.5;
+    let y0 = rect.center().y - height * 0.5;
+    for (y, line) in grid.iter().enumerate() {
+        for (x, ch) in line.chars().enumerate() {
+            if ch == ' ' {
+                continue;
             }
-        }
-        Icon::Previous => {
-            let half = size * 0.30;
-            painter.rect_filled(
-                Rect::from_center_size(
-                    pos2(center.x - half * 0.95, center.y),
-                    vec2(size * 0.11, half * 2.0),
-                ),
-                CornerRadius::same(1),
-                color,
+            let cell_rect = Rect::from_min_size(
+                pos2(x0 + x as f32 * cell, y0 + y as f32 * cell),
+                Vec2::splat((cell - 0.35).max(0.7)),
             );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(center.x + half * 0.85, center.y - half),
-                    pos2(center.x + half * 0.85, center.y + half),
-                    pos2(center.x - half * 0.45, center.y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Next => {
-            let half = size * 0.30;
-            painter.rect_filled(
-                Rect::from_center_size(
-                    pos2(center.x + half * 0.95, center.y),
-                    vec2(size * 0.11, half * 2.0),
-                ),
-                CornerRadius::same(1),
-                color,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(center.x - half * 0.85, center.y - half),
-                    pos2(center.x - half * 0.85, center.y + half),
-                    pos2(center.x + half * 0.45, center.y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Shuffle => {
-            let left = center.x - size * 0.32;
-            let right = center.x + size * 0.26;
-            let top = center.y - size * 0.20;
-            let bottom = center.y + size * 0.20;
-            painter.line_segment([pos2(left, top), pos2(right, bottom)], stroke);
-            painter.line_segment([pos2(left, bottom), pos2(right, top)], stroke);
-            for y in [top, bottom] {
-                painter.add(Shape::convex_polygon(
-                    vec![
-                        pos2(right - size * 0.03, y - size * 0.10),
-                        pos2(right + size * 0.15, y),
-                        pos2(right - size * 0.03, y + size * 0.10),
-                    ],
-                    color,
-                    Stroke::NONE,
-                ));
-            }
-        }
-        Icon::Repeat(one) => {
-            let path = Rect::from_center_size(center, vec2(size * 0.66, size * 0.44));
-            let arrow = size * 0.10;
-            painter.line_segment(
-                [
-                    pos2(path.left() + 2.0, path.top()),
-                    pos2(path.right() - arrow, path.top()),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(path.right(), path.top() + 1.0),
-                    pos2(path.right(), path.bottom() - 1.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(path.right() - 2.0, path.bottom()),
-                    pos2(path.left() + arrow, path.bottom()),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(path.left(), path.bottom() - 1.0),
-                    pos2(path.left(), path.top() + 1.0),
-                ],
-                stroke,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(path.right() - arrow * 1.6, path.top() - arrow * 0.9),
-                    pos2(path.right() + arrow * 0.2, path.top()),
-                    pos2(path.right() - arrow * 1.6, path.top() + arrow * 0.9),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(path.left() + arrow * 1.6, path.bottom() - arrow * 0.9),
-                    pos2(path.left() - arrow * 0.2, path.bottom()),
-                    pos2(path.left() + arrow * 1.6, path.bottom() + arrow * 0.9),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-            if one {
-                painter.text(
-                    center,
-                    Align2::CENTER_CENTER,
-                    "1",
-                    FontId::monospace(size * 0.30),
-                    color,
-                );
-            }
+            painter.rect_filled(cell_rect, CornerRadius::same(0), color);
         }
     }
 }

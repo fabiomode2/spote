@@ -27,6 +27,11 @@ impl App {
                 _ => {}
             },
             Overlay::Audio => self.handle_audio_key(key),
+            Overlay::Wrapped => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.overlay = Overlay::None,
+                KeyCode::Char('a') | KeyCode::Char('A') => self.toggle_wrapped_period(),
+                _ => {}
+            },
             Overlay::Trim => match key.code {
                 KeyCode::Esc | KeyCode::Enter => self.overlay = Overlay::None,
                 KeyCode::Char('a') | KeyCode::Home => self.trim_start_here(),

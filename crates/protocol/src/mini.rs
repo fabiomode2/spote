@@ -75,6 +75,8 @@ pub struct MiniSnapshot {
 /// Celda del visual de la TUI reenviada al mini.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MiniVizCell {
+    pub x: u16,
+    pub y: u16,
     /// Carácter de la celda. El mini lo dibuja con fuente monoespaciada.
     pub ch: char,
     pub fg: [u8; 3],

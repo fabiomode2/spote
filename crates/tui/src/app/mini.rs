@@ -57,6 +57,7 @@ impl App {
                 MiniCommand::Shuffle => self.toggle_shuffle(),
                 MiniCommand::CycleRepeat => self.cycle_repeat(),
                 MiniCommand::CycleViz => {
+                    self.show_viz = true;
                     self.viz.next_preset();
                     self.cfg.ui.viz = self.viz.preset_name().to_string();
                     self.cfg.save().ok();
@@ -154,7 +155,11 @@ impl App {
             .chunks(2)
             .map(|pair| pair.iter().sum::<f32>() / pair.len() as f32)
             .collect();
-        let (cols, rows, cells) = mini_viz_frame(&self.viz);
+        let (cols, rows, cells) = if self.show_viz {
+            mini_viz_frame(&self.viz)
+        } else {
+            (0, 0, Vec::new())
+        };
         snapshot.viz_preset = self.viz.preset_name().to_string();
         snapshot.viz_presets = crate::viz::Viz::STRIP
             .iter()
@@ -186,6 +191,8 @@ fn mini_viz_frame(viz: &crate::viz::Viz) -> (u16, u16, Vec<MiniVizCell>) {
                 continue;
             }
             cells.push(MiniVizCell {
+                x,
+                y,
                 ch: cell.ch,
                 fg: [cell.fg.0, cell.fg.1, cell.fg.2],
                 alpha: (cell.alpha.clamp(0.0, 1.0) * 255.0).round() as u8,

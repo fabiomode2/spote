@@ -120,6 +120,50 @@ pub const LYRICS_ALIGN_VERSION: i64 = 3;
 /// una letra inventada por captions/ASR de una versión anterior.
 pub const LYRICS_POLICY_VERSION: i64 = 2;
 
+/// Resumen de escucha para el Wrapped.
+#[derive(Debug, Clone, Default)]
+pub struct WrappedStats {
+    pub all_time: bool,
+    pub year: i64,
+    pub plays: u64,
+    pub ms_played: u64,
+    pub distinct_tracks: u64,
+    pub distinct_artists: u64,
+    pub top_tracks: Vec<WrappedTrack>,
+    pub top_artists: Vec<WrappedArtist>,
+    pub top_albums: Vec<WrappedAlbum>,
+    /// Milisegundos escuchados por mes (enero..diciembre) del periodo.
+    pub by_month: [u64; 12],
+}
+
+#[derive(Debug, Clone)]
+pub struct WrappedTrack {
+    pub key: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub ms_played: u64,
+    pub plays: u64,
+    pub art_path: Option<PathBuf>,
+    pub art_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WrappedArtist {
+    pub artist: String,
+    pub ms_played: u64,
+    pub plays: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WrappedAlbum {
+    pub album: String,
+    pub artist: String,
+    pub ms_played: u64,
+    pub plays: u64,
+    pub art_url: Option<String>,
+}
+
 pub struct Library {
     conn: Connection,
     path: PathBuf,
@@ -923,6 +967,124 @@ impl Library {
         Ok(value)
     }
 
+    /// Estadísticas de escucha para el Wrapped. `all_time=false` limita al
+    /// año natural actual (hora local de SQLite).
+    pub fn wrapped_stats(&self, all_time: bool) -> Result<WrappedStats> {
+        let year: i64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(strftime('%Y','now','localtime') AS INTEGER)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let period = if all_time {
+            "1=1".to_string()
+        } else {
+            format!(
+                "CAST(strftime('%Y', e.ts / 1000, 'unixepoch', 'localtime') AS INTEGER) = {year}"
+            )
+        };
+        let totals: (i64, i64, i64, i64) = self.conn.query_row(
+            &format!(
+                "SELECT coalesce(sum(e.ms_played),0), count(*),
+                        count(DISTINCT e.track_id), count(DISTINCT t.artist)
+                 FROM play_event e JOIN track t ON t.id = e.track_id
+                 WHERE {period}"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let mut stats = WrappedStats {
+            all_time,
+            year,
+            plays: totals.1.max(0) as u64,
+            ms_played: totals.0.max(0) as u64,
+            distinct_tracks: totals.2.max(0) as u64,
+            distinct_artists: totals.3.max(0) as u64,
+            ..WrappedStats::default()
+        };
+
+        let top_tracks_sql = format!(
+            "SELECT t.key, t.title, t.artist, t.album, sum(e.ms_played), count(*),
+                    t.art_path, t.art_url
+             FROM play_event e JOIN track t ON t.id = e.track_id
+             WHERE {period}
+             GROUP BY t.id ORDER BY sum(e.ms_played) DESC, count(*) DESC LIMIT 8"
+        );
+        let mut stmt = self.conn.prepare(&top_tracks_sql)?;
+        stats.top_tracks = stmt
+            .query_map([], |row| {
+                let path: Option<String> = row.get(6)?;
+                Ok(WrappedTrack {
+                    key: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    ms_played: row.get::<_, i64>(4)?.max(0) as u64,
+                    plays: row.get::<_, i64>(5)?.max(0) as u64,
+                    art_path: path.map(PathBuf::from),
+                    art_url: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let top_artists_sql = format!(
+            "SELECT t.artist, sum(e.ms_played), count(*)
+             FROM play_event e JOIN track t ON t.id = e.track_id
+             WHERE {period}
+             GROUP BY lower(t.artist) ORDER BY sum(e.ms_played) DESC LIMIT 6"
+        );
+        let mut stmt = self.conn.prepare(&top_artists_sql)?;
+        stats.top_artists = stmt
+            .query_map([], |row| {
+                Ok(WrappedArtist {
+                    artist: row.get(0)?,
+                    ms_played: row.get::<_, i64>(1)?.max(0) as u64,
+                    plays: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let top_albums_sql = format!(
+            "SELECT t.album, t.artist, sum(e.ms_played), count(*),
+                    max(coalesce(t.art_url, ''))
+             FROM play_event e JOIN track t ON t.id = e.track_id
+             WHERE {period} AND t.album IS NOT NULL AND t.album <> ''
+             GROUP BY lower(t.album), lower(t.artist)
+             ORDER BY sum(e.ms_played) DESC LIMIT 6"
+        );
+        let mut stmt = self.conn.prepare(&top_albums_sql)?;
+        stats.top_albums = stmt
+            .query_map([], |row| {
+                let url: String = row.get(4)?;
+                Ok(WrappedAlbum {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                    ms_played: row.get::<_, i64>(2)?.max(0) as u64,
+                    plays: row.get::<_, i64>(3)?.max(0) as u64,
+                    art_url: (!url.is_empty()).then_some(url),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let by_month_sql = format!(
+            "SELECT CAST(strftime('%m', e.ts / 1000, 'unixepoch', 'localtime') AS INTEGER),
+                    sum(e.ms_played)
+             FROM play_event e WHERE {period}
+             GROUP BY 1"
+        );
+        let mut stmt = self.conn.prepare(&by_month_sql)?;
+        for row in stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (month, ms) = row?;
+            let index = (month - 1).clamp(0, 11) as usize;
+            stats.by_month[index] = ms.max(0) as u64;
+        }
+        Ok(stats)
+    }
+
     pub fn record_play(&mut self, key: &str, ms_played: u64, completed: bool) -> Result<()> {
         let id: Option<i64> = self
             .conn
@@ -1454,6 +1616,28 @@ mod tests {
         assert_eq!(album.track_count, 2);
         assert_eq!(album.art_url.as_deref(), Some("https://example.com/a.jpg"));
         assert_eq!(lib.album_tracks("Album", "Artist").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn wrapped_aggregates_play_events() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let mut first = track("k1", "One", "Artist");
+        first.album = Some("Album".into());
+        let second = track("k2", "Two", "Artist");
+        lib.upsert_track(&first).unwrap();
+        lib.upsert_track(&second).unwrap();
+        lib.record_play("k1", 60_000, true).unwrap();
+        lib.record_play("k1", 30_000, true).unwrap();
+        lib.record_play("k2", 20_000, false).unwrap();
+        let stats = lib.wrapped_stats(false).unwrap();
+        assert_eq!(stats.plays, 3);
+        assert_eq!(stats.ms_played, 110_000);
+        assert_eq!(stats.distinct_tracks, 2);
+        assert_eq!(stats.top_tracks[0].key, "k1");
+        assert_eq!(stats.top_tracks[0].ms_played, 90_000);
+        assert_eq!(stats.top_artists[0].artist, "Artist");
+        assert_eq!(stats.top_albums[0].album, "Album");
+        assert!(stats.by_month.iter().any(|ms| *ms > 0));
     }
 
     #[test]

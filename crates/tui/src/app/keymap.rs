@@ -73,6 +73,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("z", "lista compacta / tarjetas"),
                 ("t", "seguir el sistema (MPRIS)"),
                 ("w", "mini reproductor de escritorio"),
+                ("W", "resumen de escucha (Wrapped)"),
                 ("A", "pestaña de audio: EQ y nivelación"),
                 ("tab", "cambiar de vista"),
                 ("q", "salir de spote"),

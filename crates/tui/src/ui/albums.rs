@@ -22,7 +22,7 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         pal,
         app.focus == crate::app::Pane::Center,
         0.72,
-        Some("álbumes"),
+        Some("discos"),
         app.audio.kick_pulse,
     );
     let inner = inset(rect, 2, 2);

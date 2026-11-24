@@ -54,15 +54,23 @@ la propia TUI.
   playlists y álbumes.
 - **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
   locales. `z` alterna tarjetas con portada y lista compacta. `/` en la
-  biblioteca abre un filtro inline por título, artista o álbum. `X` quita la
+  biblioteca abre un filtro inline por título, artista o álbum.
+- **Discos guardados**: pestaña `discos` con todos los álbumes de la
+  biblioteca agrupados por artista, portadas y un buscador propio (`/`).
+  `X` o ⇧clic en la × quita una pista; si es la actual, detiene la
+  reproducción.
+- **Wrapped**: `W` abre un resumen de escucha con horas, reproducciones,
+  artistas, canciones, discos y actividad por meses. `a` alterna entre el
+  año actual y todo el tiempo. `X` quita la
   pista seleccionada y, manteniendo `shift`, aparece una `×` en cada fila para
   borrar varias seguidas de un clic.
 - **Media del sistema**: MPRIS bidireccional. spote aparece como reproductor
   en el escritorio (teclas multimedia, OSD, widgets) y `t` sigue lo que suene
   en Spotify, SoundCloud, VLC o cualquier otro reproductor MPRIS.
 - **Mini reproductor**: `w` abre `spote-mini`, una ventana pequeña siempre
-  encima con portada, espectro, progreso y controles. También se lanza con
-  `spote mini`.
+  encima con portada, progreso y controles pixel-art. Reutiliza los mismos
+  presets de visualización de la TUI y se pueden cambiar desde el propio mini;
+  también se lanza con `spote mini`.
 - **Audio ajustable**: pestaña `♫ audio` con ecualizador gráfico de 10 bandas,
   preamp, normalizador en directo y limitador. La nivelación entre pistas mide
   el audio completo y deja todas las canciones al mismo volumen; se aplica en

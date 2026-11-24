@@ -35,6 +35,7 @@ mod actions;
 mod audio_ui;
 mod mini;
 mod mpris;
+mod wrapped;
 pub(crate) mod albums;
 mod artist;
 mod context;
@@ -100,7 +101,7 @@ impl Tab {
             Self::Search => "buscar",
             Self::Library => "librería",
             Self::Audio => "audio",
-            Self::Albums => "álbumes",
+            Self::Albums => "discos",
             Self::Room => "sala",
             Self::Settings => "ajustes",
         }
@@ -124,10 +125,9 @@ impl Tab {
             Self::Search => 1,
             Self::Library => 2,
             Self::Audio => 3,
-            // `Albums` es interno y ya no está en `ALL`; se ancla a Library.
-            Self::Albums => 2,
-            Self::Room => 4,
-            Self::Settings => 5,
+            Self::Albums => 4,
+            Self::Room => 5,
+            Self::Settings => 6,
         }
     }
 }
@@ -193,6 +193,8 @@ pub enum Overlay {
     Album,
     /// Editor de recorte de intro/outro.
     Trim,
+    /// Resumen de escucha tipo Wrapped.
+    Wrapped,
     /// Ecualizador, preamp, normalizador y limitador.
     /// Se conserva para el overlay antiguo; la entrada normal es la pestaña.
     #[allow(dead_code)]
@@ -990,6 +992,8 @@ pub struct App {
     pub pending_seek_key: Option<String>,
     pub mpris_server: Option<spote_core::mpris_server::MprisServer>,
     pub mpris_last_update: Instant,
+    pub wrapped: Option<spote_core::library::WrappedStats>,
+    pub wrapped_all_time: bool,
     pub player_events: Option<tokio::sync::broadcast::Receiver<PlayerEvent>>,
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
@@ -1261,6 +1265,8 @@ impl App {
             pending_seek_key: None,
             mpris_server: None,
             mpris_last_update: Instant::now(),
+            wrapped: None,
+            wrapped_all_time: false,
             player_events: None,
             queue: Vec::new(),
             queue_selected: 0,
@@ -5162,12 +5168,13 @@ mod tests {
     fn tab_cycles_in_both_directions() {
         assert_eq!(Tab::Now.next(), Tab::Search);
         assert_eq!(Tab::Library.next(), Tab::Audio);
-        assert_eq!(Tab::Audio.next(), Tab::Room);
+        assert_eq!(Tab::Audio.next(), Tab::Albums);
+        assert_eq!(Tab::Albums.next(), Tab::Room);
         assert_eq!(Tab::Room.next(), Tab::Settings);
         assert_eq!(Tab::Settings.next(), Tab::Now);
         assert_eq!(Tab::Now.prev(), Tab::Settings);
         assert_eq!(Tab::Settings.prev(), Tab::Room);
-        assert_eq!(Tab::Room.prev(), Tab::Audio);
+        assert_eq!(Tab::Room.prev(), Tab::Albums);
     }
 
     #[test]

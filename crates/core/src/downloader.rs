@@ -385,15 +385,25 @@ fn worker(
             } => {
                 emit_progress(&events, &key, DownloadStage::Resolving, 0.0);
                 // Mismo matcher estricto que la reproducción: variantes de
-                // consulta, rechazo de covers/directos y duración. Antes el
-                // Downloader aceptaba coincidencias que el stream rechazaba.
-                let result = crate::stream::find_video_id(&artist, &title, duration_ms)
+                // consulta, rechazo de covers/directos y duración. Si el
+                // primer upload está bloqueado o no deja descargar, se prueba
+                // el siguiente candidato antes de rendirse.
+                let result = crate::stream::find_video_ids(&artist, &title, duration_ms, 4)
                     .map_err(|err| anyhow!("{err:#}"))
-                    .and_then(|id| {
-                        let source = DownloadSource::Url(format!(
-                            "https://www.youtube.com/watch?v={id}"
-                        ));
-                        download(&key, &source, &out, &events, &children)
+                    .and_then(|ids| {
+                        let mut last_error: Option<anyhow::Error> = None;
+                        for id in ids {
+                            let source = DownloadSource::Url(format!(
+                                "https://www.youtube.com/watch?v={id}"
+                            ));
+                            match download(&key, &source, &out, &events, &children) {
+                                Ok(path) => return Ok(path),
+                                Err(err) => last_error = Some(err),
+                            }
+                        }
+                        Err(last_error.unwrap_or_else(|| {
+                            anyhow!("ningún candidato de YouTube se pudo descargar")
+                        }))
                     });
                 match result {
                     Ok(path) => {

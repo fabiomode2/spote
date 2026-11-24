@@ -26,6 +26,7 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::Help => draw_help(app, buf, layout, pal),
         Overlay::Effects => draw_effects(app, buf, layout, pal),
         Overlay::Audio => draw_audio_overlay(app, buf, layout, pal),
+        Overlay::Wrapped => draw_wrapped(app, buf, layout, pal),
         Overlay::PlaylistForm => draw_playlist_form(app, buf, layout, pal),
         Overlay::ImportPlaylist => draw_import_playlist(app, buf, layout, pal),
         Overlay::ConfirmDeletePlaylist { name, .. } => {
