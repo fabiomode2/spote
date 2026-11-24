@@ -1632,6 +1632,13 @@ const GENIUS_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
                          (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const GENIUS_ACCEPT_JSON: &str = "application/json";
 const GENIUS_ACCEPT_HTML: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+/// Páginas que se llegan a abrir cuando el título es genérico y hay que
+/// desempatar por álbum. Genius devuelve el mismo tema en varias secciones,
+/// así que el ranking ya viene sin duplicados.
+const GENIUS_MAX_CANDIDATES: usize = 3;
+/// Parecido mínimo entre el álbum de la ficha y el de la pista para darla por
+/// buena. Por debajo, es otra edición/recopilatorio y no se arriesga la letra.
+const GENIUS_ALBUM_MATCH: f64 = 0.90;
 
 #[derive(Debug, Deserialize)]
 struct GeniusSearch {
@@ -1691,7 +1698,8 @@ async fn fetch_genius(
         return Ok(None);
     };
     let body: GeniusSearch = response.json().await.map_err(map_error)?;
-    let Some(song) = best_genius_song(&body, target) else {
+    let candidates = ranked_genius_songs(&body, target);
+    if candidates.is_empty() {
         if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
             eprintln!(
                 "[genius] sin candidato en {} secciones",
@@ -1699,53 +1707,87 @@ async fn fetch_genius(
             );
         }
         return Ok(None);
-    };
-    if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
-        eprintln!("[genius] candidato {} · {}", song.title, song.path);
     }
-    let path = if song.path.starts_with("http://") || song.path.starts_with("https://") {
-        song.path.clone()
-    } else if song.path.starts_with('/') {
-        format!("{GENIUS_BASE}{}", song.path)
-    } else {
-        format!("{GENIUS_BASE}/{}", song.path)
-    };
-    let Some(response) = genius_get(client, &path, GENIUS_ACCEPT_HTML, deadline).await? else {
-        return Ok(None);
-    };
-    let status = response.status();
-    let page = response.text().await.map_err(map_error)?;
-    let text = extract_genius_lyrics(&page);
-    if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
-        eprintln!(
-            "[genius] página {} · {} bytes · {} de letra",
-            status,
-            page.len(),
-            text.len()
-        );
-    }
-    if text.is_empty() {
+
+    // Genius no publica la duración en la búsqueda, así que dos canciones
+    // homónimas del mismo artista son indistinguibles por título. El caso real
+    // es «Regular» de Biberon: single antiguo y tema del álbum «¡Se cayó la
+    // bocina!». Cuando la pista trae álbum se usa para desempatar; sin álbum
+    // se prefiere no enseñar una letra ajena.
+    let ambiguous = target.duration_ms > 0
+        && is_generic_title(&target.title)
+        && !is_symbolic_title(&target.title);
+    let album_hint = target
+        .album
+        .as_deref()
+        .map(str::trim)
+        .filter(|album| !album.is_empty());
+    if ambiguous && album_hint.is_none() {
+        if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+            eprintln!(
+                "[genius] «{}» es genérico y no hay álbum: no se arriesga",
+                target.title
+            );
+        }
         return Ok(None);
     }
-    let raw = RemoteLyrics {
-        id: song.id,
-        track_name: song.title.clone(),
-        artist_name: song.artist_names.clone(),
-        album_name: String::new(),
-        duration: 0.0,
-        plain_lyrics: Some(text),
-        synced_lyrics: None,
-    };
-    let doc = plain_doc_with_source(&raw, track, LyricsSource::Genius);
-    if let Some(doc) = &doc {
-        tracing::debug!(
-            target: "spote::lyrics",
-            "genius: {} líneas extraídas de {}",
-            doc.lines.len(),
-            song.title
-        );
+    let limit = if ambiguous { GENIUS_MAX_CANDIDATES } else { 1 };
+
+    for song in candidates.iter().take(limit) {
+        let path = if song.path.starts_with("http://") || song.path.starts_with("https://") {
+            song.path.clone()
+        } else if song.path.starts_with('/') {
+            format!("{GENIUS_BASE}{}", song.path)
+        } else {
+            format!("{GENIUS_BASE}/{}", song.path)
+        };
+        let Some(response) = genius_get(client, &path, GENIUS_ACCEPT_HTML, deadline).await? else {
+            continue;
+        };
+        let status = response.status();
+        let page = response.text().await.map_err(map_error)?;
+        if ambiguous {
+            let Some(page_album) = genius_page_album(&page) else {
+                if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+                    eprintln!("[genius] {} sin álbum en la ficha; se descarta", song.path);
+                }
+                continue;
+            };
+            let matched = similarity(&page_album, album_hint.unwrap_or_default());
+            if matched < GENIUS_ALBUM_MATCH {
+                if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+                    eprintln!(
+                        "[genius] {} es de «{page_album}» ({matched:.2}); no es el álbum pedido",
+                        song.path
+                    );
+                }
+                continue;
+            }
+        }
+        let text = extract_genius_lyrics(&page);
+        if std::env::var_os("SPOTE_GENIUS_DEBUG").is_some() {
+            eprintln!(
+                "[genius] página {} · {} bytes · {} de letra",
+                status,
+                page.len(),
+                text.len()
+            );
+        }
+        if text.is_empty() {
+            continue;
+        }
+        let raw = RemoteLyrics {
+            id: song.id,
+            track_name: song.title.clone(),
+            artist_name: song.artist_names.clone(),
+            album_name: String::new(),
+            duration: 0.0,
+            plain_lyrics: Some(text),
+            synced_lyrics: None,
+        };
+        return Ok(plain_doc_with_source(&raw, track, LyricsSource::Genius));
     }
-    Ok(doc)
+    Ok(None)
 }
 
 async fn genius_get(
@@ -1772,20 +1814,12 @@ async fn genius_get(
     Ok(Some(response))
 }
 
-fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Option<&'a GeniusSong> {
-    let generic = is_generic_title(&target.title);
-    // Un título con símbolos y poco texto (`(_8(|)`) es genérico por longitud
-    // pero el símbolo lo identifica. En ese caso se exige coincidencia literal
-    // con Genius; el resto de títulos siguen el parecido normal.
-    let symbolic_generic = generic && is_symbolic_title(&target.title);
-    // Genius no publica duración: para títulos de una sola palabra no hay
-    // forma de distinguir dos canciones homónimas del mismo artista. Es
-    // exactamente el caso de «Regular» (dos versiones de Biberon), así que se
-    // prefiere no arriesgar una letra ajena.
-    if target.duration_ms > 0 && generic && !symbolic_generic {
-        return None;
-    }
-    let mut best: Option<(f64, &GeniusSong)> = None;
+/// Candidatos de Genius ordenados de mejor a peor. No descarta los títulos
+/// genéricos: el desempate por álbum (o la renuncia, si no hay álbum) se hace
+/// al abrir las fichas, donde sí hay datos para decidir.
+fn ranked_genius_songs<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Vec<&'a GeniusSong> {
+    let mut scored: Vec<(f64, &GeniusSong)> = Vec::new();
+    let mut seen: HashSet<(i64, &str)> = HashSet::new();
     for section in &search.response.sections {
         for hit in &section.hits {
             let Some(song) = hit.result.as_ref() else {
@@ -1800,16 +1834,21 @@ fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Optio
             if song.lyrics_state == "unavailable" {
                 continue;
             }
+            // Genius repite el mismo tema en `top_hit` y `song`: una ficha,
+            // una visita. Sin id, el path hace de identidad.
+            if !seen.insert((song.id, song.path.as_str())) {
+                continue;
+            }
             // Genius no da duración, así que la versión se juzga por el título:
             // una letra de directo/remix no debe colarse por la de estudio.
             let offered = version_kind(&song.title, None);
             if offered != target.version && offered.is_incompatible() {
                 continue;
             }
+            let symbolic_generic =
+                is_generic_title(&target.title) && is_symbolic_title(&target.title);
             let mut title_score = title_similarity_for(&song.title, target);
             if symbolic_generic {
-                // `similarity` normaliza y descarta paréntesis: para `(_8(|)`
-                // daría 0 incluso consigo mismo. Solo vale el título idéntico.
                 if !titles_match_exactly(&song.title, &target.title) {
                     continue;
                 }
@@ -1841,14 +1880,26 @@ fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Optio
                 }
             }
             let score = title_score * 0.72 + artist_score * 0.28;
-            if best.as_ref().is_none_or(|(best, _)| score > *best) {
-                best = Some((score, song));
-            }
+            scored.push((score, song));
         }
     }
-    best.map(|(_, song)| song)
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+    scored.into_iter().map(|(_, song)| song).collect()
 }
 
+/// Compatibilidad para los tests puros: primer candidato que no sea un
+/// homónimo genérico sin álbum. La producción usa `ranked_genius_songs` y
+/// desempata abriendo hasta tres fichas por álbum.
+#[cfg(test)]
+fn best_genius_song<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Option<&'a GeniusSong> {
+    if target.duration_ms > 0
+        && is_generic_title(&target.title)
+        && !is_symbolic_title(&target.title)
+    {
+        return None;
+    }
+    ranked_genius_songs(search, target).into_iter().next()
+}
 /// Extrae la letra de los `div[data-lyrics-container="true"]` de Genius.
 ///
 /// Sin dependencias de HTML: se recorre el marcado buscando el div, se anidan
@@ -1893,6 +1944,19 @@ fn extract_genius_lyrics(page: &str) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// Álbum principal de una ficha de Genius. Se lee del JSON-LD (`inAlbum`), que
+/// es estable entre rediseños y evita parsear el marcado del panel lateral.
+fn genius_page_album(page: &str) -> Option<String> {
+    let marker = page.find("\"inAlbum\"")?;
+    let script = page[..marker].rfind("<script")?;
+    let body_start = page[script..].find('>')? + script + 1;
+    let body_end = page[body_start..].find("</script>")? + body_start;
+    let value: serde_json::Value = serde_json::from_str(page[body_start..body_end].trim()).ok()?;
+    let album = value.get("inAlbum")?.as_array()?.first()?;
+    let name = album.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn is_section_header(line: &str) -> bool {
@@ -2040,6 +2104,17 @@ mod tests {
             artist: "Arctic Monkeys - Topic".into(),
             album: None,
             duration_ms: 290_000,
+            ..TrackRef::default()
+        }
+    }
+
+    fn biberon_track() -> TrackRef {
+        TrackRef {
+            key: "spotify:track:6NnFzJ2WVzNRBxuBVRXdkW".into(),
+            title: "Regular".into(),
+            artist: "Biberon".into(),
+            album: Some("!Se cayó la bocina¡".into()),
+            duration_ms: 115_336,
             ..TrackRef::default()
         }
     }
@@ -2768,6 +2843,54 @@ mod tests {
         let page = r#"<div data-lyrics-container="true">Te <i>quiero</i> &#39;mucho&#39;<br/>y &quot;más&quot;</div>"#;
         let text = extract_genius_lyrics(page);
         assert_eq!(text, "Te quiero 'mucho'\ny \"más\"");
+    }
+
+    #[test]
+    fn genius_album_is_read_from_json_ld() {
+        let page = r#"<script type="application/ld+json">
+            {"@context":"http://schema.org","@type":"MusicRecording","name":"Regular",
+             "inAlbum":[{"@context":"http://schema.org","@type":"MusicAlbum",
+                         "name":"!Se cayó la bocina¡"}]}
+        </script>"#;
+        let album = genius_page_album(page).expect("el JSON-LD trae el álbum");
+        assert_eq!(album, "!Se cayó la bocina¡");
+        // El álbum de la pista (Spotify) coincide con el de la ficha.
+        assert!(similarity(&album, "!Se cayó la bocina¡") >= GENIUS_ALBUM_MATCH);
+        // El single antiguo de Biberon no se cuela.
+        assert!(similarity("Ev. DisneyChanel", &album) < GENIUS_ALBUM_MATCH);
+        assert!(genius_page_album("<div>sin JSON-LD</div>").is_none());
+    }
+
+    #[test]
+    fn genius_candidates_dedupe_and_rank() {
+        // Mismo caso real: `top_hit` y `song` repiten la ficha del álbum y el
+        // single antiguo comparte título y artista.
+        let body: GeniusSearch = serde_json::from_str(
+            r#"{"response":{"sections":[
+                {"hits":[
+                    {"result":{"_type":"song","id":14644617,"title":"Regular",
+                               "artist_names":"Biberon, Flako NKO & yoyo.stay",
+                               "path":"/Biberon-flako-nko-and-yoyostay-regular-lyrics",
+                               "lyrics_state":"complete"}},
+                    {"result":{"_type":"song","id":12143236,"title":"Regular",
+                               "artist_names":"Biberon","path":"/Biberon-regular-lyrics",
+                               "lyrics_state":"complete"}}]},
+                {"hits":[
+                    {"result":{"_type":"song","id":14644617,"title":"Regular",
+                               "artist_names":"Biberon, Flako NKO & yoyo.stay",
+                               "path":"/Biberon-flako-nko-and-yoyostay-regular-lyrics",
+                               "lyrics_state":"complete"}}]}
+            ]}}"#,
+        )
+        .expect("JSON de búsqueda válido");
+        let target = MatchTarget::from_track(&biberon_track());
+        let ranked = ranked_genius_songs(&body, &target);
+        // La ficha repetida en dos secciones se visita una sola vez.
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked.iter().filter(|song| song.id == 14644617).count(), 1);
+        // El single tiene el artista exacto y puntúa antes, pero el álbum es
+        // lo que decide al abrir la ficha.
+        assert_eq!(ranked[0].id, 12143236);
     }
 
     #[test]

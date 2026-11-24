@@ -26,21 +26,66 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         app.audio.kick_pulse,
     );
     let inner = inset(rect, 2, 2);
+    // Buscador de discos guardados, con el mismo lenguaje visual que el
+    // buscador inline de la biblioteca.
+    let search = Rect::new(inner.x, inner.y, inner.width, 1);
+    fill(
+        buf,
+        search,
+        if app.album_search_focus {
+            pal.surface_alt
+        } else {
+            pal.surface
+        },
+    );
+    let mut search_text = if app.album_query.is_empty() {
+        "buscar discos…  ( / )".to_string()
+    } else {
+        format!("⌕ {}", app.album_query)
+    };
+    if app.album_search_focus {
+        search_text.push('▏');
+    }
+    truncate_chars(&mut search_text, search.width.saturating_sub(1) as usize);
+    text_at(
+        buf,
+        search,
+        search_text,
+        Style::new().fg(color(if app.album_search_focus {
+            pal.text
+        } else if app.album_query.is_empty() {
+            pal.dim
+        } else {
+            pal.primary
+        })),
+        Alignment::Left,
+    );
+    app.hit.add(search, Action::AlbumSearch);
+    let list = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
     if app.albums.is_empty() {
-        let message = if app.lib.count().unwrap_or(0) > 0 {
+        let message = if !app.album_query.is_empty() {
+            "sin discos para la búsqueda · Esc limpia"
+        } else if app.lib.count().unwrap_or(0) > 0 {
             "sin metadatos de álbum · usa clic derecho → portada de Spotify"
         } else {
             "biblioteca vacía · / para buscar o spote ingest <dir>"
         };
         text_at(
             buf,
-            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            Rect::new(list.x, list.y + 1, list.width, 1),
             message,
             Style::new().fg(color(pal.dim)),
             Alignment::Center,
         );
         return;
     }
+    // A partir de aquí se usan las coordenadas de la lista, no las del panel.
+    let inner = list;
     let card_h = 3u16;
     let columns = if inner.width >= 100 { 2u16 } else { 1 };
     let card_w = (inner.width.saturating_sub(columns.saturating_sub(1) * 2)) / columns;
@@ -109,7 +154,7 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         put(buf, text_x, y + 2, &meta, color(pal.dim), None);
         app.hit.add(card, Action::AlbumOpen(index));
     }
-    let footer = "enter abre · d baja el álbum · s guarda como lista";
+    let footer = "enter abre · d baja el álbum · s guarda como lista · / busca";
     if rect.height > 4 {
         text_at(
             buf,

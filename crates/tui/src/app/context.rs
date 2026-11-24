@@ -48,6 +48,41 @@ impl App {
         self.spectrum.stop();
     }
 
+    /// Quita de la biblioteca la fila `index` de la vista actual. Es el atajo
+    /// rápido (`X` o ⇧clic en la ×). En el filtro «todo» borra la ficha y sus
+    /// fuentes en cascada, pero deja el fichero de audio en disco; dentro de
+    /// una lista solo la saca de esa lista.
+    pub(super) fn remove_library_row(&mut self, index: usize) {
+        let Some(row) = self.view.get(index) else {
+            return;
+        };
+        let key = row.track.key.clone();
+        let title = row.track.title.clone();
+        if let LibFilter::Playlist(id) = self.lib_filter {
+            match self.lib.remove_from_playlist(id, &key) {
+                Ok(()) => {
+                    self.toast(format!("«{title}» fuera de la lista"), ToastKind::Ok);
+                    self.refresh_library();
+                }
+                Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
+            }
+            return;
+        }
+        match self.lib.delete_track(&key) {
+            Ok(_) => {
+                self.stop_current_if_key(&key);
+                self.toast(format!("«{title}» fuera de la biblioteca"), ToastKind::Ok);
+                self.refresh_library();
+            }
+            Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
+        }
+    }
+
+    pub(super) fn remove_library_selected(&mut self) {
+        let index = self.selected;
+        self.remove_library_row(index);
+    }
+
     pub(super) fn open_context(&mut self, action: &Action) {
         let menu = match action {
             Action::SelectRow(index) => self

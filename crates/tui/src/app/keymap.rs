@@ -59,6 +59,7 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("g", "perfil de artista"),
                 ("clic derecho", "acciones / borrar / estado"),
                 ("R", "recargar biblioteca"),
+                ("X / ⇧clic ×", "quitar de la biblioteca"),
             ],
         ),
         (
@@ -214,7 +215,8 @@ impl App {
                 Hint { key: "f", label: "favorita" },
                 Hint { key: "g", label: "artista" },
                 Hint { key: "clic-der", label: "acciones" },
-                Hint { key: "supr", label: "borrar" },
+                Hint { key: "X", label: "quitar" },
+                Hint { key: "supr", label: "menú" },
                 Hint { key: "M", label: "arte" },
                 Hint { key: "E", label: "diseño" },
                 Hint { key: "?", label: "ayuda" },

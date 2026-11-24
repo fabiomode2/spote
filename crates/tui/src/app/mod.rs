@@ -82,14 +82,14 @@ impl LibFilter {
 }
 
 impl Tab {
-    // Álbumes ya no es una pestaña: los álbumes se abren desde la búsqueda,
-    // la biblioteca o un artista. Se mantiene el variante interno para el
-    // tracklist antiguo, pero no aparece en la navegación.
-    pub const ALL: [Tab; 6] = [
+    /// Pestañas visibles en la navegación. `Albums` agrupa los discos
+    /// guardados de la biblioteca y tiene buscador propio.
+    pub const ALL: [Tab; 7] = [
         Tab::Now,
         Tab::Search,
         Tab::Library,
         Tab::Audio,
+        Tab::Albums,
         Tab::Room,
         Tab::Settings,
     ];
@@ -235,6 +235,7 @@ pub enum Action {
     Tab(Tab),
     LibraryFilter(LibFilter),
     LibrarySearch,
+    AlbumSearch,
     PlaylistOpen(i64),
     SettingsRow(usize),
     SettingsAdjust(usize, i32),
@@ -271,6 +272,9 @@ pub enum Action {
     ArtMode,
     ArtFullscreen,
     SelectRow(usize),
+    /// Quita la fila de la biblioteca (× con shift o tecla X), sin tocar el
+    /// fichero de audio.
+    LibraryRemove(usize),
     AlbumOpen(usize),
     Resize(Pane),
     AlbumDownload,
@@ -1019,6 +1023,9 @@ pub struct App {
     /// Filtro de texto de la biblioteca (buscador inline).
     pub lib_query: String,
     pub lib_search_focus: bool,
+    /// Buscador de discos guardados (pestaña Álbumes).
+    pub album_query: String,
+    pub album_search_focus: bool,
     /// Primera fila visible de la biblioteca. El scroll es por bordes: la
     /// selección se mueve dentro de la página y la lista solo desplaza cuando
     /// hace falta, sin que la "cámara" persiga al cursor con un muelle.
@@ -1136,6 +1143,9 @@ pub struct App {
     pub mosaic_time: f32,
     pub hit: HitMap,
     pub hover: Option<Action>,
+    /// Shift detectado en el último evento de ratón. La biblioteca lo usa para
+    /// enseñar la × de borrado rápido en cada fila.
+    pub shift_held: bool,
     pub last_click: Option<(Instant, usize)>,
     pub toasts: Vec<Toast>,
     pub status: String,
@@ -1281,6 +1291,8 @@ impl App {
             selected: 0,
             lib_query: String::new(),
             lib_search_focus: false,
+            album_query: String::new(),
+            album_search_focus: false,
             list_start: 0,
             queue_start: 0,
             search_start: 0,
@@ -1366,6 +1378,7 @@ impl App {
             mosaic_time: 0.0,
             hit: HitMap::default(),
             hover: None,
+            shift_held: false,
             last_click: None,
             toasts: Vec::new(),
             status: String::new(),
@@ -1460,7 +1473,22 @@ impl App {
             },
             Tab::Albums => {
                 match self.lib.albums() {
-                    Ok(rows) => self.albums = rows,
+                    Ok(rows) => {
+                        let query = spote_core::util::normalize(&self.album_query);
+                        self.albums = if query.is_empty() {
+                            rows
+                        } else {
+                            rows.into_iter()
+                                .filter(|row| {
+                                    let haystack = spote_core::util::normalize(&format!(
+                                        "{} {}",
+                                        row.album, row.artist
+                                    ));
+                                    haystack.contains(&query)
+                                })
+                                .collect()
+                        };
+                    }
                     Err(err) => {
                         self.set_status(format!("álbumes: {err}"));
                     }
@@ -1731,6 +1759,12 @@ impl App {
         if !self.cfg.player.streaming || !self.tools.yt_dlp {
             self.queue_track(track, None);
             return;
+        }
+        self.lib.upsert_track(&track).ok();
+        if let Some(url) = &track.art_url {
+            // La copia local de la portada también alimenta al mini mientras
+            // el stream se resuelve; si no, se queda con el vinilo genérico.
+            self.lib.set_art(&track.key, None, Some(url)).ok();
         }
         let hint = track.source_hint.clone().or_else(|| {
             self.lib.source_hint(&track.key).map(|(provider, id)| {

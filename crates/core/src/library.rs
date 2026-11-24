@@ -115,6 +115,11 @@ pub struct LyricsRow {
 /// guardadas con una versión anterior se re-alinean al reproducirlas.
 pub const LYRICS_ALIGN_VERSION: i64 = 3;
 
+/// Versión de la política de fuentes de letras. Al cambiarla se invalidan las
+/// cachés antiguas (excepto las locales/manuales) para que nadie siga viendo
+/// una letra inventada por captions/ASR de una versión anterior.
+pub const LYRICS_POLICY_VERSION: i64 = 2;
+
 pub struct Library {
     conn: Connection,
     path: PathBuf,
@@ -268,6 +273,7 @@ impl Library {
         )?;
         self.migrate_playlists()?;
         self.migrate_lyrics()?;
+        self.migrate_lyrics_policy()?;
         Ok(())
     }
 
@@ -294,6 +300,36 @@ impl Library {
                 [],
             )?;
         }
+        Ok(())
+    }
+
+    /// Invalida una vez las cachés de letras de políticas anteriores. Las
+    /// locales y las elegidas a mano se conservan.
+    fn migrate_lyrics_policy(&mut self) -> Result<()> {
+        let current: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM setting WHERE key = 'lyrics_policy_version'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let version = current
+            .as_deref()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        if version >= LYRICS_POLICY_VERSION {
+            return Ok(());
+        }
+        self.conn.execute(
+            "DELETE FROM lyrics WHERE lower(source) NOT IN ('local', 'manual')",
+            [],
+        )?;
+        self.conn.execute(
+            "INSERT INTO setting(key, value) VALUES('lyrics_policy_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![LYRICS_POLICY_VERSION.to_string()],
+        )?;
         Ok(())
     }
 

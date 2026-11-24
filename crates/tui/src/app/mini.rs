@@ -2,7 +2,7 @@
 use super::*;
 
 use spote_protocol::mini::{
-    MiniCommand, MiniSnapshot, MINI_REPEAT_ALL, MINI_REPEAT_OFF, MINI_REPEAT_ONE,
+    MiniCommand, MiniSnapshot, MiniVizCell, MINI_REPEAT_ALL, MINI_REPEAT_OFF, MINI_REPEAT_ONE,
 };
 
 impl App {
@@ -56,6 +56,12 @@ impl App {
                 MiniCommand::SetVolume(volume) => self.set_volume(volume),
                 MiniCommand::Shuffle => self.toggle_shuffle(),
                 MiniCommand::CycleRepeat => self.cycle_repeat(),
+                MiniCommand::CycleViz => {
+                    self.viz.next_preset();
+                    self.cfg.ui.viz = self.viz.preset_name().to_string();
+                    self.cfg.save().ok();
+                    self.needs_redraw = true;
+                }
                 MiniCommand::Quit => {}
             }
         }
@@ -148,6 +154,43 @@ impl App {
             .chunks(2)
             .map(|pair| pair.iter().sum::<f32>() / pair.len() as f32)
             .collect();
+        let (cols, rows, cells) = mini_viz_frame(&self.viz);
+        snapshot.viz_preset = self.viz.preset_name().to_string();
+        snapshot.viz_presets = crate::viz::Viz::STRIP
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        snapshot.viz_cols = cols;
+        snapshot.viz_rows = rows;
+        snapshot.viz = cells;
         snapshot.with_bands(bands)
     }
+}
+
+/// Reduce el canvas del visual de la TUI a una rejilla pequeña que el mini
+/// puede dibujar con texto monoespaciado sin enviar miles de celdas por tick.
+fn mini_viz_frame(viz: &crate::viz::Viz) -> (u16, u16, Vec<MiniVizCell>) {
+    let out = &viz.output;
+    if out.w == 0 || out.h == 0 {
+        return (0, 0, Vec::new());
+    }
+    let cols = out.w.min(56);
+    let rows = out.h.min(9);
+    let mut cells = Vec::with_capacity(cols as usize * rows as usize);
+    for y in 0..rows {
+        let sy = (u32::from(y) * u32::from(out.h) / u32::from(rows)) as u16;
+        for x in 0..cols {
+            let sx = (u32::from(x) * u32::from(out.w) / u32::from(cols)) as u16;
+            let cell = out.get(i32::from(sx), i32::from(sy)).unwrap_or_default();
+            if cell.alpha <= 0.04 || cell.ch == ' ' {
+                continue;
+            }
+            cells.push(MiniVizCell {
+                ch: cell.ch,
+                fg: [cell.fg.0, cell.fg.1, cell.fg.2],
+                alpha: (cell.alpha.clamp(0.0, 1.0) * 255.0).round() as u8,
+            });
+        }
+    }
+    (cols, rows, cells)
 }
