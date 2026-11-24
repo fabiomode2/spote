@@ -814,10 +814,12 @@ impl MiniApp {
         let cy = row.center().y;
         let pulse = self.pulse();
 
-        let gap = 6.0;
-        let sizes = [26.0, 28.0, 40.0, 28.0, 26.0];
+        let gap = 4.0;
+        // Anchos pensados para que el icono pixel-art llene el botón, como en
+        // el transporte de la TUI (shuffle y repeat son más anchos).
+        let sizes = [52.0, 34.0, 40.0, 34.0, 44.0];
         let total = sizes.iter().sum::<f32>() + gap * (sizes.len() - 1) as f32;
-        let volume_w = 148.0;
+        let volume_w = 144.0;
         let free = (column.width() - volume_w - 14.0 - total).max(0.0);
         let mut x = column.left() + free * 0.5;
         let mut next_button = |width: f32| -> Rect {
@@ -1122,10 +1124,8 @@ fn icon_button(
         Color32::from_rgba_unmultiplied(17, 18, 24, 205)
     };
     painter.rect_filled(rect, rounding, background);
-    let color = if primary {
+    let color = if primary || active {
         TEXT
-    } else if active {
-        accent
     } else if hovered {
         TEXT
     } else {
@@ -1154,6 +1154,11 @@ fn draw_close(painter: &egui::Painter, rect: Rect, color: Color32) {
 }
 
 /// Iconos de bloque, los mismos que la barra de transporte de la TUI.
+/// Iconos de bloque, los mismos que la barra de transporte de la TUI.
+///
+/// En el mini hay altura de sobra, así que se dibuja el arte completo de cinco
+/// filas (la TUI lo recorta a tres cuando la barra es baja) y se escala para
+/// llenar el botón.
 fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let grid = match icon {
         Icon::Shuffle => ICON_SHUFFLE,
@@ -1170,7 +1175,7 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(1) as f32;
-    let cell = (rect.width() / cols).min(rect.height() / rows) * 0.82;
+    let cell = (rect.height() * 0.86 / rows).min(rect.width() * 0.90 / cols);
     if cell <= 0.4 {
         return;
     }
@@ -1185,7 +1190,7 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             let cell_rect = Rect::from_min_size(
                 pos2(x0 + x as f32 * cell, y0 + y as f32 * cell),
-                Vec2::splat((cell - 0.35).max(0.7)),
+                Vec2::splat((cell - 0.5).max(0.6)),
             );
             painter.rect_filled(cell_rect, CornerRadius::same(0), color);
         }
