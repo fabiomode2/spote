@@ -815,15 +815,15 @@ impl MiniApp {
         let pulse = self.pulse();
 
         let gap = 4.0;
-        // Anchos pensados para que el icono pixel-art llene el botón, como en
-        // el transporte de la TUI (shuffle y repeat son más anchos).
-        let sizes = [52.0, 34.0, 40.0, 34.0, 44.0];
+        // Proporciones del transporte de la TUI: 9 celdas para shuffle, play y
+        // bucle; 7 para anterior/siguiente, con la altura de sus tres filas.
+        let sizes = [44.0, 34.0, 44.0, 34.0, 44.0];
         let total = sizes.iter().sum::<f32>() + gap * (sizes.len() - 1) as f32;
         let volume_w = 144.0;
         let free = (column.width() - volume_w - 14.0 - total).max(0.0);
         let mut x = column.left() + free * 0.5;
         let mut next_button = |width: f32| -> Rect {
-            let rect = Rect::from_min_size(pos2(x, cy - 18.0), vec2(width, 36.0));
+            let rect = Rect::from_min_size(pos2(x, cy - 12.0), vec2(width, 24.0));
             x += width + gap;
             rect
         };
@@ -1154,11 +1154,11 @@ fn draw_close(painter: &egui::Painter, rect: Rect, color: Color32) {
 }
 
 /// Iconos de bloque, los mismos que la barra de transporte de la TUI.
-/// Iconos de bloque, los mismos que la barra de transporte de la TUI.
 ///
-/// En el mini hay altura de sobra, así que se dibuja el arte completo de cinco
-/// filas (la TUI lo recorta a tres cuando la barra es baja) y se escala para
-/// llenar el botón.
+/// La barra dibuja el arte de cinco filas muestreado a tres (filas 0, 1 y 3)
+/// cuando el transporte tiene cuatro filas, que es el tamaño por defecto. El
+/// mini usa ese mismo muestreo para que los botones enseñen exactamente la
+/// misma imagen, solo que a mayor resolución.
 fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
     let grid = match icon {
         Icon::Shuffle => ICON_SHUFFLE,
@@ -1169,28 +1169,31 @@ fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Repeat(true) => ICON_REPEAT_ONE,
         Icon::Repeat(false) => ICON_REPEAT,
     };
-    let rows = grid.len() as f32;
+    let h = grid.len();
+    let keep = 3.min(h);
+    let rows: Vec<&str> = (0..keep).map(|i| grid[(i * h / keep).min(h - 1)]).collect();
+    let row_count = rows.len() as f32;
     let cols = grid
         .iter()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(1) as f32;
-    let cell = (rect.height() * 0.86 / rows).min(rect.width() * 0.90 / cols);
+    let cell = (rect.height() * 0.86 / row_count).min(rect.width() * 0.90 / cols);
     if cell <= 0.4 {
         return;
     }
     let width = cols * cell;
-    let height = rows * cell;
+    let height = row_count * cell;
     let x0 = rect.center().x - width * 0.5;
     let y0 = rect.center().y - height * 0.5;
-    for (y, line) in grid.iter().enumerate() {
+    for (y, line) in rows.iter().enumerate() {
         for (x, ch) in line.chars().enumerate() {
             if ch == ' ' {
                 continue;
             }
             let cell_rect = Rect::from_min_size(
                 pos2(x0 + x as f32 * cell, y0 + y as f32 * cell),
-                Vec2::splat((cell - 0.5).max(0.6)),
+                Vec2::splat((cell - 0.2).max(0.5)),
             );
             painter.rect_filled(cell_rect, CornerRadius::same(0), color);
         }
