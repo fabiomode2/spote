@@ -1,9 +1,10 @@
 //! Ventana del mini reproductor.
 //!
-//! La UI se dibuja a mano sobre un panel redondeado: cabecera arrastrable,
-//! portada, espectro, progreso y controles geométricos. No usa widgets de
-//! formulario salvo las zonas interactivas (`ui.allocate_rect`), así el
-//! resultado es igual en X11 y Wayland.
+//! La UI imita el transporte de la TUI: tipografía monoespaciada, barras de
+//! bloques, chips planos y botones pixel-art. El visual de la ventana grande
+//! ocupa todo el fondo y la portada del disco suena a la izquierda. No usa
+//! widgets de formulario salvo las zonas interactivas (`ui.allocate_rect`),
+//! así el resultado es igual en X11 y Wayland.
 
 use crate::net::{MiniLink, NetEvent};
 use eframe::egui::{
@@ -13,6 +14,10 @@ use eframe::egui::{
 use spote_protocol::mini::{
     format_time, mini_socket_path, MiniCommand, MiniSnapshot, MINI_BAND_COUNT,
 };
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
+
+type ArtFetch = Receiver<(String, u32, u32, Vec<u8>)>;
 
 const BG: Color32 = Color32::from_rgb(7, 8, 11);
 const PANEL: Color32 = Color32::from_rgb(17, 18, 24);
@@ -22,8 +27,9 @@ const MUTED: Color32 = Color32::from_rgb(140, 144, 157);
 const FAINT: Color32 = Color32::from_rgb(52, 55, 66);
 const DEFAULT_ACCENT: Color32 = Color32::from_rgb(92, 196, 170);
 
-const ART_SIZE: f32 = 68.0;
-const CORNER: u8 = 14;
+const ART_SIZE: f32 = 92.0;
+const CORNER: u8 = 2;
+
 const FRAME_MS: u64 = 33;
 
 pub struct MiniApp {
@@ -36,6 +42,7 @@ pub struct MiniApp {
 
     art_source: Option<String>,
     texture: Option<TextureHandle>,
+    art_fetch: Option<ArtFetch>,
 
     smooth: [f32; MINI_BAND_COUNT],
     peaks: [f32; MINI_BAND_COUNT],
@@ -73,6 +80,7 @@ impl MiniApp {
             quit_sent: false,
             art_source: None,
             texture: None,
+            art_fetch: None,
             smooth: [0.0; MINI_BAND_COUNT],
             peaks: [0.0; MINI_BAND_COUNT],
             last_frame: 0.0,
@@ -109,6 +117,13 @@ impl MiniApp {
             self.peaks = [0.0; MINI_BAND_COUNT];
             self.seek_preview = None;
             self.play_hold_until = 0.0;
+            // La portada puede llegar después del primer snapshot: al cambiar
+            // de pista se fuerza a releerla aunque la ruta se repita. También
+            // se corta cualquier descarga en vuelo: si termina tarde no puede
+            // pintar la portada de la pista anterior sobre la nueva.
+            self.art_source = None;
+            self.texture = None;
+            self.art_fetch = None;
         }
         self.snapshot_at = now;
         let optimistic_play = now < self.play_hold_until;
@@ -125,30 +140,102 @@ impl MiniApp {
     }
 
     fn ensure_art(&mut self, ctx: &egui::Context) {
-        let wanted = self.snapshot.art_path.clone();
+        // Resultado de la descarga remota en curso.
+        if let Some(rx) = &self.art_fetch {
+            match rx.try_recv() {
+                Ok((key, width, height, data)) => {
+                    self.art_fetch = None;
+                    if key != self.snapshot.track_key {
+                        // La descarga era de otra pista: se descarta sin tocar
+                        // la textura actual.
+                        return;
+                    }
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize],
+                        &data,
+                    );
+                    self.texture = Some(ctx.load_texture(
+                        format!("spote-mini-art-url:{}", self.snapshot.track_key),
+                        color_image,
+                        TextureOptions::LINEAR,
+                    ));
+                }
+                Err(TryRecvError::Disconnected) => self.art_fetch = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+
+        let wanted = self
+            .snapshot
+            .art_path
+            .clone()
+            .map(|path| format!("{}|path|{path}", self.snapshot.track_key))
+            .or_else(|| {
+                self.snapshot
+                    .art_url
+                    .clone()
+                    .map(|url| format!("{}|url|{url}", self.snapshot.track_key))
+            });
         if wanted == self.art_source {
             return;
         }
         self.art_source = wanted.clone();
         self.texture = None;
+        self.art_fetch = None;
 
-        let Some(path) = wanted else {
+        if let Some(path) = self.snapshot.art_path.clone() {
+            // `image::open` adivina el formato por la extensión y los cachés
+            // de spote usan `.img`; se lee el contenido y se detecta por magic.
+            if let Ok(bytes) = std::fs::read(&path) {
+                if let Ok(image) = image::load_from_memory(&bytes) {
+                    let image = image.thumbnail(320, 320);
+                    let rgba = image.to_rgba8();
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                        [rgba.width() as usize, rgba.height() as usize],
+                        rgba.as_raw(),
+                    );
+                    self.texture = Some(ctx.load_texture(
+                        format!("spote-mini-art:{path}"),
+                        color_image,
+                        TextureOptions::LINEAR,
+                    ));
+                    return;
+                }
+            }
+            // Si la ruta está rota o el fichero no es una imagen, se intenta
+            // la URL remota en vez de quedarse con el vinilo genérico.
+        }
+
+        let Some(url) = self.snapshot.art_url.clone() else {
             return;
         };
-
-        if let Ok(image) = image::open(&path) {
+        // Descarga fuera del hilo de egui: una portada remota lenta no debe
+        // congelar la ventana ni la reproducción. Con timeout para que un
+        // servidor que no responde no deje el hilo colgado para siempre.
+        let Some(client) = art_client() else {
+            // No marques la fuente como intentada si ni siquiera se pudo
+            // construir el cliente: el siguiente frame reintenta.
+            self.art_source = None;
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.art_fetch = Some(rx);
+        let key = self.snapshot.track_key.clone();
+        std::thread::spawn(move || {
+            let fetched = client
+                .get(&url)
+                .send()
+                .and_then(|response| response.error_for_status())
+                .ok()
+                .and_then(|response| response.bytes().ok());
+            let Some(bytes) = fetched else { return };
+            let Ok(image) = image::load_from_memory(&bytes) else {
+                return;
+            };
             let image = image.thumbnail(320, 320);
             let rgba = image.to_rgba8();
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                [rgba.width() as usize, rgba.height() as usize],
-                rgba.as_raw(),
-            );
-            self.texture = Some(ctx.load_texture(
-                format!("spote-mini-art:{path}"),
-                color_image,
-                TextureOptions::LINEAR,
-            ));
-        }
+            let _ = tx.send((key, rgba.width(), rgba.height(), rgba.as_raw().to_vec()));
+        });
     }
 
     fn animate(&mut self, now: f64, dt: f32) {
@@ -257,29 +344,67 @@ impl MiniApp {
     fn paint(&mut self, ui: &mut egui::Ui, now: f64) {
         let accent = self.accent();
         let full = ui.max_rect();
-        let panel = full.shrink(6.0);
-        let content =
-            Rect::from_min_max(panel.min + vec2(12.0, 11.0), panel.max - vec2(12.0, 11.0));
-        let painter = ui.painter().with_clip_rect(panel);
+        let painter = ui.painter().with_clip_rect(full);
 
-        painter.rect_filled(panel, CornerRadius::same(CORNER), PANEL);
-        painter.rect_stroke(
-            panel,
+        painter.rect_filled(full, CornerRadius::same(CORNER), BG);
+        let has_viz = self.snapshot.viz_rows > 0
+            && self.snapshot.viz_cols > 0
+            && !self.snapshot.viz.is_empty();
+        if has_viz {
+            self.paint_viz(&painter, full);
+        } else {
+            self.paint_spectrum(&painter, full, accent);
+        }
+
+        // El visual ocupa toda la ventana. El velo solo baja el contraste lo
+        // justo para que portada, texto y controles se lean encima.
+        painter.rect_filled(
+            full,
             CornerRadius::same(CORNER),
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 16)),
+            Color32::from_rgba_unmultiplied(7, 8, 11, 100),
+        );
+        painter.rect_filled(
+            Rect::from_min_max(pos2(full.left(), full.top() + 104.0), full.max),
+            CornerRadius::same(0),
+            Color32::from_rgba_unmultiplied(7, 8, 11, 82),
+        );
+        painter.rect_stroke(
+            full,
+            CornerRadius::same(CORNER),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
             StrokeKind::Inside,
         );
-        // Halo tenue del color de la portada detrás del arte.
-        painter.circle_filled(
-            pos2(content.left() + ART_SIZE * 0.5, content.top() + 78.0),
-            ART_SIZE,
-            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 9),
-        );
 
+        let content = full.shrink2(vec2(14.0, 12.0));
         self.paint_header(ui, &painter, content, now, accent);
-        self.paint_body(ui, &painter, content, now, accent);
+        self.paint_art(&painter, content, accent);
         self.paint_progress(ui, &painter, content, now, accent);
         self.paint_controls(ui, &painter, content, now, accent);
+        self.paint_chips(ui, &painter, content, accent);
+
+        if !self.connected {
+            let overlay =
+                Rect::from_min_max(pos2(content.left(), content.top() + 38.0), content.max);
+            painter.rect_filled(
+                overlay,
+                CornerRadius::same(2),
+                Color32::from_rgba_unmultiplied(7, 8, 11, 235),
+            );
+            painter.text(
+                overlay.center() - vec2(0.0, 8.0),
+                Align2::CENTER_CENTER,
+                "spote no está abierto",
+                FontId::monospace(12.0),
+                TEXT,
+            );
+            painter.text(
+                overlay.center() + vec2(0.0, 10.0),
+                Align2::CENTER_CENTER,
+                "reintentando cada 1 s",
+                FontId::monospace(9.5),
+                MUTED,
+            );
+        }
     }
 
     fn paint_header(
@@ -291,15 +416,15 @@ impl MiniApp {
         accent: Color32,
     ) {
         let close = Rect::from_min_size(
-            pos2(content.right() - 24.0, content.top() + 1.0),
-            Vec2::splat(24.0),
+            pos2(content.right() - 22.0, content.top() + 2.0),
+            Vec2::splat(22.0),
         );
-        let dot_center = pos2(close.left() - 15.0, content.top() + 12.0);
+        let dot_center = pos2(close.left() - 13.0, content.top() + 13.0);
 
         let drag = ui.allocate_rect(
             Rect::from_min_max(
                 content.left_top(),
-                pos2(close.left() - 4.0, content.top() + 40.0),
+                pos2(close.left() - 6.0, content.top() + 38.0),
             ),
             Sense::click_and_drag(),
         );
@@ -310,7 +435,8 @@ impl MiniApp {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
-        let title_width = (dot_center.x - 10.0 - content.left()).max(24.0);
+        let title_right = dot_center.x - 12.0;
+        let title_width = (title_right - content.left()).max(32.0);
         let title = if self.snapshot.title.is_empty() {
             "Sin reproducción"
         } else {
@@ -320,7 +446,7 @@ impl MiniApp {
             ui,
             pos2(content.left(), content.top()),
             title,
-            FontId::proportional(15.0),
+            FontId::monospace(15.0),
             TEXT,
             title_width,
         );
@@ -328,19 +454,11 @@ impl MiniApp {
         let subtitle = track_subtitle(&self.snapshot);
         paint_text(
             ui,
-            pos2(content.left(), content.top() + 19.0),
+            pos2(content.left(), content.top() + 21.0),
             &subtitle,
-            FontId::proportional(11.0),
+            FontId::monospace(9.5),
             MUTED,
             title_width,
-        );
-
-        painter.line_segment(
-            [
-                pos2(content.left(), content.top() + 42.0),
-                pos2(content.right(), content.top() + 42.0),
-            ],
-            Stroke::new(1.0_f32, scale(accent, 0.22)),
         );
 
         let dot = ui.allocate_rect(
@@ -348,15 +466,7 @@ impl MiniApp {
             Sense::hover(),
         );
         if self.connected {
-            painter.circle_filled(dot_center, 3.5, accent);
-            painter.circle_stroke(
-                dot_center,
-                6.0,
-                Stroke::new(
-                    1.0_f32,
-                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 60),
-                ),
-            );
+            painter.circle_filled(dot_center, 3.2, accent);
         } else {
             let pulse = (now * 2.0).sin() as f32 * 0.5 + 0.5;
             let muted_red = Color32::from_rgb(152, 96, 96);
@@ -393,83 +503,176 @@ impl MiniApp {
         let close_response = ui.allocate_rect(close, Sense::click());
         if close_response.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-            painter.rect_filled(close, CornerRadius::same(7), PANEL_HI);
+            painter.rect_filled(close, CornerRadius::same(2), PANEL_HI);
         }
-        let close_color = if close_response.hovered() {
-            TEXT
-        } else {
-            MUTED
-        };
-        draw_close(painter, close, close_color);
+        draw_close(
+            painter,
+            close.shrink(7.0),
+            if close_response.hovered() {
+                TEXT
+            } else {
+                MUTED
+            },
+        );
         if close_response.clicked() {
             self.request_close(ui.ctx());
         }
     }
 
-    fn paint_body(
+    fn paint_art(&self, painter: &egui::Painter, content: Rect, accent: Color32) {
+        let art = art_rect(content);
+        painter.rect_filled(
+            art,
+            CornerRadius::same(2),
+            Color32::from_rgba_unmultiplied(10, 11, 15, 200),
+        );
+        if let Some(texture) = &self.texture {
+            painter.image(
+                texture.id(),
+                art,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            painter.text(
+                art.center() - vec2(0.0, 6.0),
+                Align2::CENTER_CENTER,
+                "♪",
+                FontId::monospace(26.0),
+                scale(accent, 0.8),
+            );
+            painter.text(
+                art.center() + vec2(0.0, 16.0),
+                Align2::CENTER_CENTER,
+                "sin portada",
+                FontId::monospace(8.0),
+                MUTED,
+            );
+        }
+        painter.rect_stroke(
+            art,
+            CornerRadius::same(2),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
+            StrokeKind::Inside,
+        );
+        // Remate de acento, como el borde inferior del transporte de la TUI.
+        painter.line_segment(
+            [
+                pos2(art.left(), art.bottom()),
+                pos2(art.right(), art.bottom()),
+            ],
+            Stroke::new(2.0_f32, scale(accent, 0.85)),
+        );
+    }
+
+    /// Pinta el frame del visual de la TUI sobre toda la ventana.
+    ///
+    /// La rejilla llega como caracteres de bloque; se convierten a rectángulos
+    /// para que el fondo sea pixel-art nítido y barato de dibujar (miles de
+    /// glifos por frame harían temblar la ventana).
+    fn paint_viz(&self, painter: &egui::Painter, rect: Rect) {
+        let cols = self.snapshot.viz_cols.max(1) as f32;
+        let rows = self.snapshot.viz_rows.max(1) as f32;
+        let cell_w = rect.width() / cols;
+        let cell_h = rect.height() / rows;
+        let mut mesh = egui::Mesh::default();
+        let lift = |c: u8| -> u8 { (f32::from(c) * 1.22 + 12.0).min(255.0) as u8 };
+        let mut glyphs: Vec<(Pos2, char, Color32)> = Vec::new();
+        for cell in &self.snapshot.viz {
+            if cell.alpha < 6 || cell.ch == ' ' {
+                continue;
+            }
+            let color = Color32::from_rgba_unmultiplied(
+                lift(cell.fg[0]),
+                lift(cell.fg[1]),
+                lift(cell.fg[2]),
+                cell.alpha,
+            );
+            let Some((fx, fy, fw, fh, scale_alpha)) = viz_ink(cell.ch) else {
+                glyphs.push((
+                    pos2(
+                        rect.left() + (cell.x as f32 + 0.5) * cell_w,
+                        rect.top() + (cell.y as f32 + 0.5) * cell_h,
+                    ),
+                    cell.ch,
+                    color,
+                ));
+                continue;
+            };
+            let x0 = rect.left() + cell.x as f32 * cell_w + fx * cell_w;
+            let y0 = rect.top() + cell.y as f32 * cell_h + fy * cell_h;
+            let x1 = (x0 + fw * cell_w).min(rect.right());
+            let y1 = (y0 + fh * cell_h).min(rect.bottom());
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            let alpha = (f32::from(color.a()) * scale_alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+            mesh.add_colored_rect(
+                Rect::from_min_max(pos2(x0, y0), pos2(x1, y1)),
+                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha),
+            );
+        }
+        painter.add(Shape::mesh(mesh));
+        // Los caracteres que no son bloques (dígitos, líneas finas, braille)
+        // conservan su glifo: son pocos y así el preset no pierde detalle.
+        let font = FontId::monospace((cell_h * 0.98).min(cell_w * 1.2).max(4.0));
+        for (pos, ch, color) in glyphs {
+            painter.text(pos, Align2::CENTER_CENTER, ch, font.clone(), color);
+        }
+    }
+
+    fn paint_chips(
         &mut self,
         ui: &mut egui::Ui,
         painter: &egui::Painter,
         content: Rect,
-        _now: f64,
         accent: Color32,
     ) {
-        let art = Rect::from_min_size(
-            pos2(content.left(), content.top() + 48.0),
-            Vec2::splat(ART_SIZE),
+        let column = right_column(content);
+        let row = Rect::from_min_size(
+            pos2(column.left(), content.top() + 112.0),
+            vec2(column.width(), 16.0),
         );
-        let spectrum = Rect::from_min_max(
-            pos2(art.right() + 14.0, art.top()),
-            pos2(content.right(), art.bottom()),
-        );
-
-        if let Some(texture) = &self.texture {
-            ui.put(
-                art,
-                egui::Image::new(texture)
-                    .fit_to_exact_size(art.size())
-                    .corner_radius(10.0),
-            );
+        let label = if self.snapshot.viz_preset.is_empty() {
+            "viz".to_string()
         } else {
-            painter.rect_filled(art, CornerRadius::same(10), mix(PANEL, accent, 0.16));
-            let center = art.center();
-            let radius = art.width() * 0.30;
-            painter.circle_filled(center, radius, Color32::from_rgb(11, 12, 16));
-            painter.circle_stroke(center, radius, Stroke::new(1.0_f32, scale(accent, 0.65)));
-            painter.circle_filled(center, 5.0, accent);
-            painter.circle_filled(center, 1.8, Color32::from_rgb(24, 25, 31));
-        }
-        painter.rect_stroke(
-            art,
-            CornerRadius::same(10),
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
-            StrokeKind::Inside,
+            format!("viz · {}", self.snapshot.viz_preset)
+        };
+        let width = (label.chars().count() as f32 * 6.0 + 14.0).max(34.0);
+        let chip = Rect::from_min_size(row.min, vec2(width, 16.0));
+        let response = ui.allocate_rect(chip, Sense::click());
+        painter.rect_filled(
+            chip,
+            CornerRadius::same(2),
+            if response.hovered() {
+                PANEL_HI
+            } else {
+                Color32::from_rgba_unmultiplied(22, 24, 31, 200)
+            },
         );
-
-        self.paint_spectrum(painter, spectrum, accent);
-
-        if !self.connected {
-            let overlay = spectrum.shrink(1.0);
-            painter.rect_filled(
-                overlay,
-                CornerRadius::same(10),
-                Color32::from_rgba_unmultiplied(8, 9, 12, 226),
-            );
-            painter.text(
-                pos2(spectrum.center().x, spectrum.center().y - 9.0),
-                Align2::CENTER_CENTER,
-                "spote no está abierto",
-                FontId::proportional(12.0),
-                TEXT,
-            );
-            painter.text(
-                pos2(spectrum.center().x, spectrum.center().y + 10.0),
-                Align2::CENTER_CENTER,
-                "reintentando cada 1 s",
-                FontId::proportional(10.0),
-                MUTED,
-            );
+        painter.text(
+            pos2(chip.center().x, chip.center().y),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::monospace(8.5),
+            if response.hovered() { TEXT } else { accent },
+        );
+        if response.clicked() {
+            self.link.send(MiniCommand::CycleViz);
         }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+
+        painter.text(
+            pos2(chip.right() + 10.0, chip.center().y),
+            Align2::LEFT_CENTER,
+            "clic: cambia el visual",
+            FontId::monospace(8.0),
+            FAINT,
+        );
     }
 
     fn paint_spectrum(&self, painter: &egui::Painter, rect: Rect, accent: Color32) {
@@ -489,11 +692,7 @@ impl MiniApp {
                 pos2(x + bar_width, baseline),
             );
             let color = scale(accent, 0.38 + 0.62 * value);
-            painter.rect_filled(
-                bar,
-                CornerRadius::same((bar_width * 0.5).clamp(1.0, 3.0) as u8),
-                color,
-            );
+            painter.rect_filled(bar, CornerRadius::same(0), color);
 
             if peak > 0.03 {
                 let y = baseline - 2.0 - peak * height;
@@ -513,8 +712,11 @@ impl MiniApp {
         now: f64,
         accent: Color32,
     ) {
-        let top = content.top() + 126.0;
-        let row = Rect::from_min_max(pos2(content.left(), top), pos2(content.right(), top + 18.0));
+        let column = right_column(content);
+        let row = Rect::from_min_max(
+            pos2(column.left(), content.top() + 38.0),
+            pos2(column.right(), content.top() + 58.0),
+        );
         let center_y = row.center().y;
         let duration = self.snapshot.duration_ms;
         let position = self.position_ms(now);
@@ -523,7 +725,7 @@ impl MiniApp {
             pos2(row.left(), center_y),
             Align2::LEFT_CENTER,
             format_time(position),
-            FontId::monospace(10.0),
+            FontId::monospace(9.0),
             MUTED,
         );
         painter.text(
@@ -534,29 +736,29 @@ impl MiniApp {
             } else {
                 "--:--".to_owned()
             },
-            FontId::monospace(10.0),
-            MUTED,
+            FontId::monospace(9.0),
+            FAINT,
         );
 
-        let bar = Rect::from_min_max(
-            pos2(row.left() + 46.0, center_y - 2.0),
-            pos2(row.right() - 46.0, center_y + 2.0),
-        );
-        let hit = Rect::from_min_max(
-            pos2(bar.left() - 4.0, row.top()),
-            pos2(bar.right() + 4.0, row.bottom()),
-        );
+        // Barra de bloques como la del transporte: ━ para lo reproducido,
+        // ─ para lo pendiente y ● / ○ como cabeza.
+        let bar_font = FontId::monospace(12.0);
+        let cell = ui.fonts(|f| f.glyph_width(&bar_font, '━')).max(4.0);
+        let left = row.left() + 42.0;
+        let right = row.right() - 42.0;
+        let count = (((right - left) / cell).floor() as usize).max(8);
+        let width = count as f32 * cell;
+        let hit = Rect::from_min_max(pos2(left, row.top()), pos2(left + width, row.bottom()));
         let response = ui.allocate_rect(hit, Sense::click_and_drag());
         if response.hovered() {
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
 
-        if duration > 0 && bar.width() > 1.0 {
+        if duration > 0 && width > 1.0 {
             let at_pointer = |x: f32| -> u64 {
-                let ratio = ((x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+                let ratio = ((x - left) / width).clamp(0.0, 1.0);
                 (ratio * duration as f32).round() as u64
             };
-
             if response.drag_stopped() {
                 let target = response
                     .interact_pointer_pos()
@@ -590,16 +792,33 @@ impl MiniApp {
         } else {
             0.0
         };
-        let fill = Rect::from_min_max(bar.min, pos2(bar.left() + bar.width() * ratio, bar.max.y));
-
-        painter.rect_filled(bar, CornerRadius::same(2), FAINT);
-        if ratio > 0.0 {
-            painter.rect_filled(fill, CornerRadius::same(2), scale(accent, 0.92));
+        let filled = ((ratio * count as f32).round() as usize).min(count);
+        if filled > 0 {
+            painter.text(
+                pos2(left, center_y),
+                Align2::LEFT_CENTER,
+                "━".repeat(filled),
+                bar_font.clone(),
+                scale(accent, 0.95),
+            );
         }
-        if duration > 0 {
-            let radius = if response.hovered() { 5.0 } else { 3.8 };
-            painter.circle_filled(pos2(fill.right(), center_y), radius, accent);
+        if filled < count {
+            painter.text(
+                pos2(left + filled as f32 * cell, center_y),
+                Align2::LEFT_CENTER,
+                "─".repeat(count - filled),
+                bar_font,
+                Color32::from_rgba_unmultiplied(150, 154, 168, 90),
+            );
         }
+        let head = left + (ratio * count as f32).floor() * cell + cell * 0.5;
+        painter.text(
+            pos2(head, center_y),
+            Align2::CENTER_CENTER,
+            if self.snapshot.playing { "●" } else { "○" },
+            FontId::monospace(9.0),
+            mix(TEXT, accent, 0.5),
+        );
     }
 
     fn paint_controls(
@@ -610,17 +829,32 @@ impl MiniApp {
         now: f64,
         accent: Color32,
     ) {
+        let column = right_column(content);
         let row = Rect::from_min_max(
-            pos2(content.left(), content.top() + 152.0),
-            pos2(content.right(), content.top() + 184.0),
+            pos2(column.left(), content.top() + 64.0),
+            pos2(column.right(), content.top() + 104.0),
         );
         let cy = row.center().y;
+        let pulse = self.pulse();
 
-        let shuffle_rect = icon_rect(content.left(), cy, 28.0);
-        let prev_rect = icon_rect(content.left() + 32.0, cy, 28.0);
-        let play_rect = icon_rect(content.left() + 64.0, cy, 32.0);
-        let next_rect = icon_rect(content.left() + 100.0, cy, 28.0);
-        let repeat_rect = icon_rect(content.left() + 132.0, cy, 28.0);
+        let gap = 4.0;
+        // Proporciones del transporte de la TUI: 9 celdas para shuffle, play,
+        // siguiente y bucle; 7 para anterior, con la altura de sus tres filas.
+        let sizes = [44.0, 34.0, 44.0, 44.0, 44.0];
+        let total = sizes.iter().sum::<f32>() + gap * (sizes.len() - 1) as f32;
+        let volume_w = 144.0;
+        let free = (column.width() - volume_w - 14.0 - total).max(0.0);
+        let mut x = column.left() + free * 0.5;
+        let mut next_button = |width: f32| -> Rect {
+            let rect = Rect::from_min_size(pos2(x, cy - 12.0), vec2(width, 24.0));
+            x += width + gap;
+            rect
+        };
+        let shuffle_rect = next_button(sizes[0]);
+        let prev_rect = next_button(sizes[1]);
+        let play_rect = next_button(sizes[2]);
+        let next_rect = next_button(sizes[3]);
+        let repeat_rect = next_button(sizes[4]);
 
         if icon_button(
             ui,
@@ -629,6 +863,7 @@ impl MiniApp {
             self.snapshot.shuffle,
             accent,
             false,
+            pulse,
         )
         .on_hover_text(if self.snapshot.shuffle {
             "aleatorio: sí"
@@ -640,7 +875,7 @@ impl MiniApp {
             self.link.send(MiniCommand::Shuffle);
         }
 
-        if icon_button(ui, prev_rect, Icon::Previous, false, accent, false)
+        if icon_button(ui, prev_rect, Icon::Previous, false, accent, false, pulse)
             .on_hover_text("anterior")
             .clicked()
         {
@@ -652,7 +887,7 @@ impl MiniApp {
         } else {
             Icon::Play
         };
-        if icon_button(ui, play_rect, play_icon, false, accent, true)
+        if icon_button(ui, play_rect, play_icon, false, accent, true, pulse)
             .on_hover_text(if self.snapshot.playing {
                 "pausa"
             } else {
@@ -667,7 +902,7 @@ impl MiniApp {
             self.link.send(MiniCommand::PlayPause);
         }
 
-        if icon_button(ui, next_rect, Icon::Next, false, accent, false)
+        if icon_button(ui, next_rect, Icon::Next, false, accent, false, pulse)
             .on_hover_text("siguiente")
             .clicked()
         {
@@ -683,6 +918,7 @@ impl MiniApp {
             repeat_active,
             accent,
             false,
+            pulse,
         )
         .on_hover_text(format!("repeat: {repeat_mode}"))
         .clicked()
@@ -690,14 +926,16 @@ impl MiniApp {
             self.link.send(MiniCommand::CycleRepeat);
         }
 
-        // Volumen: icono + slider 0..100 + porcentaje.
-        let volume_label_right = content.right();
-        let volume_number_left = volume_label_right - 30.0;
+        // Volumen con el mismo lenguaje que la TUI: ♪ + bloques + porcentaje.
+        let right = column.right();
+        let percent_w = 30.0;
+        let slider_w = 88.0;
+        let slider_left = right - percent_w - slider_w - 6.0;
         let slider = Rect::from_min_max(
-            pos2(volume_number_left - 88.0, cy - 2.0),
-            pos2(volume_number_left - 4.0, cy + 2.0),
+            pos2(slider_left, cy - 3.0),
+            pos2(slider_left + slider_w, cy + 3.0),
         );
-        let speaker = Rect::from_center_size(pos2(slider.left() - 16.0, cy), Vec2::splat(18.0));
+        let speaker = pos2(slider.left() - 13.0, cy);
 
         let volume_hit = Rect::from_min_max(
             pos2(slider.left() - 4.0, row.top()),
@@ -728,34 +966,52 @@ impl MiniApp {
             }
         }
 
-        draw_speaker(painter, speaker, MUTED);
-        painter.rect_filled(slider, CornerRadius::same(2), FAINT);
-        let volume_fill = Rect::from_min_max(
-            slider.min,
-            pos2(
-                slider.left() + slider.width() * clean_volume(self.volume_local),
-                slider.max.y,
-            ),
-        );
-        painter.rect_filled(volume_fill, CornerRadius::same(2), scale(accent, 0.85));
-        painter.circle_filled(
-            pos2(
-                slider.left() + slider.width() * clean_volume(self.volume_local),
-                cy,
-            ),
-            if volume_response.hovered() { 4.5 } else { 3.5 },
-            accent,
-        );
+        let muted = clean_volume(self.volume_local) <= 0.001;
         painter.text(
-            pos2(volume_label_right, cy),
+            speaker,
+            Align2::CENTER_CENTER,
+            if muted { "×" } else { "♪" },
+            FontId::monospace(11.0),
+            if muted {
+                Color32::from_rgb(152, 96, 96)
+            } else {
+                MUTED
+            },
+        );
+
+        let vol_font = FontId::monospace(9.0);
+        let vol_cell = ui.fonts(|f| f.glyph_width(&vol_font, '█')).max(3.0);
+        let vol_count = ((slider.width() / vol_cell).floor() as usize).max(8);
+        let filled =
+            ((clean_volume(self.volume_local) * vol_count as f32).round() as usize).min(vol_count);
+        let knob = filled.min(vol_count.saturating_sub(1));
+        for i in 0..vol_count {
+            let (ch, color) = if i <= knob && filled > 0 {
+                (if i == knob { "◉" } else { "█" }, accent)
+            } else {
+                ("░", Color32::from_rgba_unmultiplied(90, 94, 108, 130))
+            };
+            painter.text(
+                pos2(slider_left + i as f32 * vol_cell, cy),
+                Align2::LEFT_CENTER,
+                ch,
+                vol_font.clone(),
+                color,
+            );
+        }
+
+        painter.text(
+            pos2(right, cy),
             Align2::RIGHT_CENTER,
-            format!(
-                "{}%",
-                (clean_volume(self.volume_local) * 100.0).round() as u8
-            ),
+            format!("{:>3.0}%", clean_volume(self.volume_local) * 100.0),
             FontId::monospace(9.0),
             MUTED,
         );
+    }
+
+    fn pulse(&self) -> f32 {
+        let low: f32 = self.smooth.iter().take(6).copied().sum::<f32>() / 6.0;
+        (low * 1.4).clamp(0.0, 1.0)
     }
 }
 
@@ -810,8 +1066,53 @@ enum Icon {
     Repeat(bool),
 }
 
-fn icon_rect(left: f32, center_y: f32, size: f32) -> Rect {
-    Rect::from_min_size(pos2(left, center_y - size * 0.5), Vec2::splat(size))
+fn art_client() -> Option<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()
+}
+
+fn art_rect(content: Rect) -> Rect {
+    Rect::from_min_size(
+        pos2(content.left(), content.top() + 40.0),
+        Vec2::splat(ART_SIZE),
+    )
+}
+
+fn right_column(content: Rect) -> Rect {
+    Rect::from_min_max(
+        pos2(content.left() + ART_SIZE + 18.0, content.top()),
+        pos2(content.right(), content.bottom()),
+    )
+}
+
+/// Tinta de cada carácter del visual dentro de su celda: posición y tamaño
+/// relativos. Así `█` llena la celda y `▁`/`▔` son una franja fina. Los
+/// caracteres que no son bloques se dibujan con su glifo.
+fn viz_ink(ch: char) -> Option<(f32, f32, f32, f32, f32)> {
+    Some(match ch {
+        '█' => (0.0, 0.0, 1.0, 1.0, 1.0),
+        '▇' => (0.0, 0.125, 1.0, 0.875, 1.0),
+        '▆' => (0.0, 0.25, 1.0, 0.75, 1.0),
+        '▅' => (0.0, 0.375, 1.0, 0.625, 1.0),
+        '▄' => (0.0, 0.5, 1.0, 0.5, 1.0),
+        '▃' => (0.0, 0.625, 1.0, 0.375, 1.0),
+        '▂' => (0.0, 0.75, 1.0, 0.25, 1.0),
+        '▁' => (0.0, 0.875, 1.0, 0.125, 1.0),
+        '▔' => (0.0, 0.0, 1.0, 0.14, 1.0),
+        '━' => (0.0, 0.38, 1.0, 0.24, 1.0),
+        '─' => (0.0, 0.46, 1.0, 0.1, 1.0),
+        '│' | '║' => (0.44, 0.0, 0.12, 1.0, 1.0),
+        '═' => (0.0, 0.36, 1.0, 0.28, 1.0),
+        '░' => (0.0, 0.0, 1.0, 1.0, 0.34),
+        '▒' => (0.0, 0.0, 1.0, 1.0, 0.58),
+        '▓' => (0.0, 0.0, 1.0, 1.0, 0.8),
+        '·' | '.' => (0.37, 0.37, 0.26, 0.26, 1.0),
+        '•' | '●' | '◉' | '○' => (0.26, 0.26, 0.48, 0.48, 1.0),
+        '⣿' => (0.0, 0.0, 1.0, 1.0, 1.0),
+        _ => return None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -822,28 +1123,40 @@ fn icon_button(
     active: bool,
     accent: Color32,
     primary: bool,
+    pulse: f32,
 ) -> Response {
     let response = ui.allocate_rect(rect, Sense::click());
     let hovered = response.hovered();
     let painter = ui.painter();
+    let rounding = CornerRadius::same(2);
 
-    let color = if primary {
-        let background = if hovered {
-            mix(accent, Color32::WHITE, 0.16)
-        } else {
-            accent
-        };
-        painter.circle_filled(rect.center(), rect.width() * 0.5, background);
-        on_accent(background)
-    } else if active {
+    if primary {
+        // Halo tenue y fondo acentuado que late con los graves, como el
+        // bloom del play en la TUI.
         painter.rect_filled(
-            rect,
-            CornerRadius::same(7),
-            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 28),
+            rect.expand(3.0 + pulse * 2.0),
+            CornerRadius::same(3),
+            Color32::from_rgba_unmultiplied(
+                accent.r(),
+                accent.g(),
+                accent.b(),
+                (12.0 + pulse * 26.0) as u8,
+            ),
         );
-        accent
+    }
+    let background = if primary {
+        mix(PANEL, accent, 0.32 + pulse * 0.24)
+    } else if active {
+        mix(PANEL, accent, 0.26)
     } else if hovered {
-        painter.rect_filled(rect, CornerRadius::same(7), PANEL_HI);
+        PANEL_HI
+    } else {
+        Color32::from_rgba_unmultiplied(17, 18, 24, 205)
+    };
+    painter.rect_filled(rect, rounding, background);
+    let color = if primary || active {
+        TEXT
+    } else if hovered {
         TEXT
     } else {
         MUTED
@@ -856,212 +1169,65 @@ fn icon_button(
     response
 }
 
-fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
-    let center = rect.center();
-    let size = rect.width().min(rect.height());
-    let stroke = Stroke::new(1.6_f32, color);
-
-    match icon {
-        Icon::Play => {
-            let half = size * 0.34;
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(center.x - half * 0.55, center.y - half),
-                    pos2(center.x - half * 0.55, center.y + half),
-                    pos2(center.x + half * 0.85, center.y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Pause => {
-            let bar = vec2(size * 0.11, size * 0.62);
-            for offset in [-0.17f32, 0.17] {
-                painter.rect_filled(
-                    Rect::from_center_size(pos2(center.x + size * offset, center.y), bar),
-                    CornerRadius::same(1),
-                    color,
-                );
-            }
-        }
-        Icon::Previous => {
-            let half = size * 0.30;
-            painter.rect_filled(
-                Rect::from_center_size(
-                    pos2(center.x - half * 0.95, center.y),
-                    vec2(size * 0.11, half * 2.0),
-                ),
-                CornerRadius::same(1),
-                color,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(center.x + half * 0.85, center.y - half),
-                    pos2(center.x + half * 0.85, center.y + half),
-                    pos2(center.x - half * 0.45, center.y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Next => {
-            let half = size * 0.30;
-            painter.rect_filled(
-                Rect::from_center_size(
-                    pos2(center.x + half * 0.95, center.y),
-                    vec2(size * 0.11, half * 2.0),
-                ),
-                CornerRadius::same(1),
-                color,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(center.x - half * 0.85, center.y - half),
-                    pos2(center.x - half * 0.85, center.y + half),
-                    pos2(center.x + half * 0.45, center.y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-        }
-        Icon::Shuffle => {
-            let left = center.x - size * 0.32;
-            let right = center.x + size * 0.26;
-            let top = center.y - size * 0.20;
-            let bottom = center.y + size * 0.20;
-            painter.line_segment([pos2(left, top), pos2(right, bottom)], stroke);
-            painter.line_segment([pos2(left, bottom), pos2(right, top)], stroke);
-            for y in [top, bottom] {
-                painter.add(Shape::convex_polygon(
-                    vec![
-                        pos2(right - size * 0.03, y - size * 0.10),
-                        pos2(right + size * 0.15, y),
-                        pos2(right - size * 0.03, y + size * 0.10),
-                    ],
-                    color,
-                    Stroke::NONE,
-                ));
-            }
-        }
-        Icon::Repeat(one) => {
-            let path = Rect::from_center_size(center, vec2(size * 0.66, size * 0.44));
-            let arrow = size * 0.10;
-            painter.line_segment(
-                [
-                    pos2(path.left() + 2.0, path.top()),
-                    pos2(path.right() - arrow, path.top()),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(path.right(), path.top() + 1.0),
-                    pos2(path.right(), path.bottom() - 1.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(path.right() - 2.0, path.bottom()),
-                    pos2(path.left() + arrow, path.bottom()),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    pos2(path.left(), path.bottom() - 1.0),
-                    pos2(path.left(), path.top() + 1.0),
-                ],
-                stroke,
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(path.right() - arrow * 1.6, path.top() - arrow * 0.9),
-                    pos2(path.right() + arrow * 0.2, path.top()),
-                    pos2(path.right() - arrow * 1.6, path.top() + arrow * 0.9),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-            painter.add(Shape::convex_polygon(
-                vec![
-                    pos2(path.left() + arrow * 1.6, path.bottom() - arrow * 0.9),
-                    pos2(path.left() - arrow * 0.2, path.bottom()),
-                    pos2(path.left() + arrow * 1.6, path.bottom() + arrow * 0.9),
-                ],
-                color,
-                Stroke::NONE,
-            ));
-            if one {
-                painter.text(
-                    center,
-                    Align2::CENTER_CENTER,
-                    "1",
-                    FontId::monospace(size * 0.30),
-                    color,
-                );
-            }
-        }
-    }
-}
+const ICON_PLAY: &[&str] = &["█    ", "██   ", "███  ", "██   ", "█    "];
+const ICON_PAUSE: &[&str] = &["█  █", "█  █", "█  █", "█  █", "█  █"];
+const ICON_PREV: &[&str] = &["█  █ ", "██ █ ", "███  ", "██ █ ", "█  █ "];
+const ICON_NEXT: &[&str] = &[" █  █", " █ ██", "  ███", " █ ██", " █  █"];
+const ICON_SHUFFLE: &[&str] = &["██   ██", " ██ ██ ", "  ███  ", " ██ ██ ", "██   ██"];
+const ICON_REPEAT: &[&str] = &["███████", "█     █", "█     █", "█     █", "███████"];
+const ICON_REPEAT_ONE: &[&str] = &["███████", "█     █", "█  █  █", "█  █  █", "███████"];
 
 fn draw_close(painter: &egui::Painter, rect: Rect, color: Color32) {
-    let center = rect.center();
-    let arm = rect.width() * 0.20;
-    let stroke = Stroke::new(1.5_f32, color);
-    painter.line_segment(
-        [
-            pos2(center.x - arm, center.y - arm),
-            pos2(center.x + arm, center.y + arm),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            pos2(center.x - arm, center.y + arm),
-            pos2(center.x + arm, center.y - arm),
-        ],
-        stroke,
-    );
+    let stroke = Stroke::new(1.4_f32, color);
+    painter.line_segment([rect.left_top(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.left_bottom(), rect.right_top()], stroke);
 }
 
-fn draw_speaker(painter: &egui::Painter, rect: Rect, color: Color32) {
-    let center = rect.center();
-    let size = rect.width().min(rect.height());
-    let stroke = Stroke::new(1.5_f32, color);
-
-    painter.rect_filled(
-        Rect::from_center_size(
-            pos2(center.x - size * 0.22, center.y),
-            vec2(size * 0.16, size * 0.22),
-        ),
-        CornerRadius::same(1),
-        color,
-    );
-    painter.add(Shape::convex_polygon(
-        vec![
-            pos2(center.x - size * 0.12, center.y - size * 0.11),
-            pos2(center.x + size * 0.06, center.y - size * 0.30),
-            pos2(center.x + size * 0.06, center.y + size * 0.30),
-            pos2(center.x - size * 0.12, center.y + size * 0.11),
-        ],
-        color,
-        Stroke::NONE,
-    ));
-    painter.line_segment(
-        [
-            pos2(center.x + size * 0.14, center.y - size * 0.13),
-            pos2(center.x + size * 0.24, center.y),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            pos2(center.x + size * 0.24, center.y),
-            pos2(center.x + size * 0.14, center.y + size * 0.13),
-        ],
-        stroke,
-    );
+/// Iconos de bloque, los mismos que la barra de transporte de la TUI.
+///
+/// La barra dibuja el arte de cinco filas muestreado a tres (filas 0, 1 y 3)
+/// cuando el transporte tiene cuatro filas, que es el tamaño por defecto. El
+/// mini usa ese mismo muestreo para que los botones enseñen exactamente la
+/// misma imagen, solo que a mayor resolución.
+fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let grid = match icon {
+        Icon::Shuffle => ICON_SHUFFLE,
+        Icon::Previous => ICON_PREV,
+        Icon::Play => ICON_PLAY,
+        Icon::Pause => ICON_PAUSE,
+        Icon::Next => ICON_NEXT,
+        Icon::Repeat(true) => ICON_REPEAT_ONE,
+        Icon::Repeat(false) => ICON_REPEAT,
+    };
+    let h = grid.len();
+    let keep = 3.min(h);
+    let rows: Vec<&str> = (0..keep).map(|i| grid[(i * h / keep).min(h - 1)]).collect();
+    let row_count = rows.len() as f32;
+    let cols = grid
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(1) as f32;
+    let cell = (rect.height() * 0.86 / row_count).min(rect.width() * 0.90 / cols);
+    if cell <= 0.4 {
+        return;
+    }
+    let width = cols * cell;
+    let height = row_count * cell;
+    let x0 = rect.center().x - width * 0.5;
+    let y0 = rect.center().y - height * 0.5;
+    for (y, line) in rows.iter().enumerate() {
+        for (x, ch) in line.chars().enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            let cell_rect = Rect::from_min_size(
+                pos2(x0 + x as f32 * cell, y0 + y as f32 * cell),
+                Vec2::splat((cell - 0.2).max(0.5)),
+            );
+            painter.rect_filled(cell_rect, CornerRadius::same(0), color);
+        }
+    }
 }
 
 fn paint_text(
@@ -1117,16 +1283,6 @@ fn accent_color(rgb: [u8; 3]) -> Color32 {
 }
 
 /// Color legible encima de un fondo `accent`.
-fn on_accent(background: Color32) -> Color32 {
-    let luminance = 0.2126 * background.r() as f32
-        + 0.7152 * background.g() as f32
-        + 0.0722 * background.b() as f32;
-    if luminance > 140.0 {
-        Color32::from_rgb(12, 13, 17)
-    } else {
-        Color32::WHITE
-    }
-}
 
 fn clean_volume(volume: f32) -> f32 {
     if volume.is_finite() {

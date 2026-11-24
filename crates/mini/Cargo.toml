@@ -11,3 +11,4 @@ rust-version = "1.85"
 spote-protocol = { path = "../protocol" }
 eframe = { version = "0.32.3", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
 image = { workspace = true }
+reqwest = { workspace = true }

@@ -109,11 +109,66 @@ pub struct LyricsRow {
     /// fila se vuelve a afinar cuando hay audio local: un resultado malo no
     /// debe quedarse pegado para siempre.
     pub align_version: i64,
+    /// Versión de la política de fuentes que creó esta caché. Las filas
+    /// antiguas se revalidan una vez; las nuevas no se vuelven a pedir en cada
+    /// sesión solo por su etiqueta.
+    pub policy_version: i64,
+    /// Los tiempos vienen de captions del vídeo exacto; el texto es real.
+    pub captions_timed: bool,
 }
 
 /// Se sube cuando cambia el alineado (scoring, relecturas, reparto). Las filas
 /// guardadas con una versión anterior se re-alinean al reproducirlas.
 pub const LYRICS_ALIGN_VERSION: i64 = 3;
+
+/// Versión de la política de fuentes de letras. Al cambiarla se invalidan las
+/// cachés antiguas (excepto las locales/manuales) para que nadie siga viendo
+/// una letra inventada por captions/ASR de una versión anterior.
+pub const LYRICS_POLICY_VERSION: i64 = 2;
+
+/// Resumen de escucha para el Wrapped.
+#[derive(Debug, Clone, Default)]
+pub struct WrappedStats {
+    pub all_time: bool,
+    pub year: i64,
+    pub plays: u64,
+    pub ms_played: u64,
+    pub distinct_tracks: u64,
+    pub distinct_artists: u64,
+    pub top_tracks: Vec<WrappedTrack>,
+    pub top_artists: Vec<WrappedArtist>,
+    pub top_albums: Vec<WrappedAlbum>,
+    /// Milisegundos escuchados por mes (enero..diciembre) del periodo.
+    pub by_month: [u64; 12],
+}
+
+#[derive(Debug, Clone)]
+pub struct WrappedTrack {
+    pub key: String,
+    pub title: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub ms_played: u64,
+    pub plays: u64,
+    pub art_path: Option<PathBuf>,
+    pub art_url: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WrappedArtist {
+    pub artist: String,
+    pub ms_played: u64,
+    pub plays: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WrappedAlbum {
+    pub album: String,
+    pub artist: String,
+    pub ms_played: u64,
+    pub plays: u64,
+    pub art_url: Option<String>,
+}
 
 pub struct Library {
     conn: Connection,
@@ -142,8 +197,10 @@ impl Library {
         lib.configure()?;
         lib.migrate()?;
         // Limpiezas silenciosas de datos viejos. Si fallan, la biblioteca
-        // sigue funcionando igual.
-        lib.merge_duplicates().ok();
+        // sigue funcionando igual. `merge_duplicates` NO se ejecuta aquí:
+        // dos versiones de estudio/directo con duración parecida podían
+        // fusionarse y perder fuente/letra/historial. Queda como operación
+        // explícita.
         lib.clear_shared_art().ok();
         lib.clear_imported_albums().ok();
         Ok(lib)
@@ -190,7 +247,8 @@ impl Library {
               added_at    INTEGER NOT NULL,
               favorite    INTEGER NOT NULL DEFAULT 0,
               play_count  INTEGER NOT NULL DEFAULT 0,
-              last_played INTEGER
+              last_played INTEGER,
+              hidden      INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS source(
               id          INTEGER PRIMARY KEY,
@@ -211,7 +269,9 @@ impl Library {
               synced     INTEGER NOT NULL,
               source     TEXT NOT NULL,
               offset_ms  INTEGER NOT NULL DEFAULT 0,
-              fetched_at INTEGER NOT NULL
+              fetched_at INTEGER NOT NULL,
+              policy_version INTEGER NOT NULL DEFAULT 0,
+              captions_timed INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS playlist(
               id         INTEGER PRIMARY KEY,
@@ -243,6 +303,8 @@ impl Library {
             CREATE INDEX IF NOT EXISTS idx_track_artist ON track(artist);
             CREATE INDEX IF NOT EXISTS idx_track_added ON track(added_at DESC);
             CREATE INDEX IF NOT EXISTS idx_source_status ON source(status);
+            CREATE INDEX IF NOT EXISTS idx_play_event_ts ON play_event(ts);
+            CREATE INDEX IF NOT EXISTS idx_play_event_track ON play_event(track_id);
             CREATE VIRTUAL TABLE IF NOT EXISTS track_fts USING fts5(
               title, artist, album,
               content='track', content_rowid='id',
@@ -265,7 +327,28 @@ impl Library {
             "#,
         )?;
         self.migrate_playlists()?;
+        self.migrate_track_columns()?;
         self.migrate_lyrics()?;
+        self.migrate_lyrics_policy()?;
+        Ok(())
+    }
+
+    /// Columnas nuevas de track en bases ya existentes.
+    fn migrate_track_columns(&mut self) -> Result<()> {
+        let mut existing = std::collections::HashSet::new();
+        {
+            let mut stmt = self.conn.prepare("PRAGMA table_info(track)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+        if !existing.contains("hidden") {
+            self.conn.execute(
+                "ALTER TABLE track ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -292,6 +375,39 @@ impl Library {
                 [],
             )?;
         }
+        if !existing.contains("policy_version") {
+            self.conn.execute(
+                "ALTER TABLE lyrics ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        if !existing.contains("captions_timed") {
+            self.conn.execute(
+                "ALTER TABLE lyrics ADD COLUMN captions_timed INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Marca como actuales las cachés de fuentes fiables y deja las ambiguas
+    /// (`plain`, `captions`, `approx`) para que se revaliden al reproducirlas.
+    /// No borra filas: si no hay red, la letra sigue visible mientras se
+    /// intenta mejorar.
+    fn migrate_lyrics_policy(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE lyrics SET policy_version = ?1
+             WHERE policy_version < ?1
+               AND lower(source) IN ('local', 'manual', 'genius', 'lrclib', 'lrcmux', 'asr')",
+            params![LYRICS_POLICY_VERSION],
+        )?;
+        tx.execute(
+            "INSERT INTO setting(key, value) VALUES('lyrics_policy_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![LYRICS_POLICY_VERSION.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -341,7 +457,8 @@ impl Library {
               album = coalesce(excluded.album, track.album),
               duration_ms = CASE WHEN excluded.duration_ms > 0
                                  THEN excluded.duration_ms ELSE track.duration_ms END,
-              art_url = coalesce(excluded.art_url, track.art_url)
+              art_url = coalesce(excluded.art_url, track.art_url),
+              hidden = 0
             "#,
             params![
                 track.key,
@@ -469,6 +586,7 @@ impl Library {
             "{SELECT_TRACK}
              WHERE lower(t.title) = ?1
                AND lower(t.artist) = ?2
+               AND t.hidden = 0
                AND (?3 = 0 OR t.duration_ms = 0 OR abs(t.duration_ms - ?3) < ?4)
              ORDER BY (s.status = 'ready') DESC, abs(t.duration_ms - ?3)
              LIMIT 1"
@@ -493,6 +611,32 @@ impl Library {
             .unwrap_or_else(|| track.key.clone())
     }
 
+    /// Fusión explícita de duplicados. Cuenta las parejas que cumplen el
+    /// mismo criterio antes de tocar nada (para `spote dedupe --dry-run`).
+    pub fn duplicate_count(&self) -> Result<i64> {
+        self.conn.query_row(
+            r#"SELECT count(*)
+               FROM track a JOIN track b ON a.id < b.id
+               WHERE lower(trim(a.title)) = lower(trim(b.title))
+                 AND lower(trim(a.artist)) = lower(trim(b.artist))
+                 AND a.duration_ms > 0 AND b.duration_ms > 0
+                 AND abs(a.duration_ms - b.duration_ms) <= 2000
+                 AND a.hidden = 0 AND b.hidden = 0
+                 AND (EXISTS (SELECT 1 FROM source s WHERE s.track_id = a.id AND s.status = 'ready')
+                      OR EXISTS (SELECT 1 FROM source s WHERE s.track_id = b.id AND s.status = 'ready'))"#,
+            [],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Copia consistente de la base para antes de una operación destructiva.
+    pub fn backup_to(&self, path: &Path) -> Result<()> {
+        let path = path.to_string_lossy();
+        self.conn.execute("VACUUM INTO ?1", params![path])?;
+        Ok(())
+    }
+
     /// Fusiona la misma canción metida dos veces con claves distintas: lo
     /// normal es una fila local y otra creada al importar una lista con
     /// ISRC/Spotify. Conserva la que tiene fichero y mueve a ella fuentes,
@@ -508,6 +652,7 @@ impl Library {
                    WHERE lower(trim(a.title)) = lower(trim(b.title))
                      AND lower(trim(a.artist)) = lower(trim(b.artist))
                      AND a.duration_ms > 0 AND b.duration_ms > 0
+                     AND a.hidden = 0 AND b.hidden = 0
                      AND abs(a.duration_ms - b.duration_ms) <= 2000
                      AND (EXISTS (SELECT 1 FROM source s WHERE s.track_id = a.id AND s.status = 'ready')
                           OR EXISTS (SELECT 1 FROM source s WHERE s.track_id = b.id AND s.status = 'ready'))"#,
@@ -537,7 +682,11 @@ impl Library {
                         params![b],
                         |row| row.get(0),
                     )?;
-                    if lists_b > lists_a { b } else { a }
+                    if lists_b > lists_a {
+                        b
+                    } else {
+                        a
+                    }
                 }
                 (false, false) => continue,
             };
@@ -641,8 +790,10 @@ impl Library {
         )?;
         tx.execute(
             "INSERT OR IGNORE INTO lyrics
-               (track_id, lrc, synced, source, offset_ms, fetched_at, aligned, align_version)
-             SELECT ?1, lrc, synced, source, offset_ms, fetched_at, aligned, align_version
+               (track_id, lrc, synced, source, offset_ms, fetched_at, aligned,
+                align_version, policy_version, captions_timed)
+             SELECT ?1, lrc, synced, source, offset_ms, fetched_at, aligned,
+                    align_version, policy_version, captions_timed
              FROM lyrics WHERE track_id = ?2",
             params![keep, drop],
         )?;
@@ -697,9 +848,7 @@ impl Library {
                     .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
                     .collect::<String>()
             })
-            .filter(|token| {
-                !token.is_empty() && token.chars().any(|c| c.is_alphanumeric())
-            })
+            .filter(|token| !token.is_empty() && token.chars().any(|c| c.is_alphanumeric()))
             .collect();
         if query.trim().is_empty() {
             return self.recent(limit);
@@ -716,7 +865,7 @@ impl Library {
             .join(" ");
         let sql = format!(
             "{SELECT_TRACK} JOIN track_fts f ON f.rowid = t.id
-             WHERE track_fts MATCH ?1 ORDER BY rank LIMIT ?2"
+             WHERE track_fts MATCH ?1 AND t.hidden = 0 ORDER BY rank LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -738,8 +887,8 @@ impl Library {
 
     fn like_search(&self, pattern: &str, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} WHERE t.title LIKE ?1 ESCAPE '\\' OR t.artist LIKE ?1 ESCAPE '\\'
-               OR t.album LIKE ?1 ESCAPE '\\' ORDER BY t.artist LIMIT ?2"
+            "{SELECT_TRACK} WHERE (t.title LIKE ?1 ESCAPE '\\' OR t.artist LIKE ?1 ESCAPE '\\'
+               OR t.album LIKE ?1 ESCAPE '\\') AND t.hidden = 0 ORDER BY t.artist LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -762,7 +911,7 @@ impl Library {
             LEFT JOIN source s ON s.track_id = t.id
               AND s.id = (SELECT id FROM source x WHERE x.track_id = t.id
                           ORDER BY (x.status = 'ready') DESC, x.id DESC LIMIT 1)
-            WHERE t.album IS NOT NULL AND t.album <> ''
+            WHERE t.album IS NOT NULL AND t.album <> '' AND t.hidden = 0
             GROUP BY t.album, t.artist
             ORDER BY t.artist COLLATE NOCASE, t.album COLLATE NOCASE
         "#;
@@ -788,7 +937,9 @@ impl Library {
 
     /// Pistas de un álbum concreto, en orden de inserción.
     pub fn album_tracks(&self, album: &str, artist: &str) -> Result<Vec<TrackRow>> {
-        let sql = format!("{SELECT_TRACK} WHERE t.album = ?1 AND t.artist = ?2 ORDER BY t.id");
+        let sql = format!(
+            "{SELECT_TRACK} WHERE t.album = ?1 AND t.artist = ?2 AND t.hidden = 0 ORDER BY t.id"
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params![album, artist], row_to_track)?
@@ -797,7 +948,9 @@ impl Library {
     }
 
     pub fn recent(&self, limit: usize) -> Result<Vec<TrackRow>> {
-        let sql = format!("{SELECT_TRACK} ORDER BY t.added_at DESC, t.id DESC LIMIT ?1");
+        let sql = format!(
+            "{SELECT_TRACK} WHERE t.hidden = 0 ORDER BY t.added_at DESC, t.id DESC LIMIT ?1"
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params![limit as i64], row_to_track)?
@@ -810,7 +963,7 @@ impl Library {
     /// aterrizaban siempre en el mismo extremo de la lista.
     pub fn all_tracks(&self, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} ORDER BY t.added_at DESC, t.id DESC LIMIT ?1"
+            "{SELECT_TRACK} WHERE t.hidden = 0 ORDER BY t.added_at DESC, t.id DESC LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -821,7 +974,7 @@ impl Library {
 
     pub fn playable(&self, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} WHERE s.status = 'ready' AND s.path IS NOT NULL
+            "{SELECT_TRACK} WHERE s.status = 'ready' AND s.path IS NOT NULL AND t.hidden = 0
              ORDER BY t.play_count DESC, t.artist LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -832,7 +985,7 @@ impl Library {
     }
 
     pub fn favorites(&self) -> Result<Vec<TrackRow>> {
-        let sql = format!("{SELECT_TRACK} WHERE t.favorite = 1 ORDER BY t.artist");
+        let sql = format!("{SELECT_TRACK} WHERE t.favorite = 1 AND t.hidden = 0 ORDER BY t.artist");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map([], row_to_track)?
@@ -863,9 +1016,11 @@ impl Library {
                 return Ok(value);
             }
         }
-        let value = self
-            .conn
-            .query_row("SELECT count(*) FROM track", [], |r| r.get(0))?;
+        let value =
+            self.conn
+                .query_row("SELECT count(*) FROM track WHERE hidden = 0", [], |r| {
+                    r.get(0)
+                })?;
         self.count_cache.set(Some((Instant::now(), value)));
         Ok(value)
     }
@@ -877,12 +1032,128 @@ impl Library {
             }
         }
         let value = self.conn.query_row(
-            "SELECT count(DISTINCT track_id) FROM source WHERE status = 'ready'",
+            "SELECT count(DISTINCT s.track_id) FROM source s JOIN track t ON t.id = s.track_id WHERE s.status = 'ready' AND t.hidden = 0",
             [],
             |r| r.get(0),
         )?;
         self.ready_cache.set(Some((Instant::now(), value)));
         Ok(value)
+    }
+
+    /// Estadísticas de escucha para el Wrapped. `all_time=false` limita al
+    /// año natural actual (hora local de SQLite).
+    pub fn wrapped_stats(&self, all_time: bool) -> Result<WrappedStats> {
+        let year: i64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(strftime('%Y','now','localtime') AS INTEGER)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let period = if all_time {
+            "1=1".to_string()
+        } else {
+            format!(
+                "CAST(strftime('%Y', e.ts / 1000, 'unixepoch', 'localtime') AS INTEGER) = {year}"
+            )
+        };
+        let totals: (i64, i64, i64, i64) = self.conn.query_row(
+            &format!(
+                "SELECT coalesce(sum(e.ms_played),0), count(*),
+                        count(DISTINCT e.track_id), count(DISTINCT t.artist)
+                 FROM play_event e JOIN track t ON t.id = e.track_id
+                 WHERE {period}"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let mut stats = WrappedStats {
+            all_time,
+            year,
+            plays: totals.1.max(0) as u64,
+            ms_played: totals.0.max(0) as u64,
+            distinct_tracks: totals.2.max(0) as u64,
+            distinct_artists: totals.3.max(0) as u64,
+            ..WrappedStats::default()
+        };
+
+        let top_tracks_sql = format!(
+            "SELECT t.key, t.title, t.artist, t.album, sum(e.ms_played), count(*),
+                    t.art_path, t.art_url
+             FROM play_event e JOIN track t ON t.id = e.track_id
+             WHERE {period}
+             GROUP BY t.id ORDER BY sum(e.ms_played) DESC, count(*) DESC LIMIT 8"
+        );
+        let mut stmt = self.conn.prepare(&top_tracks_sql)?;
+        stats.top_tracks = stmt
+            .query_map([], |row| {
+                let path: Option<String> = row.get(6)?;
+                Ok(WrappedTrack {
+                    key: row.get(0)?,
+                    title: row.get(1)?,
+                    artist: row.get(2)?,
+                    album: row.get(3)?,
+                    ms_played: row.get::<_, i64>(4)?.max(0) as u64,
+                    plays: row.get::<_, i64>(5)?.max(0) as u64,
+                    art_path: path.map(PathBuf::from),
+                    art_url: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let top_artists_sql = format!(
+            "SELECT t.artist, sum(e.ms_played), count(*)
+             FROM play_event e JOIN track t ON t.id = e.track_id
+             WHERE {period}
+             GROUP BY lower(t.artist) ORDER BY sum(e.ms_played) DESC LIMIT 6"
+        );
+        let mut stmt = self.conn.prepare(&top_artists_sql)?;
+        stats.top_artists = stmt
+            .query_map([], |row| {
+                Ok(WrappedArtist {
+                    artist: row.get(0)?,
+                    ms_played: row.get::<_, i64>(1)?.max(0) as u64,
+                    plays: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let top_albums_sql = format!(
+            "SELECT t.album, t.artist, sum(e.ms_played), count(*),
+                    max(coalesce(t.art_url, ''))
+             FROM play_event e JOIN track t ON t.id = e.track_id
+             WHERE {period} AND t.album IS NOT NULL AND t.album <> ''
+             GROUP BY lower(t.album), lower(t.artist)
+             ORDER BY sum(e.ms_played) DESC LIMIT 6"
+        );
+        let mut stmt = self.conn.prepare(&top_albums_sql)?;
+        stats.top_albums = stmt
+            .query_map([], |row| {
+                let url: String = row.get(4)?;
+                Ok(WrappedAlbum {
+                    album: row.get(0)?,
+                    artist: row.get(1)?,
+                    ms_played: row.get::<_, i64>(2)?.max(0) as u64,
+                    plays: row.get::<_, i64>(3)?.max(0) as u64,
+                    art_url: (!url.is_empty()).then_some(url),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let by_month_sql = format!(
+            "SELECT CAST(strftime('%m', e.ts / 1000, 'unixepoch', 'localtime') AS INTEGER),
+                    sum(e.ms_played)
+             FROM play_event e WHERE {period}
+             GROUP BY 1"
+        );
+        let mut stmt = self.conn.prepare(&by_month_sql)?;
+        for row in stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))? {
+            let (month, ms) = row?;
+            let index = (month - 1).clamp(0, 11) as usize;
+            stats.by_month[index] = ms.max(0) as u64;
+        }
+        Ok(stats)
     }
 
     pub fn record_play(&mut self, key: &str, ms_played: u64, completed: bool) -> Result<()> {
@@ -910,8 +1181,8 @@ impl Library {
             .conn
             .query_row(
                 "SELECT l.lrc, l.synced, l.source, l.offset_ms, l.aligned,
-                        l.align_version FROM lyrics l
-                 JOIN track t ON t.id = l.track_id WHERE t.key = ?1",
+                        l.align_version, l.policy_version, l.captions_timed
+                 FROM lyrics l JOIN track t ON t.id = l.track_id WHERE t.key = ?1",
                 params![key],
                 |r| {
                     Ok(LyricsRow {
@@ -921,6 +1192,8 @@ impl Library {
                         offset_ms: r.get(3)?,
                         aligned: r.get::<_, i64>(4)? != 0,
                         align_version: r.get(5)?,
+                        policy_version: r.get(6)?,
+                        captions_timed: r.get::<_, i64>(7)? != 0,
                     })
                 },
             )
@@ -935,6 +1208,7 @@ impl Library {
         synced: bool,
         source: &str,
         aligned: bool,
+        captions_timed: bool,
     ) -> Result<()> {
         let Some(id) = self
             .conn
@@ -949,13 +1223,16 @@ impl Library {
         self.conn.execute(
             r#"
             INSERT INTO lyrics(track_id, lrc, synced, source, aligned,
-                               align_version, fetched_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                               align_version, policy_version, fetched_at,
+                               captions_timed)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(track_id) DO UPDATE SET
               lrc = excluded.lrc, synced = excluded.synced,
               source = excluded.source, aligned = excluded.aligned,
               align_version = excluded.align_version,
-              fetched_at = excluded.fetched_at
+              policy_version = excluded.policy_version,
+              fetched_at = excluded.fetched_at,
+              captions_timed = excluded.captions_timed
             "#,
             params![
                 id,
@@ -964,7 +1241,9 @@ impl Library {
                 source,
                 aligned as i64,
                 version,
-                now_ms()
+                LYRICS_POLICY_VERSION,
+                now_ms(),
+                captions_timed as i64
             ],
         )?;
         Ok(())
@@ -1086,7 +1365,8 @@ impl Library {
             }
         }
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.name, (SELECT count(*) FROM playlist_item i WHERE i.playlist_id = p.id),
+            "SELECT p.id, p.name, (SELECT count(*) FROM playlist_item i JOIN track t ON t.id = i.track_id
+                    WHERE i.playlist_id = p.id AND t.hidden = 0),
                     p.description, p.cover_key, p.cover_url
              FROM playlist p ORDER BY p.name COLLATE NOCASE",
         )?;
@@ -1215,7 +1495,7 @@ impl Library {
     pub fn playlist_tracks(&self, playlist_id: i64) -> Result<Vec<TrackRow>> {
         let sql = format!(
             "{SELECT_TRACK} JOIN playlist_item i ON i.track_id = t.id
-             WHERE i.playlist_id = ?1 ORDER BY i.position"
+             WHERE i.playlist_id = ?1 AND t.hidden = 0 ORDER BY i.position"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -1269,9 +1549,22 @@ impl Library {
         Ok(())
     }
 
+    /// Saca una pista de la biblioteca sin borrar la fila: conserva historial
+    /// (Wrapped), letra y fuentes. El audio sigue en disco. Es lo que hace el
+    /// borrado rápido; para eliminar de verdad está [`delete_track`].
+    pub fn remove_from_library(&mut self, key: &str) -> Result<()> {
+        self.count_cache.set(None);
+        self.ready_cache.set(None);
+        *self.playlists_cache.borrow_mut() = None;
+        self.conn
+            .execute("UPDATE track SET hidden = 1 WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// Borra una pista de la biblioteca (fuentes, listas, letras y eventos
     /// caen en cascada). Devuelve la ruta del audio para poder borrarla del
-    /// disco si el usuario lo pide.
+    /// disco si el usuario lo pide. Solo para «borrar del disco»: el atajo
+    /// normal usa [`remove_from_library`] para no perder el historial.
     pub fn delete_track(&mut self, key: &str) -> Result<Option<PathBuf>> {
         self.count_cache.set(None);
         self.ready_cache.set(None);
@@ -1296,7 +1589,7 @@ impl Library {
     pub fn tracks_without_art(&self, limit: usize) -> Result<Vec<TrackRow>> {
         let sql = format!(
             "{SELECT_TRACK}
-             WHERE t.art_path IS NULL AND t.art_url IS NULL
+             WHERE t.art_path IS NULL AND t.art_url IS NULL AND t.hidden = 0
              ORDER BY t.added_at DESC LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1419,6 +1712,43 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_aggregates_play_events() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let mut first = track("k1", "One", "Artist");
+        first.album = Some("Album".into());
+        let second = track("k2", "Two", "Artist");
+        lib.upsert_track(&first).unwrap();
+        lib.upsert_track(&second).unwrap();
+        lib.record_play("k1", 60_000, true).unwrap();
+        lib.record_play("k1", 30_000, true).unwrap();
+        lib.record_play("k2", 20_000, false).unwrap();
+        let stats = lib.wrapped_stats(false).unwrap();
+        assert_eq!(stats.plays, 3);
+        assert_eq!(stats.ms_played, 110_000);
+        assert_eq!(stats.distinct_tracks, 2);
+        assert_eq!(stats.top_tracks[0].key, "k1");
+        assert_eq!(stats.top_tracks[0].ms_played, 90_000);
+        assert_eq!(stats.top_artists[0].artist, "Artist");
+        assert_eq!(stats.top_albums[0].album, "Album");
+        assert!(stats.by_month.iter().any(|ms| *ms > 0));
+    }
+
+    #[test]
+    fn hide_keeps_history_and_upsert_restores() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
+        lib.record_play("k", 60_000, true).unwrap();
+        lib.remove_from_library("k").unwrap();
+        assert_eq!(lib.count().unwrap(), 0);
+        assert!(lib.all_tracks(10).unwrap().is_empty());
+        // El historial sigue alimentando Wrapped aunque la pista esté oculta.
+        assert_eq!(lib.wrapped_stats(true).unwrap().plays, 1);
+        // Volver a importarla/reproducirla la devuelve a la biblioteca.
+        lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
+        assert_eq!(lib.count().unwrap(), 1);
+    }
+
+    #[test]
     fn delete_track_removes_sources_and_playlists() {
         let mut lib = Library::open_in_memory().unwrap();
         lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
@@ -1489,8 +1819,15 @@ mod tests {
         imported.album = Some("Mix".into());
         imported.art_url = Some("https://cover/mix.jpg".into());
         let id = lib.upsert_track(&imported).unwrap();
-        lib.set_source(id, "spotify", Some("uno"), None, SourceStatus::Pending, None)
-            .unwrap();
+        lib.set_source(
+            id,
+            "spotify",
+            Some("uno"),
+            None,
+            SourceStatus::Pending,
+            None,
+        )
+        .unwrap();
         lib.add_to_playlist(list, "isrc:uno").unwrap();
         let mut local = track("sha1:dos", "Dos", "Artista");
         local.album = Some("Mix".into());
@@ -1531,10 +1868,27 @@ mod tests {
         }
 
         assert_eq!(lib.clear_shared_art().unwrap(), 2);
-        assert!(lib.track_by_key("sha1:a").unwrap().unwrap().track.art_url.is_none());
-        assert!(lib.track_by_key("sha1:b").unwrap().unwrap().track.art_url.is_none());
+        assert!(lib
+            .track_by_key("sha1:a")
+            .unwrap()
+            .unwrap()
+            .track
+            .art_url
+            .is_none());
+        assert!(lib
+            .track_by_key("sha1:b")
+            .unwrap()
+            .unwrap()
+            .track
+            .art_url
+            .is_none());
         assert_eq!(
-            lib.track_by_key("sha1:c").unwrap().unwrap().track.art_url.as_deref(),
+            lib.track_by_key("sha1:c")
+                .unwrap()
+                .unwrap()
+                .track
+                .art_url
+                .as_deref(),
             Some("https://cover/album.jpg")
         );
     }
@@ -1569,6 +1923,7 @@ mod tests {
         let list = lib.create_playlist("Lista").unwrap();
         lib.add_to_playlist(list, "isrc:abc").unwrap();
 
+        assert_eq!(lib.duplicate_count().unwrap(), 1);
         assert_eq!(lib.merge_duplicates().unwrap(), 1);
         assert!(lib.track_by_key("isrc:abc").unwrap().is_none());
         assert!(lib.track_by_key("sha1:local").unwrap().is_some());
@@ -1652,7 +2007,7 @@ mod tests {
         assert_eq!(lib.favorites().unwrap().len(), 1);
         assert!(!lib.toggle_favorite("sha1:a").unwrap());
         assert_eq!(lib.favorites().unwrap().len(), 0);
-        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib", false)
+        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib", false, false)
             .unwrap();
         let row = lib.lyrics("sha1:a").unwrap().unwrap();
         assert_eq!(row.lrc, "[00:01.00]hola");
@@ -1660,13 +2015,51 @@ mod tests {
         assert_eq!(row.source, "lrclib");
         assert!(!row.aligned);
         assert_eq!(row.align_version, 0);
-        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib", true)
+        assert_eq!(row.policy_version, super::LYRICS_POLICY_VERSION);
+        assert!(!row.captions_timed);
+        lib.save_lyrics("sha1:a", "[00:01.00]hola", true, "lrclib", true, true)
             .unwrap();
         let row = lib.lyrics("sha1:a").unwrap().unwrap();
         assert!(row.aligned);
+        assert!(row.captions_timed);
         assert_eq!(row.align_version, super::LYRICS_ALIGN_VERSION);
         lib.set_lyrics_offset("sha1:a", 250).unwrap();
         assert_eq!(lib.lyrics_offset("sha1:a").unwrap(), 250);
+    }
+
+    #[test]
+    fn lyrics_policy_marks_trusted_and_leaves_ambiguous_for_retry() {
+        let mut lib = Library::open_in_memory().unwrap();
+        for (key, source) in [
+            ("sha1:trusted", "lrclib"),
+            ("sha1:plain", "plain"),
+            ("sha1:captions", "captions"),
+            ("sha1:asr", "asr"),
+            ("sha1:manual", "manual"),
+        ] {
+            lib.upsert_track(&track(key, key, "X")).unwrap();
+            lib.save_lyrics(key, "[00:01.00]hola", true, source, false, false)
+                .unwrap();
+        }
+        lib.conn
+            .execute("UPDATE lyrics SET policy_version = 0", [])
+            .unwrap();
+        lib.migrate_lyrics_policy().unwrap();
+        let version = |key: &str| lib.lyrics(key).unwrap().unwrap().policy_version;
+        assert_eq!(version("sha1:trusted"), super::LYRICS_POLICY_VERSION);
+        assert_eq!(version("sha1:asr"), super::LYRICS_POLICY_VERSION);
+        assert_eq!(version("sha1:manual"), super::LYRICS_POLICY_VERSION);
+        assert_eq!(version("sha1:plain"), 0);
+        assert_eq!(version("sha1:captions"), 0);
+        // No se borra nada: si no hay red, la letra sigue disponible.
+        assert_eq!(
+            lib.lyrics("sha1:plain").unwrap().unwrap().lrc,
+            "[00:01.00]hola"
+        );
+        assert_eq!(
+            lib.lyrics("sha1:captions").unwrap().unwrap().lrc,
+            "[00:01.00]hola"
+        );
     }
 
     #[test]

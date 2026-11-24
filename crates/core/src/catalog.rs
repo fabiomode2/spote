@@ -96,7 +96,10 @@ pub fn parse_url(input: &str) -> Result<(&'static str, String)> {
         path.split('/').filter(|s| !s.is_empty()).collect()
     };
     // `open.spotify.com/intl-es/playlist/<id>`
-    if parts.first().is_some_and(|first| first.starts_with("intl-")) {
+    if parts
+        .first()
+        .is_some_and(|first| first.starts_with("intl-"))
+    {
         parts.remove(0);
     }
 
@@ -253,7 +256,12 @@ fn single_track(entity: &Value) -> Option<CatalogTrack> {
         .pointer("/artists/0/name")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| entity.get("subtitle").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            entity
+                .get("subtitle")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     Some(CatalogTrack {
         id,
@@ -338,9 +346,11 @@ pub fn pick_best<'a>(
         }
 
         // Variantes que no son el tema del catálogo: live, remix, cover…
-        // Solo penaliza si la pista buscada no es ya de ese tipo.
-        let raw_title = item.title.to_lowercase();
-        let wanted_lower = title.to_lowercase();
+        // Solo penaliza si la pista buscada no es ya de ese tipo. Aquí no se
+        // usa `normalize`: borra los paréntesis y con ellos "(Live)" o
+        // "(Cover)", que es justo lo que hay que detectar.
+        let raw_title = keywords(&item.title);
+        let wanted_lower = keywords(title);
         for noise in [
             "live",
             "remix",
@@ -356,7 +366,7 @@ pub fn pick_best<'a>(
             "extended",
             "1 hour",
         ] {
-            if raw_title.contains(noise) && !wanted_lower.contains(noise) {
+            if contains_word(&raw_title, noise) && !contains_word(&wanted_lower, noise) {
                 score -= 25;
             }
         }
@@ -369,8 +379,20 @@ pub fn pick_best<'a>(
             score += match diff {
                 0..=3_000 => 40,
                 3_001..=8_000 => 20,
-                8_001..=15_000 => if exact_title { 0 } else { -20 },
-                15_001..=30_000 => if exact_title { -25 } else { -60 },
+                8_001..=15_000 => {
+                    if exact_title {
+                        0
+                    } else {
+                        -20
+                    }
+                }
+                15_001..=30_000 => {
+                    if exact_title {
+                        -25
+                    } else {
+                        -60
+                    }
+                }
                 _ => -100,
             };
             let limit = if exact_title { 30_000 } else { 10_000 };
@@ -389,43 +411,9 @@ pub fn pick_best<'a>(
 
 /// Minúsculas, sin acentos, sin paréntesis ni "feat.", espacios colapsados.
 fn normalize(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut depth = 0i32;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth > 0 => {}
-            '&' => out.push_str(" and "),
-            _ => out.push(ch),
-        }
-    }
-    // Corta colaboraciones: "feat. X", "ft. X", "with X".
-    let lower = out.to_lowercase();
-    for cut in [" feat. ", " feat ", " ft. ", " ft ", " with "] {
-        if let Some(index) = lower.find(cut) {
-            out.truncate(index);
-            break;
-        }
-    }
-    let mut normalized = String::with_capacity(out.len());
-    for ch in out.chars() {
-        let mapped = match ch {
-            'a'..='z' | '0'..='9' => ch,
-            'A'..='Z' => ch.to_ascii_lowercase(),
-            'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' => 'a',
-            'é' | 'è' | 'ë' | 'ê' => 'e',
-            'í' | 'ì' | 'ï' | 'î' => 'i',
-            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
-            'ú' | 'ù' | 'ü' | 'û' => 'u',
-            'ñ' => 'n',
-            'ç' => 'c',
-            _ => ' ',
-        };
-        normalized.push(mapped);
-    }
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Misma normalización que el resto de spote: conserva el núcleo de
+    // títulos simbólicos como "(_8(|)" y corta colaboraciones.
+    crate::util::normalize(text)
 }
 
 /// Nombres de fichero seguros para la colección.
@@ -436,6 +424,26 @@ pub fn playlist_slug(name: &str) -> String {
     } else {
         slug
     }
+}
+
+/// Texto para detectar variantes conservando el contenido de paréntesis.
+fn keywords(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Palabra/frase completa: "live" no debe activarse dentro de "deliver" ni
+/// "cover" dentro de "discover".
+fn contains_word(text: &str, phrase: &str) -> bool {
+    if text.is_empty() || phrase.is_empty() {
+        return false;
+    }
+    format!(" {text} ").contains(&format!(" {phrase} "))
 }
 
 #[cfg(test)]
@@ -469,12 +477,36 @@ mod tests {
     #[test]
     fn parsea_urls_de_todos_los_formatos() {
         for (input, kind, id) in [
-            ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc", "playlist", "37i9dQZF1DXcBWIGoYBM5M"),
-            ("https://open.spotify.com/intl-es/album/1ATL5GLyefJaxhQzSPVrLX", "album", "1ATL5GLyefJaxhQzSPVrLX"),
-            ("spotify:track:3zOYmiNOuyDL0ClxJcEJ0T", "track", "3zOYmiNOuyDL0ClxJcEJ0T"),
-            ("https://open.spotify.com/artist/3kjuyTCjPG1WMFCiyc5IuB", "artist", "3kjuyTCjPG1WMFCiyc5IuB"),
-            ("spotify:artist:3kjuyTCjPG1WMFCiyc5IuB", "artist", "3kjuyTCjPG1WMFCiyc5IuB"),
-            ("open.spotify.com/track/3zOYmiNOuyDL0ClxJcEJ0T", "track", "3zOYmiNOuyDL0ClxJcEJ0T"),
+            (
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
+                "playlist",
+                "37i9dQZF1DXcBWIGoYBM5M",
+            ),
+            (
+                "https://open.spotify.com/intl-es/album/1ATL5GLyefJaxhQzSPVrLX",
+                "album",
+                "1ATL5GLyefJaxhQzSPVrLX",
+            ),
+            (
+                "spotify:track:3zOYmiNOuyDL0ClxJcEJ0T",
+                "track",
+                "3zOYmiNOuyDL0ClxJcEJ0T",
+            ),
+            (
+                "https://open.spotify.com/artist/3kjuyTCjPG1WMFCiyc5IuB",
+                "artist",
+                "3kjuyTCjPG1WMFCiyc5IuB",
+            ),
+            (
+                "spotify:artist:3kjuyTCjPG1WMFCiyc5IuB",
+                "artist",
+                "3kjuyTCjPG1WMFCiyc5IuB",
+            ),
+            (
+                "open.spotify.com/track/3zOYmiNOuyDL0ClxJcEJ0T",
+                "track",
+                "3zOYmiNOuyDL0ClxJcEJ0T",
+            ),
         ] {
             let (got_kind, got_id) = parse_url(input).expect(input);
             assert_eq!((got_kind, got_id.as_str()), (kind, id), "{input}");
@@ -489,7 +521,10 @@ mod tests {
         assert_eq!(catalog.kind, "playlist");
         assert_eq!(catalog.name, "Prueba");
         assert_eq!(catalog.owner.as_deref(), Some("alguien"));
-        assert_eq!(catalog.cover.as_deref(), Some("https://i.scdn.co/image/abc"));
+        assert_eq!(
+            catalog.cover.as_deref(),
+            Some("https://i.scdn.co/image/abc")
+        );
         assert_eq!(catalog.tracks.len(), 2);
         assert_eq!(catalog.tracks[0].id, "3zOYmiNOuyDL0ClxJcEJ0T");
         assert_eq!(catalog.tracks[0].artist, "Ashe");
@@ -541,7 +576,12 @@ mod tests {
     #[test]
     fn prefiere_topic_y_duracion() {
         let items = vec![
-            item("Stop The Wedding! (Official Video)", "Ashe", "Ashe", 250_000),
+            item(
+                "Stop The Wedding! (Official Video)",
+                "Ashe",
+                "Ashe",
+                250_000,
+            ),
             item("Stop The Wedding!", "Ashe", "Ashe - Topic", 198_840),
             item("Stop The Wedding! (8D AUDIO)", "Ashe", "8D Tunes", 200_000),
         ];
@@ -554,7 +594,12 @@ mod tests {
         // Guxo tiene varias canciones de ~3 min. Antes se elegía "El Precio del
         // Amor" porque su duración encajaba mejor que el vídeo oficial largo.
         let items = vec![
-            item("Guxo - El Precio del Amor [Official Music Video]", "Guxo", "Guxo", 178_000),
+            item(
+                "Guxo - El Precio del Amor [Official Music Video]",
+                "Guxo",
+                "Guxo",
+                178_000,
+            ),
             item("Guxo - Kariñosa (Official Video)", "Guxo", "Guxo", 188_000),
         ];
         let best = pick_best(&items, "Guxo", "Kariñosa", 176_062).expect("hay match");
@@ -565,6 +610,18 @@ mod tests {
     fn descarta_duraciones_muy_distintas() {
         let items = vec![item("Cancion", "Artista", "Artista - Topic", 400_000)];
         assert!(pick_best(&items, "Artista", "Cancion", 180_000).is_none());
+    }
+
+    #[test]
+    fn noise_detection_uses_whole_words() {
+        assert!(!contains_word("deliver", "live"));
+        assert!(!contains_word("alive", "live"));
+        assert!(!contains_word("discover", "cover"));
+        assert!(contains_word("song live version", "live"));
+        assert!(!contains_word("undercover", "cover"));
+        assert!(contains_word(&keywords("Song (Live)"), "live"));
+        assert!(contains_word(&keywords("Song (Cover)"), "cover"));
+        assert!(contains_word(&keywords("Song (8D Audio)"), "8d"));
     }
 
     #[test]

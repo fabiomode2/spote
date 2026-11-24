@@ -27,6 +27,12 @@ pub fn format_ms_precise(ms: u64) -> String {
 /// Normaliza texto para comparar canciones: minúsculas, sin acentos, sin
 /// sufijos de vídeo/remaster y sin puntuación.
 pub fn normalize(text: &str) -> String {
+    normalize_impl(text, true)
+}
+
+/// `fallback_key` conserva el `feat.` para no cambiar las claves ya guardadas
+/// de pistas antiguas. La normalización pública sí lo corta para el matching.
+fn normalize_impl(text: &str, cut_collab: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut depth = 0usize;
     for ch in text.chars() {
@@ -41,19 +47,33 @@ pub fn normalize(text: &str) -> String {
             ')' | ']' => depth = depth.saturating_sub(1),
             _ if depth > 0 => {}
             _ => {
-                let ch = deaccent(ch);
-                if ch.is_alphanumeric() || ch == ' ' {
-                    out.extend(ch.to_lowercase());
-                } else if ch == '&' {
-                    out.push_str(" and ");
-                } else {
-                    out.push(' ');
+                // Primero minúsculas y luego deaccent: al revés, 'Á' se
+                // quedaba como 'á' y no casaba con 'arbol'.
+                for lower in ch.to_lowercase() {
+                    let plain = deaccent(lower);
+                    if plain.is_alphanumeric() || plain == ' ' {
+                        out.push(plain);
+                    } else if plain == '&' {
+                        out.push_str(" and ");
+                    } else {
+                        out.push(' ');
+                    }
                 }
             }
         }
     }
     let lower = out.to_lowercase();
-    let mut cleaned: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    let cut = if cut_collab {
+        tokens
+            .iter()
+            .position(|token| matches!(*token, "feat" | "ft" | "featuring"))
+            .filter(|index| *index > 0)
+            .unwrap_or(tokens.len())
+    } else {
+        tokens.len()
+    };
+    let mut cleaned: String = tokens[..cut].join(" ");
     for noise in [
         " official video",
         " official music video",
@@ -70,7 +90,31 @@ pub fn normalize(text: &str) -> String {
     ] {
         cleaned = cleaned.replace(noise, "");
     }
-    cleaned.trim().to_string()
+    let cleaned = cleaned.trim().to_string();
+    if !cleaned.is_empty() {
+        return cleaned;
+    }
+    // Títulos como "(_8(|)" quedan vacíos al quitar los grupos. Si no queda
+    // nada fuera de paréntesis, se conserva el núcleo alfanumérico interior
+    // para no colisionar con cualquier otro título del mismo artista.
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        for lower in ch.to_lowercase() {
+            let plain = deaccent(lower);
+            if plain.is_alphanumeric() {
+                out.push(plain);
+            } else {
+                out.push(' ');
+            }
+        }
+    }
+    let tokens: Vec<&str> = out.split_whitespace().collect();
+    let cut = tokens
+        .iter()
+        .position(|token| matches!(*token, "feat" | "ft" | "featuring"))
+        .filter(|index| *index > 0)
+        .unwrap_or(tokens.len());
+    tokens[..cut].join(" ")
 }
 
 fn deaccent(ch: char) -> char {
@@ -91,8 +135,8 @@ pub fn fallback_key(artist: &str, title: &str, duration_ms: u64) -> String {
     let seconds = duration_ms / 1000;
     let raw = format!(
         "{}|{}|{}",
-        normalize(artist),
-        normalize(title),
+        normalize_impl(artist, false),
+        normalize_impl(title, false),
         seconds
     );
     format!("sha1:{}", hex_sha1(raw.as_bytes()))
@@ -178,7 +222,9 @@ pub fn elapsed(start: std::time::Instant) -> Duration {
 
 pub fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     let t = t.clamp(0.0, 1.0);
-    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+    (a as f32 + (b as f32 - a as f32) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// Mezcla dos colores RGB.
@@ -223,7 +269,11 @@ pub fn rgb_to_hsv((r, g, b): (u8, u8, u8)) -> (f32, f32, f32) {
         60.0 * ((r - g) / delta + 4.0)
     };
     let hue = if hue < 0.0 { hue + 360.0 } else { hue };
-    let sat = if max <= f32::EPSILON { 0.0 } else { delta / max };
+    let sat = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
     (hue, sat, max)
 }
 
@@ -308,6 +358,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn symbolic_titles_keep_their_core() {
+        assert_eq!(normalize("(_8(|) (feat. superreservao)"), "8");
+        assert_eq!(normalize("[_8 [|] [feat. superreservao]"), "8");
+        assert_ne!(
+            fallback_key("Biberon", "(_8(|)", 139_000),
+            fallback_key("Biberon", "Regular", 139_000)
+        );
+        // El matching corta feat.; la clave estable no, para no invalidar
+        // claves antiguas de pistas con colaboraciones.
+        assert_eq!(normalize("Song feat. X"), "song");
+        assert_eq!(normalize_impl("Song feat. X", false), "song feat x");
+    }
+
+    #[test]
     fn formats_durations() {
         assert_eq!(format_ms(0), "0:00");
         assert_eq!(format_ms(83_000), "1:23");
@@ -320,11 +384,15 @@ mod tests {
     }
 
     #[test]
+    fn deaccents_uppercase_letters_too() {
+        assert_eq!(normalize("ÁRBOL"), "arbol");
+        assert_eq!(normalize("ÑANDÚ"), "nandu");
+        assert_eq!(normalize("BÍBERON"), normalize("biberon"));
+    }
+
+    #[test]
     fn normalizes_noise_and_accents() {
-        assert_eq!(
-            normalize("Déjà Vu (Official Video) [HD]"),
-            "deja vu"
-        );
+        assert_eq!(normalize("Déjà Vu (Official Video) [HD]"), "deja vu");
         assert_eq!(normalize("AC/DC"), "ac dc");
     }
 

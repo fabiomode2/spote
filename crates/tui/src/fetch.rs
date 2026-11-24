@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use spote_core::artwork::{decode_image, render_cover, ArtMode, CoverArt, Palette};
 use spote_core::config;
@@ -334,6 +334,12 @@ pub struct LyricsWorker {
     /// compara su generación con esta para cancelar el ASR si el usuario ya
     /// cambió de pista.
     generation: Arc<AtomicU64>,
+    /// Pistas cuyo ASR ya se intentó en esta sesión. `forget` permite que el
+    /// botón de recargar letra vuelva a intentarlo tras un fallo de red.
+    asr_attempted: Arc<Mutex<HashSet<String>>>,
+    /// Modo "letras inventadas" compartido con el worker; se puede cambiar en
+    /// caliente desde la TUI.
+    allow_generated: Arc<AtomicBool>,
     responses: Receiver<LyricsMsg>,
 }
 
@@ -343,6 +349,10 @@ impl LyricsWorker {
         let (response_tx, response_rx) = std::sync::mpsc::channel();
         let generation = Arc::new(AtomicU64::new(0));
         let worker_generation = Arc::clone(&generation);
+        let asr_attempted: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let worker_attempted = Arc::clone(&asr_attempted);
+        let allow_generated = Arc::new(AtomicBool::new(cfg.allow_generated));
+        let worker_allow_generated = Arc::clone(&allow_generated);
         std::thread::Builder::new()
             .name("spote-lyrics".into())
             .spawn(move || {
@@ -352,11 +362,10 @@ impl LyricsWorker {
                 else {
                     return;
                 };
-                let service = LyricsService::from_config(&cfg);
+                let mut service = LyricsService::from_config(&cfg);
                 // Una pista solo intenta el ASR una vez por sesión: si falló o
                 // tardó, no se repite cada vez que suena. La letra cacheada se
                 // sigue mostrando.
-                let mut asr_attempted: HashSet<String> = HashSet::new();
                 while let Ok((mut my_generation, mut request)) = rx.recv() {
                     // Si hay varias peticiones en cola (el usuario saltó de
                     // pista), solo interesa la última. Se conserva su `id` como
@@ -368,7 +377,14 @@ impl LyricsWorker {
                     }
                     let key = request.track.key.clone();
                     let audio = match request.audio.take() {
-                        Some(audio) if asr_attempted.insert(key.clone()) => Some(audio),
+                        Some(audio)
+                            if worker_attempted
+                                .lock()
+                                .map(|mut set| set.insert(key.clone()))
+                                .unwrap_or(false) =>
+                        {
+                            Some(audio)
+                        }
                         _ => None,
                     };
                     let cancel = Arc::new(AtomicBool::new(false));
@@ -392,6 +408,7 @@ impl LyricsWorker {
                             })
                             .ok()
                     };
+                    service.set_allow_generated(worker_allow_generated.load(Ordering::Relaxed));
                     let result = runtime.block_on(service.fetch_with_audio_cancellable(
                         &request.track,
                         audio.as_deref(),
@@ -399,10 +416,14 @@ impl LyricsWorker {
                         Some(cancel.as_ref()),
                     ));
                     done.store(true, Ordering::Relaxed);
-                    // Un intento cancelado no cuenta: la pista volverá a tener
-                    // su oportunidad cuando se reproduzca de nuevo.
-                    if cancel.load(Ordering::Relaxed) {
-                        asr_attempted.remove(&key);
+                    // Un intento cancelado o sin alineación no cuenta: la
+                    // pista vuelve a tener su oportunidad en la siguiente
+                    // reproducción.
+                    let aligned = matches!(&result, Ok(Some(doc)) if doc.aligned);
+                    if cancel.load(Ordering::Relaxed) || !aligned {
+                        if let Ok(mut set) = worker_attempted.lock() {
+                            set.remove(&key);
+                        }
                     }
                     drop(watcher);
                     let message = match result {
@@ -434,7 +455,21 @@ impl LyricsWorker {
         Self {
             requests: tx,
             generation,
+            asr_attempted,
+            allow_generated,
             responses: response_rx,
+        }
+    }
+
+    /// Activa/desactiva en caliente las letras generadas con captions/ASR.
+    pub fn set_allow_generated(&self, allow: bool) {
+        self.allow_generated.store(allow, Ordering::Relaxed);
+    }
+
+    /// Permite que una pista vuelva a intentar el ASR (botón recargar).
+    pub fn forget(&self, key: &str) {
+        if let Ok(mut set) = self.asr_attempted.lock() {
+            set.remove(key);
         }
     }
 
@@ -540,27 +575,35 @@ impl LyricsSearchWorker {
 pub fn doc_to_lrc(doc: &LyricsDoc) -> String {
     let mut out = String::new();
     for line in &doc.lines {
-        let minutes = line.start_ms / 60_000;
-        let seconds = (line.start_ms % 60_000) as f32 / 1000.0;
         // Solo se escriben tags de palabra si son reales (LRC mejorado o ASR).
         // Serializar las palabras sintetizadas las convertía en "exactas" al
         // recargar y la UI dejaba de refinarlas con el mapa de audio.
         if line.words.is_empty() || !line.words_exact {
-            out.push_str(&format!("[{minutes:02}:{seconds:05.2}] {}\n", line.text));
+            out.push_str(&format!("[{}] {}\n", lrc_stamp(line.start_ms), line.text));
         } else {
             let mut body = String::new();
             for word in &line.words {
-                let wm = word.start_ms / 60_000;
-                let ws = (word.start_ms % 60_000) as f32 / 1000.0;
-                body.push_str(&format!("<{wm:02}:{ws:05.2}>{}\n", word.text));
+                body.push_str(&format!("<{}>{}\n", lrc_stamp(word.start_ms), word.text));
             }
             out.push_str(&format!(
-                "[{minutes:02}:{seconds:05.2}] {}\n",
+                "[{}] {}\n",
+                lrc_stamp(line.start_ms),
                 body.replace('\n', " ")
             ));
         }
     }
     out
+}
+
+/// Timestamp LRC en centésimas enteras. Redondear con `f32` producía
+/// `[00:60.00]` a partir de 59_995 ms, que el parser rechaza al recargar.
+pub(crate) fn lrc_stamp(ms: u64) -> String {
+    let total_cs = (ms + 5) / 10;
+    let total_secs = total_cs / 100;
+    let cs = total_cs % 100;
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    format!("{minutes:02}:{seconds:02}.{cs:02}")
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +631,29 @@ mod tests {
             reloaded.lines.iter().all(|line| !line.words_exact),
             "las palabras sintetizadas no deben volverse exactas al cachear"
         );
+    }
+
+    #[test]
+    fn lrc_cache_never_writes_sixty_seconds() {
+        for (ms, expected) in [
+            (59_994, "[00:59.99]"),
+            (59_999, "[01:00.00]"),
+            (119_999, "[02:00.00]"),
+        ] {
+            let doc = spote_core::lyrics::LyricsDoc {
+                lines: vec![spote_core::lyrics::LyricLine {
+                    start_ms: ms,
+                    end_ms: ms + 500,
+                    text: "línea".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let text = doc_to_lrc(&doc);
+            assert!(text.starts_with(expected), "{ms}: {text}");
+            let reloaded = spote_core::lyrics::parse_lrc(&text);
+            assert_eq!(reloaded.lines.len(), 1, "{ms}: {text}");
+        }
     }
 
     #[test]

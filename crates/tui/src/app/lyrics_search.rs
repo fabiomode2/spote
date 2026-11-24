@@ -116,27 +116,24 @@ impl App {
             self.toast("no hay ninguna letra seleccionada", ToastKind::Warn);
             return;
         };
-        let (lrc, synced) = if let Some(lrc) = candidate
-            .lrc
-            .clone()
-            .filter(|lrc| !lrc.trim().is_empty())
-        {
-            (lrc, true)
-        } else if let Some(plain) = candidate
-            .plain
-            .clone()
-            .filter(|plain| !plain.trim().is_empty())
-        {
-            let duration = if self.now.duration_ms > 0 {
-                self.now.duration_ms
+        let (lrc, synced) =
+            if let Some(lrc) = candidate.lrc.clone().filter(|lrc| !lrc.trim().is_empty()) {
+                (lrc, true)
+            } else if let Some(plain) = candidate
+                .plain
+                .clone()
+                .filter(|plain| !plain.trim().is_empty())
+            {
+                let duration = if self.now.duration_ms > 0 {
+                    self.now.duration_ms
+                } else {
+                    candidate.duration_ms
+                };
+                (plain_to_lrc(&plain, duration), false)
             } else {
-                candidate.duration_ms
+                self.toast("esa candidata no tiene texto", ToastKind::Warn);
+                return;
             };
-            (plain_to_lrc(&plain, duration), false)
-        } else {
-            self.toast("esa candidata no tiene texto", ToastKind::Warn);
-            return;
-        };
         let mut doc = LyricsDoc::from_lrc(&lrc, synced);
         if doc.is_empty() {
             self.toast("la letra elegida está vacía", ToastKind::Warn);
@@ -147,7 +144,7 @@ impl App {
         doc.offset_ms = 0;
         doc.source = spote_core::lyrics::LyricsSource::Manual;
         self.lib
-            .save_lyrics(&track.key, &lrc, synced, "manual", false)
+            .save_lyrics(&track.key, &lrc, synced, "manual", false, false)
             .ok();
         self.lib.set_lyrics_offset(&track.key, 0).ok();
         self.lyrics = Some(doc);
@@ -224,9 +221,23 @@ fn plain_to_lrc(text: &str, duration_ms: u64) -> String {
     let mut out = String::new();
     for (index, line) in lines.iter().enumerate() {
         let start = index as u64 * total / count;
-        let minutes = start / 60_000;
-        let seconds = (start % 60_000) as f32 / 1000.0;
-        out.push_str(&format!("[{minutes:02}:{seconds:05.2}] {line}\n"));
+        out.push_str(&format!("[{}] {line}\n", crate::fetch::lrc_stamp(start)));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_lrc_never_writes_sixty_seconds() {
+        // 59,999 ms / 2 líneas => la primera empieza en 0 y la segunda en
+        // 29,999; el redondeo de la última línea no debe producir 60 s.
+        let lrc = plain_to_lrc("uno\ndos", 119_999);
+        assert!(!lrc.contains(":60."), "{lrc}");
+        assert!(lrc.contains("[01:00.00]"), "{lrc}");
+        let doc = spote_core::lyrics::parse_lrc(&lrc);
+        assert!(doc.lines.len() >= 2, "{lrc}");
+    }
 }

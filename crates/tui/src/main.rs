@@ -2,11 +2,11 @@
 
 mod app;
 mod fetch;
-mod mini;
-mod system_media;
 mod hires;
+mod mini;
 mod social;
 mod spotify_jobs;
+mod system_media;
 mod theme;
 mod ui;
 mod version;
@@ -56,6 +56,7 @@ struct Args {
     step: Option<u64>,
     discord_id: Option<String>,
     save_discord: bool,
+    yes: bool,
 }
 
 impl Args {
@@ -74,6 +75,7 @@ impl Args {
                 "--step" => args.step = iter.next().and_then(|value| value.parse().ok()),
                 "--id" => args.discord_id = iter.next(),
                 "--save" => args.save_discord = true,
+                "--yes" => args.yes = true,
                 "--art" => args.art = iter.next(),
                 "--viz" => args.viz = iter.next(),
                 "--fps" => args.fps = iter.next().and_then(|value| value.parse().ok()),
@@ -111,6 +113,7 @@ fn run() -> Result<()> {
         Some("harvest") => return run_harvest(&args),
         Some("discord") => return run_discord(&args),
         Some("mini") => return run_mini(),
+        Some("dedupe") => return run_dedupe(&args),
         Some("doctor") => return run_doctor(),
         Some("version") => {
             println!("spote {}", env!("CARGO_PKG_VERSION"));
@@ -164,6 +167,7 @@ USO:
   spote discord --id <app-id>      prueba el Rich Presence y guarda el ID
          [--save] [--seconds N]
   spote mini                       abre el mini reproductor de escritorio
+  spote dedupe [--dry-run] [--yes] fusiona pistas duplicadas (con backup)
   spote doctor                     comprueba dependencias y rutas
   spote version | help
 
@@ -261,7 +265,11 @@ fn run_import(args: &Args) -> Result<()> {
         }
         println!("indexadas {} pistas de «{}»", refs.len(), catalog.name);
     } else {
-        let playlist_id = match lib.playlists()?.into_iter().find(|p| p.name == catalog.name) {
+        let playlist_id = match lib
+            .playlists()?
+            .into_iter()
+            .find(|p| p.name == catalog.name)
+        {
             Some(existing) => existing.id,
             None => lib.create_playlist(&catalog.name)?,
         };
@@ -302,7 +310,10 @@ fn run_record(args: &Args) -> Result<()> {
     println!("preparando la grabación …");
     let recorder = record::Recorder::start(&options)?;
     let track = recorder.track().clone();
-    let total_ms = options.seconds.map(|s| s * 1000).unwrap_or(track.duration_ms);
+    let total_ms = options
+        .seconds
+        .map(|s| s * 1000)
+        .unwrap_or(track.duration_ms);
     println!(
         "grabando «{}» ({}) — 1× tiempo real; Ctrl-C corta y deja lo grabado",
         track.label(),
@@ -383,7 +394,9 @@ fn run_record(args: &Args) -> Result<()> {
     let mut lib = Library::open(&config::db_path())?;
     lib.upsert_track(&recording.track)?;
     if let Some(row) = lib.track_by_key(&recording.track.key)? {
-        let size = std::fs::metadata(&recording.path).ok().map(|meta| meta.len());
+        let size = std::fs::metadata(&recording.path)
+            .ok()
+            .map(|meta| meta.len());
         lib.set_source(
             row.id,
             "recording",
@@ -414,9 +427,7 @@ fn run_record(args: &Args) -> Result<()> {
         let expected = recording.track.duration_ms as f64 / 1000.0;
         let diff = recording.seconds - expected;
         if diff.abs() > 1.0 {
-            println!(
-                "  aviso: {diff:+.1}s respecto a la duración de la pista ({expected:.0}s)"
-            );
+            println!("  aviso: {diff:+.1}s respecto a la duración de la pista ({expected:.0}s)");
         }
     }
     Ok(())
@@ -578,6 +589,35 @@ fn fmt_mmss(ms: u64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+fn run_dedupe(args: &Args) -> Result<()> {
+    let mut lib = Library::open(&config::db_path())?;
+    let pairs = lib.duplicate_count()?;
+    if pairs == 0 {
+        println!("no hay duplicados con audio listo");
+        return Ok(());
+    }
+    println!("duplicados detectados: {pairs}");
+    if args.dry_run {
+        println!("dry-run: no se ha tocado nada");
+        return Ok(());
+    }
+    if !args.yes {
+        anyhow::bail!("revisa con --dry-run y repite con --yes para fusionar");
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = config::db_path().with_extension(format!("bak-{stamp}"));
+    lib.backup_to(&backup)?;
+    let merged = lib.merge_duplicates()?;
+    println!(
+        "fusionadas {merged} pistas · backup en {}",
+        backup.display()
+    );
+    Ok(())
+}
+
 fn run_doctor() -> Result<()> {
     let tools = ToolStatus::detect();
     println!("spote {}", env!("CARGO_PKG_VERSION"));
@@ -591,10 +631,7 @@ fn run_doctor() -> Result<()> {
         println!("  {:<8} {}", name, if present { "ok" } else { "FALTA" });
     }
     if spote_core::util::which("mpv").is_some() {
-        if let Ok(output) = std::process::Command::new("mpv")
-            .arg("--version")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("mpv").arg("--version").output() {
             let text = String::from_utf8_lossy(&output.stdout);
             if let Some(first) = text.lines().next() {
                 println!("  mpv: {}", first.trim());
@@ -843,7 +880,6 @@ fn run_discord(args: &Args) -> Result<()> {
     println!("conectando con Discord (app {id}) …");
     let mut ipc = spote_core::discord::DiscordIpc::connect(&id)?;
 
-
     let mut watcher = SpotifyWatcher::new();
     let activity = match watcher.poll().and_then(|state| state.track) {
         Some(track) => {
@@ -869,10 +905,12 @@ fn run_discord(args: &Args) -> Result<()> {
                 buttons: track
                     .key
                     .strip_prefix("spotify:track:")
-                    .map(|id| vec![(
-                        "Abrir en Spotify".to_string(),
-                        format!("https://open.spotify.com/track/{id}"),
-                    )])
+                    .map(|id| {
+                        vec![(
+                            "Abrir en Spotify".to_string(),
+                            format!("https://open.spotify.com/track/{id}"),
+                        )]
+                    })
                     .unwrap_or_default(),
             }
         }

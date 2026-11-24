@@ -220,19 +220,28 @@ impl App {
                 if track.art_url.is_none() {
                     track.art_url = row.track.art_url.clone();
                 }
+                // MPRIS puede no publicar `mpris:length`; la fila local sí
+                // sabe cuánto dura. Sin esto, al cambiar de pista se ponía a 0
+                // y se perdía la duración aunque la canción estuviera indexada.
+                if track.duration_ms == 0 {
+                    track.duration_ms = row.track.duration_ms;
+                }
             }
             let changed = self.now.track.as_ref().map(|t| &t.key) != Some(&track.key);
+            let known_duration = track.duration_ms;
             self.now.track = Some(track.clone());
-            self.now.duration_ms = track.duration_ms;
+            // MPRIS puede no publicar `mpris:length` (Stremio). En ese caso no
+            // se pisa la duración local ya conocida en cada sondeo.
+            if changed || known_duration > 0 {
+                self.now.duration_ms = known_duration;
+            }
             // MPRIS informa con ~400 ms de retraso. Si se aplica tal cual en
             // cada sondeo, la posición retrocede y la letra se queda clavada.
             // Solo se resincroniza cuando la deriva es de verdad.
             let drift = state.position_ms as i64 - self.now.position_ms as i64;
             let was_unknown = self.now.position_unknown;
             let was_playing = self.now.playing;
-            if changed
-                || (state.position_known && (was_unknown || was_playing != state.playing))
-            {
+            if changed || (state.position_known && (was_unknown || was_playing != state.playing)) {
                 self.now.position_ms = state.position_ms;
                 self.now.position_seen_ms = state.position_ms;
                 self.now.position_at = Instant::now();
@@ -317,10 +326,7 @@ impl App {
         // ya no suma `elapsed` en este modo. Al pausar se queda donde estaba
         // (no salta al último sondeo ni a 0:00).
         if self.now.playing && dt > 0.0 {
-            self.now.position_ms = self
-                .now
-                .position_ms
-                .saturating_add((dt * 1000.0) as u64);
+            self.now.position_ms = self.now.position_ms.saturating_add((dt * 1000.0) as u64);
             if self.now.duration_ms > 0 {
                 self.now.position_ms = self.now.position_ms.min(self.now.duration_ms);
             }

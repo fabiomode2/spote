@@ -54,6 +54,8 @@ pub struct MiniSnapshot {
     pub repeat: String,
     /// Ruta local de la portada, si ya está descargada.
     pub art_path: Option<String>,
+    /// URL remota de la portada; el mini la descarga si no hay `art_path`.
+    pub art_url: Option<String>,
     /// Color dominante de la portada.
     pub accent: [u8; 3],
     /// 32 bandas `0.0..=1.0`. Si viene vacío, el cliente dibuja su animación.
@@ -62,6 +64,26 @@ pub struct MiniSnapshot {
     pub status: String,
     /// Identidad canónica de la pista; cambia cuando cambia la canción.
     pub track_key: String,
+    /// Preset de visualización activo en la TUI.
+    pub viz_preset: String,
+    /// Presets disponibles para ciclar desde el mini.
+    pub viz_presets: Vec<String>,
+    /// Frame del visual de la TUI ya compuesto, en una rejilla pequeña.
+    pub viz_cols: u16,
+    pub viz_rows: u16,
+    pub viz: Vec<MiniVizCell>,
+}
+
+/// Celda del visual de la TUI reenviada al mini.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MiniVizCell {
+    pub x: u16,
+    pub y: u16,
+    /// Carácter de la celda. El mini lo dibuja con fuente monoespaciada.
+    pub ch: char,
+    pub fg: [u8; 3],
+    /// 0 = transparente, 255 = opaco.
+    pub alpha: u8,
 }
 
 impl MiniSnapshot {
@@ -203,6 +225,8 @@ pub enum MiniCommand {
     SetVolume(f32),
     Shuffle,
     CycleRepeat,
+    /// Cambia al siguiente preset de visualización.
+    CycleViz,
     Quit,
 }
 

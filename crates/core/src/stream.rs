@@ -494,34 +494,93 @@ fn resolve_job(job: &Job, cache_dir: &Path, cancel: Option<&Cancel>) -> Result<R
         job.hint.as_ref().map(|hint| hint.duration_ms).unwrap_or(0)
     };
 
-    let (id, provider) = match hinted_video(job.hint.as_ref()) {
-        Some((id, provider)) => (id, provider),
+    let hinted = hinted_video(job.hint.as_ref());
+    let first = match &hinted {
+        // El hint exacto se intenta primero, sin buscar: es el audio del que
+        // salió la pista. Si falla, luego se buscan alternativas.
+        Some((id, provider)) => (id.clone(), provider.clone()),
         None => {
             let candidate = search(&job.artist, &job.title, wanted_duration, cancel)?;
             (candidate.id, "youtube".to_string())
         }
     };
 
+    let mut last_error: Option<anyhow::Error>;
+    match try_candidate(&first.0, &first.1, job, cache_dir, cancel) {
+        Ok(resolution) => return Ok(resolution),
+        Err(err) if is_cancelled(&err) => return Err(err),
+        Err(err) => last_error = Some(err),
+    }
+
+    // Solo si el primer candidato falló se paga el coste de buscar más. Antes
+    // de este cambio toda reproducción sin hint hacía las tres variantes de
+    // búsqueda aunque la primera ya hubiera encontrado el tema.
+    if cancel.is_some_and(Cancel::requested) {
+        return Err(cancelled_error());
+    }
+    let mut tried: HashSet<String> = HashSet::new();
+    tried.insert(first.0);
+    if let Ok(alternates) = search_ranked(&job.artist, &job.title, wanted_duration, cancel) {
+        for candidate in alternates.into_iter().take(4) {
+            if !tried.insert(candidate.id.clone()) {
+                continue;
+            }
+            if cancel.is_some_and(Cancel::requested) {
+                return Err(cancelled_error());
+            }
+            match try_candidate(&candidate.id, "youtube", job, cache_dir, cancel) {
+                Ok(resolution) => return Ok(resolution),
+                Err(err) if is_cancelled(&err) => return Err(err),
+                Err(err) => last_error = Some(err),
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        failure(
+            FailureKind::Unavailable,
+            "ningún candidato de YouTube se pudo reproducir ni descargar",
+        )
+    }))
+}
+
+/// Intenta un único vídeo: primero `-g`, y si falla la descarga directa a
+/// caché. La cancelación se propaga sin probar más candidatos.
+fn try_candidate(
+    id: &str,
+    provider: &str,
+    job: &Job,
+    cache_dir: &Path,
+    cancel: Option<&Cancel>,
+) -> Result<Resolution> {
     // Defensa en profundidad: todo ID que llega aquí debe tener ya la forma
     // exacta de YouTube. La URL de watch se construye siempre desde el ID.
-    if !is_valid_video_id(&id) {
+    if !is_valid_video_id(id) {
         return Err(failure(
             FailureKind::Unavailable,
             format!("ID de vídeo inválido: {id:?}"),
         ));
     }
-
     if job.strategy == Strategy::DownloadOnly {
-        let path = download_audio(&id, &job.key, cache_dir, cancel)?;
-        return Ok(Resolution::File { path, provider, id });
+        return download_audio(id, &job.key, cache_dir, cancel).map(|path| Resolution::File {
+            path,
+            provider: provider.to_string(),
+            id: id.to_string(),
+        });
     }
-
-    match resolve_media_url(&watch_url(&id), cancel) {
-        Ok(url) => Ok(Resolution::Url(StreamSource { url, provider, id })),
-        Err(stream_error) if is_cancelled(&stream_error) => Err(stream_error),
-        Err(stream_error) => match download_audio(&id, &job.key, cache_dir, cancel) {
-            Ok(path) => Ok(Resolution::File { path, provider, id }),
-            Err(download_error) if is_cancelled(&download_error) => Err(download_error),
+    match resolve_media_url(&watch_url(id), cancel) {
+        Ok(url) => Ok(Resolution::Url(StreamSource {
+            url,
+            provider: provider.to_string(),
+            id: id.to_string(),
+        })),
+        Err(err) if is_cancelled(&err) => Err(err),
+        Err(stream_error) => match download_audio(id, &job.key, cache_dir, cancel) {
+            Ok(path) => Ok(Resolution::File {
+                path,
+                provider: provider.to_string(),
+                id: id.to_string(),
+            }),
+            Err(err) if is_cancelled(&err) => Err(err),
             Err(download_error) => Err(combined_failure(stream_error, download_error)),
         },
     }
@@ -605,10 +664,27 @@ fn query_variants(artist: &str, title: &str) -> Vec<String> {
     out
 }
 
-/// Busca un vídeo para una pista y devuelve su ID. La usa el `Downloader`
-/// para no mantener un segundo matcher más laxo que el de reproducción.
+/// Busca un vídeo para una pista y devuelve su ID. La usan diagnósticos y
+/// tests; la reproducción usa [`search`] + [`try_candidate`] y el Downloader
+/// usa [`find_video_ids`].
 pub fn find_video_id(artist: &str, title: &str, duration_ms: u64) -> Result<String> {
     search(artist, title, duration_ms, None).map(|candidate| candidate.id)
+}
+
+/// IDs de los mejores candidatos, de mejor a peor. Sirve para reintentar con
+/// el siguiente upload si el primero está bloqueado o no deja descargar.
+pub fn find_video_ids(
+    artist: &str,
+    title: &str,
+    duration_ms: u64,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let candidates = search_ranked(artist, title, duration_ms, None)?;
+    Ok(candidates
+        .into_iter()
+        .take(limit.max(1))
+        .map(|candidate| candidate.id)
+        .collect())
 }
 
 /// Busca en YouTube probando las variantes y elige el mejor candidato. Si una
@@ -679,6 +755,58 @@ fn search(
     } else {
         Err(last_error.unwrap_or_else(|| failure(FailureKind::NoMatch, format!("«{first_query}»"))))
     }
+}
+
+/// Variante de búsqueda que conserva todos los candidatos válidos ordenados.
+/// Se usa cuando un vídeo puede fallar al descargar y hay que probar el
+/// siguiente upload del mismo tema.
+fn search_ranked(
+    artist: &str,
+    title: &str,
+    duration_ms: u64,
+    cancel: Option<&Cancel>,
+) -> Result<Vec<SearchCandidate>> {
+    let queries = query_variants(artist, title);
+    let Some(first_query) = queries.first() else {
+        return Err(failure(
+            FailureKind::NoMatch,
+            "no hay artista ni título para buscar",
+        ));
+    };
+    let mut seen = HashSet::new();
+    let mut candidates: Vec<SearchCandidate> = Vec::new();
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut any_search_succeeded = false;
+    for query in &queries {
+        if cancel.is_some_and(Cancel::requested) {
+            return Err(cancelled_error());
+        }
+        match search_once(query, cancel) {
+            Ok(items) => {
+                any_search_succeeded = true;
+                for item in items {
+                    if seen.insert(item.id.clone()) {
+                        candidates.push(item);
+                    }
+                }
+            }
+            Err(err) if is_cancelled(&err) => return Err(err),
+            Err(err) => last_error = Some(anyhow!("{err:#} (consulta: «{query}»)")),
+        }
+    }
+    let ranked: Vec<SearchCandidate> = ranked_candidates(&candidates, artist, title, duration_ms)
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect();
+    if ranked.is_empty() {
+        if any_search_succeeded {
+            return Err(failure(FailureKind::NoMatch, format!("«{first_query}»")));
+        }
+        return Err(
+            last_error.unwrap_or_else(|| failure(FailureKind::NoMatch, format!("«{first_query}»")))
+        );
+    }
+    Ok(ranked)
 }
 
 /// Una llamada a `ytsearchN:` con una única consulta.
@@ -820,13 +948,21 @@ fn rank_candidates(
     title: &str,
     duration_ms: u64,
 ) -> Option<(i32, SearchCandidate)> {
-    if candidates.is_empty() {
-        return None;
-    }
+    ranked_candidates(candidates, artist, title, duration_ms)
+        .into_iter()
+        .next()
+}
 
-    // Sólo se puntúan los candidatos que pasan los filtros (título, artista,
-    // variante y duración). Así un cover descartado no impide que se tenga en
-    // cuenta un resultado sin duración.
+/// Candidatos válidos ordenados de mejor a peor.
+fn ranked_candidates(
+    candidates: &[SearchCandidate],
+    artist: &str,
+    title: &str,
+    duration_ms: u64,
+) -> Vec<(i32, SearchCandidate)> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
     let mut scored: Vec<(i32, &SearchCandidate)> = candidates
         .iter()
         .filter_map(|candidate| {
@@ -834,34 +970,30 @@ fn rank_candidates(
             (score >= MIN_MATCH_SCORE).then_some((score, candidate))
         })
         .collect();
-
     if scored.is_empty() {
-        return None;
+        return Vec::new();
     }
-
-    // Si hay un candidato válido con duración, los de duración desconocida
-    // quedan como última opción: suelen ser directos o resultados incompletos.
     if scored
         .iter()
         .any(|(_, candidate)| candidate.duration_ms > 0)
     {
         scored.retain(|(_, candidate)| candidate.duration_ms > 0);
     }
-
-    let mut best: Option<(i32, &SearchCandidate)> = None;
-    for (score, candidate) in scored {
-        let better = match best {
-            None => true,
-            Some((best_score, best_candidate)) => {
-                score > best_score || (score == best_score && tie_break(candidate, best_candidate))
+    scored.sort_by(|(score_a, a), (score_b, b)| {
+        score_b.cmp(score_a).then_with(|| {
+            if tie_break(a, b) {
+                std::cmp::Ordering::Less
+            } else if tie_break(b, a) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
             }
-        };
-        if better {
-            best = Some((score, candidate));
-        }
-    }
-
-    best.map(|(score, candidate)| (score, (*candidate).clone()))
+        })
+    });
+    scored
+        .into_iter()
+        .map(|(score, candidate)| (score, (*candidate).clone()))
+        .collect()
 }
 
 /// Heurística determinista inspirada en `catalog::pick_best`: el título manda,
@@ -1278,6 +1410,12 @@ fn normalize_text(text: &str) -> String {
 /// llegan sin paréntesis: "Official Video", "Lyric Video", "Audio", "HD"…
 fn normalize_title(text: &str) -> String {
     let mut out = normalize_text(text);
+    // Títulos que son solo símbolos/paréntesis, como "(_8(|)", se quedaban en
+    // vacío y ningún candidato podía puntuar. En ese caso se conserva el
+    // contenido alfanumérico (el 8) y se descarta el resto.
+    if out.is_empty() {
+        out = symbolic_title(text);
+    }
     const NOISE_SUFFIXES: &[&str] = &[
         " official music video",
         " official video",
@@ -1313,6 +1451,29 @@ fn normalize_title(text: &str) -> String {
         }
     }
     out
+}
+
+/// Normaliza un título conservando el contenido de paréntesis. Se usa solo
+/// cuando `normalize_text` lo deja vacío ("(_8(|)", "[_8 [|] ...]").
+fn symbolic_title(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for raw in text.chars() {
+        for lower in raw.to_lowercase() {
+            let plain = deaccent(lower);
+            if plain.is_alphanumeric() {
+                out.push(plain);
+            } else {
+                out.push(' ');
+            }
+        }
+    }
+    let tokens: Vec<&str> = out.split_whitespace().collect();
+    let cut = tokens
+        .iter()
+        .position(|token| matches!(*token, "feat" | "ft" | "featuring"))
+        .filter(|index| *index > 0)
+        .unwrap_or(tokens.len());
+    tokens[..cut].join(" ")
 }
 
 /// Texto para detectar palabras de variante sin perder el contenido de los
@@ -1614,11 +1775,7 @@ pub fn ytdlp_available() -> bool {
 
 /// Ejecuta yt-dlp y convierte timeout, cancelación, salida no cero y stderr en
 /// errores accionables.
-fn run_ytdlp(
-    args: &[String],
-    timeout: Duration,
-    cancel: Option<&Cancel>,
-) -> Result<CommandOutput> {
+fn run_ytdlp(args: &[String], timeout: Duration, cancel: Option<&Cancel>) -> Result<CommandOutput> {
     let bin = ytdlp_bin();
     let output = run_with_timeout(&bin, args, timeout, cancel)?;
 
@@ -2158,6 +2315,12 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_titles_keep_their_alphanumeric_core() {
+        assert_eq!(normalize_title("(_8(|) (feat. superreservao)"), "8");
+        assert_eq!(normalize_title("[_8 [|] [feat. superreservao]"), "8");
+    }
+
+    #[test]
     fn title_matching_distinguishes_exact_and_loose() {
         assert_eq!(
             title_match_score("get lucky", "get lucky"),
@@ -2207,10 +2370,57 @@ mod tests {
 
     #[test]
     #[ignore = "diagnóstico manual con red"]
+    fn live_finds_biberon_symbol_song() {
+        let ids = find_video_ids("Biberon", "(_8(|) (feat. superreservao)", 139_000, 4)
+            .expect("debe encontrar el tema de Biberon");
+        let id = ids.first().expect("algún candidato");
+        eprintln!("biberon id={id}");
+        assert_eq!(id, "MV0tXxfV5kg");
+    }
+
+    #[test]
+    #[ignore = "diagnóstico manual con red"]
     fn live_finds_superreservao_visualizer() {
         let id = find_video_id("Superreservao", "Alma en pena", 118_000)
             .expect("debe encontrar el visualizer");
         assert_eq!(id, "jExWbhJqRU0");
+    }
+
+    #[test]
+    fn symbolic_title_prefers_the_topic_audio() {
+        let correct = candidate(
+            "MV0tXxfV5kg",
+            "[_8 [|] [feat. superreservao]",
+            "Biberon - Topic",
+            140_000,
+        );
+        let score = score_candidate(&correct, "Biberon", "(_8(|) (feat. superreservao)", 139_000)
+            .expect("el tema simbólico debe puntuar");
+        assert!(score >= MIN_MATCH_SCORE, "score={score}");
+
+        let other = candidate(
+            "sbjgRAmv1Rc",
+            "Biberon - XIAOMI FREESTYLE",
+            "zz (z)",
+            110_000,
+        );
+        assert!(
+            score_candidate(&other, "Biberon", "(_8(|) (feat. superreservao)", 139_000).is_none()
+        );
+
+        let nightcore = candidate(
+            "B9Ci7K5-jos",
+            "biberon, superreservao - (_8(|) *nightcore*",
+            "trankimazin",
+            115_000,
+        );
+        assert!(score_candidate(
+            &nightcore,
+            "Biberon",
+            "(_8(|) (feat. superreservao)",
+            139_000
+        )
+        .is_none());
     }
 
     #[test]

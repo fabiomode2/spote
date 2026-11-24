@@ -12,12 +12,12 @@ use spote_core::audio_map::SongMap;
 use spote_core::config::{self, Config};
 use spote_core::downloader::{DownloadEvent, DownloadSource, Downloader, SearchItem};
 use spote_core::library::{Library, TrackRow};
-use spote_core::lyrics::LyricsDoc;
+use spote_core::lyrics::{LyricsDoc, LyricsSource};
 use spote_core::playback::{self, Advance, RepeatMode, ShuffleState};
 use spote_core::player::{Player, PlayerEvent};
+use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
 use spote_core::stream::{StreamEvent, StreamResolver};
 use spote_core::system_media::SystemMediaState;
-use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
 use spote_core::util;
 use spote_core::ToolStatus;
 use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackRef};
@@ -26,22 +26,23 @@ use crate::fetch::{
     ArtKind, ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker,
     SearchWorker, SongMapEvent, SongMapWorker,
 };
-use crate::system_media::{SystemCommand, SystemMediaWorker};
 use crate::social::{Social, SocialCmd, SocialEvent};
+use crate::system_media::{SystemCommand, SystemMediaWorker};
 use crate::theme::{FpsMeter, FxClock, PaletteRuntime, Pulse, Spring};
 use crate::viz::Viz;
 
 mod actions;
-mod audio_ui;
-mod mini;
-mod mpris;
 pub(crate) mod albums;
 mod artist;
+mod audio_ui;
 mod context;
 mod downloads;
 mod input;
 mod keymap;
 mod layout_editor;
+mod mini;
+mod mpris;
+mod wrapped;
 pub use keymap::help_sections;
 mod lyrics_search;
 mod playlists;
@@ -82,14 +83,14 @@ impl LibFilter {
 }
 
 impl Tab {
-    // Álbumes ya no es una pestaña: los álbumes se abren desde la búsqueda,
-    // la biblioteca o un artista. Se mantiene el variante interno para el
-    // tracklist antiguo, pero no aparece en la navegación.
-    pub const ALL: [Tab; 6] = [
+    /// Pestañas visibles en la navegación. `Albums` agrupa los discos
+    /// guardados de la biblioteca y tiene buscador propio.
+    pub const ALL: [Tab; 7] = [
         Tab::Now,
         Tab::Search,
         Tab::Library,
         Tab::Audio,
+        Tab::Albums,
         Tab::Room,
         Tab::Settings,
     ];
@@ -100,7 +101,7 @@ impl Tab {
             Self::Search => "buscar",
             Self::Library => "librería",
             Self::Audio => "audio",
-            Self::Albums => "álbumes",
+            Self::Albums => "discos",
             Self::Room => "sala",
             Self::Settings => "ajustes",
         }
@@ -124,10 +125,9 @@ impl Tab {
             Self::Search => 1,
             Self::Library => 2,
             Self::Audio => 3,
-            // `Albums` es interno y ya no está en `ALL`; se ancla a Library.
-            Self::Albums => 2,
-            Self::Room => 4,
-            Self::Settings => 5,
+            Self::Albums => 4,
+            Self::Room => 5,
+            Self::Settings => 6,
         }
     }
 }
@@ -193,6 +193,8 @@ pub enum Overlay {
     Album,
     /// Editor de recorte de intro/outro.
     Trim,
+    /// Resumen de escucha tipo Wrapped.
+    Wrapped,
     /// Ecualizador, preamp, normalizador y limitador.
     /// Se conserva para el overlay antiguo; la entrada normal es la pestaña.
     #[allow(dead_code)]
@@ -235,6 +237,7 @@ pub enum Action {
     Tab(Tab),
     LibraryFilter(LibFilter),
     LibrarySearch,
+    AlbumSearch,
     PlaylistOpen(i64),
     SettingsRow(usize),
     SettingsAdjust(usize, i32),
@@ -307,6 +310,8 @@ pub enum Action {
     LyricsScroll(i32),
     /// Vuelve a seguir la línea que suena.
     LyricsFollow,
+    /// Activa/desactiva captions/ASR como fuente de texto.
+    LyricsToggleGenerated,
     /// Borra la caché de la letra de esta pista y la busca de nuevo.
     LyricsRefetch,
     /// Abre la búsqueda manual dentro de la zona de letra.
@@ -410,6 +415,11 @@ pub struct NowPlaying {
     /// de `duration_ms` (la de la pista): un visualizer es más largo, un vídeo
     /// corto es más corto. Se usa para decidir el fin real.
     pub stream_duration_ms: u64,
+    /// Generación de mpv del fichero cargado; sirve para descartar EOF/errores
+    /// de la pista anterior.
+    pub player_entry: i64,
+    /// Hay un loadfile en vuelo: los TimePos/Duration viejos no se aplican.
+    pub awaiting_load: bool,
     pub playing: bool,
     pub volume: f32,
     pub loading: bool,
@@ -417,6 +427,13 @@ pub struct NowPlaying {
     /// volver a reproducir (no basta con unpause/seek).
     pub ended: bool,
     pub message: String,
+}
+
+/// ¿El evento pertenece a una entrada anterior de mpv? Si falta cualquiera
+/// de los dos ids no se puede afirmar nada y se deja pasar (mpv puede no
+/// mandar `playlist_entry_id` en eventos de versiones viejas).
+fn stale_player_entry(entry: i64, current: i64) -> bool {
+    entry != 0 && current != 0 && entry != current
 }
 
 impl Default for NowPlaying {
@@ -430,6 +447,8 @@ impl Default for NowPlaying {
             position_seen_ms: 0,
             position_unknown: false,
             stream_duration_ms: 0,
+            player_entry: 0,
+            awaiting_load: false,
             playing: false,
             volume: 0.0,
             loading: false,
@@ -982,6 +1001,11 @@ pub struct App {
     pub pending_seek_key: Option<String>,
     pub mpris_server: Option<spote_core::mpris_server::MprisServer>,
     pub mpris_last_update: Instant,
+    pub wrapped: Option<spote_core::library::WrappedStats>,
+    pub wrapped_all_time: bool,
+    /// Canvas independiente para el fondo del mini; no compite con la franja
+    /// de la TUI.
+    pub mini_viz: Viz,
     pub player_events: Option<tokio::sync::broadcast::Receiver<PlayerEvent>>,
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
@@ -1015,6 +1039,9 @@ pub struct App {
     /// Filtro de texto de la biblioteca (buscador inline).
     pub lib_query: String,
     pub lib_search_focus: bool,
+    /// Buscador de discos guardados (pestaña Álbumes).
+    pub album_query: String,
+    pub album_search_focus: bool,
     /// Primera fila visible de la biblioteca. El scroll es por bordes: la
     /// selección se mueve dentro de la página y la lista solo desplaza cuando
     /// hace falta, sin que la "cámara" persiga al cursor con un muelle.
@@ -1179,6 +1206,7 @@ impl App {
         let lib = Library::open(&config::db_path())?;
         let art_mode = ArtMode::from_str(&cfg.ui.art_mode).unwrap_or_default();
         let viz = Viz::from_preset(&cfg.ui.viz);
+        let mini_viz = Viz::from_preset(&cfg.ui.viz);
         let player_volume = cfg.player.volume;
         let fx_fps = cfg.ui.fx_fps.clamp(5, 60) as f32;
         let social = if cfg.server.url.is_empty() {
@@ -1250,6 +1278,9 @@ impl App {
             pending_seek_key: None,
             mpris_server: None,
             mpris_last_update: Instant::now(),
+            wrapped: None,
+            wrapped_all_time: false,
+            mini_viz,
             player_events: None,
             queue: Vec::new(),
             queue_selected: 0,
@@ -1280,6 +1311,8 @@ impl App {
             selected: 0,
             lib_query: String::new(),
             lib_search_focus: false,
+            album_query: String::new(),
+            album_search_focus: false,
             list_start: 0,
             queue_start: 0,
             search_start: 0,
@@ -1460,7 +1493,22 @@ impl App {
             },
             Tab::Albums => {
                 match self.lib.albums() {
-                    Ok(rows) => self.albums = rows,
+                    Ok(rows) => {
+                        let query = spote_core::util::normalize(&self.album_query);
+                        self.albums = if query.is_empty() {
+                            rows
+                        } else {
+                            rows.into_iter()
+                                .filter(|row| {
+                                    let haystack = spote_core::util::normalize(&format!(
+                                        "{} {}",
+                                        row.album, row.artist
+                                    ));
+                                    haystack.contains(&query)
+                                })
+                                .collect()
+                        };
+                    }
                     Err(err) => {
                         self.set_status(format!("álbumes: {err}"));
                     }
@@ -1486,10 +1534,8 @@ impl App {
                     if matches!(self.lib_filter, LibFilter::All) {
                         next = found;
                     } else {
-                        let keys: std::collections::HashSet<String> = found
-                            .into_iter()
-                            .map(|row| row.track.key)
-                            .collect();
+                        let keys: std::collections::HashSet<String> =
+                            found.into_iter().map(|row| row.track.key).collect();
                         next.retain(|row| keys.contains(&row.track.key));
                     }
                 }
@@ -1679,6 +1725,8 @@ impl App {
         self.streaming = false;
         self.stream_cache_pending = None;
         if let Some(player) = &self.player {
+            self.now.player_entry = 0;
+            self.now.awaiting_load = true;
             player.set_volume(self.now.volume);
             player.set_loop(self.repeat_mode == RepeatMode::One);
             player.load(path.clone(), start_ms as f64 / 1000.0);
@@ -1715,8 +1763,7 @@ impl App {
         self.song_section = None;
         self.map_worker.request(track.key.clone(), path.clone());
         if !self.follow_spotify {
-            self.spectrum
-                .decode_file(path, start_ms as f64 / 1000.0);
+            self.spectrum.decode_file(path, start_ms as f64 / 1000.0);
             self.spectrum_at = Instant::now();
         }
         self.set_status(format!("▶ {}", track.label()));
@@ -1730,14 +1777,20 @@ impl App {
             self.queue_track(track, None);
             return;
         }
+        self.lib.upsert_track(&track).ok();
+        if let Some(url) = &track.art_url {
+            // La copia local de la portada también alimenta al mini mientras
+            // el stream se resuelve; si no, se queda con el vinilo genérico.
+            self.lib.set_art(&track.key, None, Some(url)).ok();
+        }
         let hint = track.source_hint.clone().or_else(|| {
-            self.lib.source_hint(&track.key).map(|(provider, id)| {
-                spote_protocol::SourceHint {
+            self.lib
+                .source_hint(&track.key)
+                .map(|(provider, id)| spote_protocol::SourceHint {
                     provider,
                     id,
                     duration_ms: track.duration_ms,
-                }
-            })
+                })
         });
         let (trim_start, trim_end) = self.lib.trim(&track.key).unwrap_or((0, None));
         let duration = track.duration_ms.max(1);
@@ -1769,6 +1822,7 @@ impl App {
         self.stream_cache_pending = None;
         // La pista anterior no debe seguir sonando mientras se resuelve.
         if let Some(player) = &self.player {
+            self.now.awaiting_load = true;
             player.set_loop(self.repeat_mode == RepeatMode::One);
             player.stop();
         }
@@ -1877,6 +1931,8 @@ impl App {
                         }
                     }
                     if let Some(player) = &self.player {
+                        self.now.player_entry = 0;
+                        self.now.awaiting_load = true;
                         player.load_url(source.url, start_ms as f64 / 1000.0);
                         if !self.stream_autoplay {
                             player.pause(true);
@@ -1995,12 +2051,8 @@ impl App {
         let Some((key, url)) = self.stream_cache_pending.clone() else {
             return;
         };
-        let same_track = self
-            .now
-            .track
-            .as_ref()
-            .map(|track| track.key.as_str())
-            == Some(key.as_str());
+        let same_track =
+            self.now.track.as_ref().map(|track| track.key.as_str()) == Some(key.as_str());
         if !same_track {
             self.stream_cache_pending = None;
             return;
@@ -2594,7 +2646,9 @@ impl App {
             let current = self.context_index.min(len.saturating_sub(1));
             let index = if self.shuffle_on {
                 self.ensure_shuffle(len, current);
-                self.shuffle_state.as_mut().and_then(|state| state.prev(len))
+                self.shuffle_state
+                    .as_mut()
+                    .and_then(|state| state.prev(len))
             } else {
                 playback::advance_index(current, len, self.repeat_mode, playback::Direction::Prev)
             };
@@ -2784,7 +2838,23 @@ impl App {
         // 1. Cache SQLite. Si es una letra aproximada y hay audio local, se
         // muestra mientras se reintenta con ASR: las de Genius repartidas a
         // ojo fueron justo el problema de sincronización.
-        if let Ok(Some(row)) = self.lib.lyrics(&track.key) {
+        let cached = self.lib.lyrics(&track.key).ok().flatten();
+        let cached = if let Some(row) = cached {
+            let generated = matches!(
+                LyricsSource::from_label(&row.source),
+                Some(LyricsSource::Captions | LyricsSource::Asr)
+            );
+            if generated && !self.cfg.lyrics.allow_generated {
+                // Se ignora, pero no se borra: si el usuario vuelve a activar
+                // el modo, la caché sigue ahí.
+                None
+            } else {
+                Some(row)
+            }
+        } else {
+            None
+        };
+        if let Some(row) = cached {
             let mut doc = LyricsDoc::from_lrc(&row.lrc, row.synced);
             let lrc_offset = doc.offset_ms;
             // Un offset manual guardado manda; si no hay, conservamos el
@@ -2795,7 +2865,8 @@ impl App {
                 lrc_offset
             };
             doc.aligned = row.aligned;
-            if let Some(source) = spote_core::lyrics::LyricsSource::from_label(&row.source) {
+            doc.captions_timed = row.captions_timed;
+            if let Some(source) = LyricsSource::from_label(&row.source) {
                 doc.source = source;
             }
             // Un alineado de una versión anterior del pipeline pudo dejar
@@ -2809,42 +2880,53 @@ impl App {
                 && doc
                     .lines
                     .windows(2)
-                    .filter(|pair| {
-                        pair[1].start_ms.saturating_sub(pair[0].start_ms) < 400
-                    })
+                    .filter(|pair| pair[1].start_ms.saturating_sub(pair[0].start_ms) < 400)
                     .count()
                     >= 2;
+            // La versión va con la fila, no con la etiqueta: una letra nueva
+            // de LRCLIB no se vuelve a pedir en cada sesión solo por ser
+            // "plain" o "captions".
+            let stale_policy = row.policy_version < spote_core::library::LYRICS_POLICY_VERSION;
             self.lyrics_offset_ms = doc.offset_ms;
             let source = doc.source;
+            let captions_timed = doc.captions_timed;
             self.lyrics = Some(doc);
             self.lyrics_status = if stale_alignment || broken_sync {
                 "afinando de nuevo…".to_string()
+            } else if source.is_generated() {
+                source.display_label().to_string()
             } else if row.aligned {
                 "asr".to_string()
+            } else if captions_timed {
+                format!("{} · tiempos", source.label())
             } else {
                 match source {
-                    spote_core::lyrics::LyricsSource::Plain
-                    | spote_core::lyrics::LyricsSource::Estimated => "aprox".to_string(),
+                    LyricsSource::Plain | LyricsSource::Estimated => "aprox".to_string(),
                     source => source.label().to_string(),
                 }
             };
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-            if ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
-                && row.source != "manual"
-                && audio.is_some()
+            let manual = row.source.eq_ignore_ascii_case("manual");
+            let local = row.source.eq_ignore_ascii_case("local");
+            let needs_audio = ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
+                && !manual
+                && !local
+                && audio.is_some();
+            if (needs_audio || (!manual && !local && stale_policy))
                 && !self.lyrics_retry.contains(&track.key)
             {
                 self.lyrics_retry.insert(track.key.clone());
                 self.lyrics_loading = true;
-                self.lyrics_status = "afinando con el audio…".into();
-                let request_track = self.lyrics_track(&track);
-                self.lyrics_worker.request(
-                    request_track,
-                    audio,
-                    stale_alignment || broken_sync,
-                );
+                self.lyrics_status = if needs_audio {
+                    "afinando con el audio…".into()
+                } else {
+                    "verificando la letra…".into()
+                };
+                let request_track = self.lyrics_track(track);
+                self.lyrics_worker
+                    .request(request_track, audio, stale_alignment || broken_sync);
             } else {
                 return;
             }
@@ -2859,6 +2941,7 @@ impl App {
                 if self.lyrics_offset_ms != 0 {
                     doc.offset_ms = self.lyrics_offset_ms;
                 }
+                doc.source = spote_core::lyrics::LyricsSource::Local;
                 self.lyrics = Some(doc);
                 self.lyrics_status = "local".into();
                 self.lyrics_key = track.key.clone();
@@ -2870,7 +2953,7 @@ impl App {
         self.lyrics_loading = true;
         self.lyrics_status = "buscando letra…".into();
         let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-        let request_track = self.lyrics_track(&track);
+        let request_track = self.lyrics_track(track);
         self.lyrics_worker.request(request_track, audio, false);
     }
 
@@ -3017,9 +3100,14 @@ impl App {
             return;
         }
         let max = doc.lines.len().saturating_sub(1) as f32;
-        self.lyrics_follow = false;
         let base = self.lyrics_scroll.target.round();
         let next = (base + delta as f32).clamp(0.0, max);
+        if (next - base).abs() < f32::EPSILON {
+            // Ya estamos en el tope: no desconectes el seguimiento por un
+            // scroll que no ha movido nada.
+            return;
+        }
+        self.lyrics_follow = false;
         self.lyrics_scroll.set_target(next);
         self.needs_redraw = true;
     }
@@ -3027,10 +3115,58 @@ impl App {
     /// Vuelve a la línea que suena y reactiva el seguimiento.
     pub fn follow_current_lyric(&mut self) {
         self.lyrics_follow = true;
-        let index = self.lyrics_scroll_index.unwrap_or(0);
+        let ms = self.display_position_ms();
+        let index = self
+            .lyrics
+            .as_ref()
+            .and_then(|doc| doc.index_at_target(doc.aligned_ms(ms)))
+            .or(self.lyrics_scroll_index)
+            .unwrap_or(0);
+        self.lyrics_scroll_index = Some(index);
         self.lyrics_scroll.value = index as f32;
         self.lyrics_scroll.velocity = 0.0;
         self.lyrics_scroll.set_target(index as f32);
+        self.needs_redraw = true;
+    }
+
+    /// Activa/desactiva las letras generadas con captions o ASR. Al apagarlo,
+    /// si la letra visible era inventada se descarta y se vuelve a buscar una
+    /// fuente real; al encenderlo, si no había letra, se intenta generar.
+    pub fn toggle_generated_lyrics(&mut self) {
+        let allow = !self.cfg.lyrics.allow_generated;
+        self.cfg.lyrics.allow_generated = allow;
+        self.cfg.save().ok();
+        self.lyrics_worker.set_allow_generated(allow);
+
+        let generated = self
+            .lyrics
+            .as_ref()
+            .is_some_and(|doc| doc.source.is_generated());
+        if !allow && generated {
+            if let Some(track) = self.now.track.clone() {
+                self.lyrics = None;
+                self.lyrics_key.clear();
+                self.lyrics_status.clear();
+                self.lyrics_loading = false;
+                self.lyrics_retry.remove(&track.key);
+                self.lyrics_worker.forget(&track.key);
+                self.reset_lyrics_view();
+                self.load_lyrics(&track);
+            }
+        } else if allow && self.lyrics.is_none() {
+            if let Some(track) = self.now.track.clone() {
+                self.lyrics_loading = false;
+                self.load_lyrics(&track);
+            }
+        }
+        self.toast(
+            if allow {
+                "letras inventadas: on · captions/ASR pueden generar texto"
+            } else {
+                "letras inventadas: off · solo fuentes fiables"
+            },
+            ToastKind::Info,
+        );
         self.needs_redraw = true;
     }
 
@@ -3049,9 +3185,13 @@ impl App {
         self.lyrics_loading = false;
         self.lyrics_offset_ms = 0;
         self.lyrics_retry.remove(&track.key);
+        self.lyrics_worker.forget(&track.key);
         self.reset_lyrics_view();
         self.load_lyrics(&track);
-        self.toast("caché de letra borrada · buscando de nuevo", ToastKind::Info);
+        self.toast(
+            "caché de letra borrada · buscando de nuevo",
+            ToastKind::Info,
+        );
     }
 
     /// Refina los tiempos de palabra estimados con el mapa de energía de la
@@ -3142,10 +3282,7 @@ impl App {
             if let Some(first) = starts.first_mut() {
                 *first = line.start_ms;
             }
-            let tail_end = line
-                .end_ms
-                .saturating_sub(150)
-                .max(line.start_ms + 1);
+            let tail_end = line.end_ms.saturating_sub(150).max(line.start_ms + 1);
             // Deja al menos 250 ms para que la última palabra se encienda.
             let last_start_limit = tail_end.saturating_sub(250).max(line.start_ms);
             if let Some(last) = starts.last_mut() {
@@ -3396,8 +3533,19 @@ impl App {
             return;
         };
         let mut events = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
-            events.push(event);
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    // Si el canal desborda se pueden perder StartFile/FileLoaded
+                    // y la UI se quedaría ignorando TimePos para siempre. Es
+                    // preferible perder la identidad de la entrada que congelar
+                    // la posición y la letra.
+                    self.now.awaiting_load = false;
+                    self.now.player_entry = 0;
+                }
+                Err(_) => break,
+            }
         }
         if self.follow_spotify {
             // En modo acompañante la posición/duración las manda MPRIS, pero
@@ -3420,7 +3568,19 @@ impl App {
         }
         for event in events {
             match event {
+                PlayerEvent::StartFile(entry) => {
+                    // `playlist_entry_id` solo llega en `start-file`/`end-file`.
+                    // Guardarlo aquí es lo que permite descartar EOF/errores de
+                    // la pista anterior después de cargar la siguiente.
+                    self.now.player_entry = entry;
+                }
+                PlayerEvent::FileLoaded => {
+                    self.now.awaiting_load = false;
+                }
                 PlayerEvent::TimePos(position) => {
+                    if self.now.awaiting_load {
+                        continue;
+                    }
                     self.now.position_ms = (position.max(0.0) * 1000.0) as u64;
                     // Anclar aquí, no detectando el cambio en `tick`: así el
                     // interpolador no adelanta un frame el playhead de la letra.
@@ -3434,8 +3594,7 @@ impl App {
                     if self.streaming
                         && self.repeat_mode != RepeatMode::One
                         && self.effective_duration_ms() > 0
-                        && self.now.position_ms.saturating_add(700)
-                            >= self.effective_duration_ms()
+                        && self.now.position_ms.saturating_add(700) >= self.effective_duration_ms()
                     {
                         self.now.ended = true;
                         if let Some(track) = self.now.track.clone() {
@@ -3459,6 +3618,9 @@ impl App {
                     }
                 }
                 PlayerEvent::Duration(duration) => {
+                    if self.now.awaiting_load {
+                        continue;
+                    }
                     let reported = (duration * 1000.0) as u64;
                     if reported > 0 {
                         self.now.stream_duration_ms = reported;
@@ -3471,7 +3633,13 @@ impl App {
                     }
                 }
                 PlayerEvent::Paused(paused) => self.now.playing = !paused,
-                PlayerEvent::Eof => {
+                PlayerEvent::Eof(entry) => {
+                    if self.now.awaiting_load {
+                        continue;
+                    }
+                    if stale_player_entry(entry, self.now.player_entry) {
+                        continue;
+                    }
                     // Un end-file de la pista anterior puede llegar después de
                     // cargar la siguiente. Si la posición actual está lejos
                     // del final lógico/real, el evento es obsoleto.
@@ -3488,7 +3656,11 @@ impl App {
                     }
                     self.auto_next();
                 }
-                PlayerEvent::Error(message) => {
+                PlayerEvent::Error(message, entry) => {
+                    if stale_player_entry(entry, self.now.player_entry) {
+                        continue;
+                    }
+                    self.now.awaiting_load = false;
                     self.toast(format!("mpv: {message}"), ToastKind::Error);
                     // Un error de la URL anterior puede llegar después de
                     // empezar a resolver la siguiente: mientras `loading` esté
@@ -3544,10 +3716,8 @@ impl App {
                         catalog_match_score(&query, &b.title, &b.artists)
                             .cmp(&catalog_match_score(&query, &a.title, &a.artists))
                     });
-                    self.search.results = tracks
-                        .into_iter()
-                        .map(search_item_from_spotify)
-                        .collect();
+                    self.search.results =
+                        tracks.into_iter().map(search_item_from_spotify).collect();
                     self.search.selected = 0;
                     self.search.loading = false;
                     self.search.message = format!(
@@ -3980,6 +4150,7 @@ impl App {
         };
         if doc.offset_ms != 0
             || doc.aligned
+            || doc.captions_timed
             || matches!(
                 doc.source,
                 spote_core::lyrics::LyricsSource::Estimated
@@ -3987,6 +4158,7 @@ impl App {
                     | spote_core::lyrics::LyricsSource::Local
                     | spote_core::lyrics::LyricsSource::Manual
                     | spote_core::lyrics::LyricsSource::Captions
+                    | spote_core::lyrics::LyricsSource::Asr
             )
         {
             // Una letra estimada no tiene una rejilla fiable: desplazarla
@@ -4026,10 +4198,41 @@ impl App {
                     self.lyrics_loading = false;
                     match doc {
                         Some(doc) => {
+                            // Si el usuario apagó el modo mientras la petición
+                            // estaba en vuelo, el documento generado se tira.
+                            if doc.source.is_generated() && !self.cfg.lyrics.allow_generated {
+                                self.lyrics_status = "sin letra verificada".into();
+                                continue;
+                            }
+                            // Una letra real no se sustituye por captions/ASR.
+                            let cached_generated = self
+                                .lyrics
+                                .as_ref()
+                                .is_some_and(|old| old.source.is_generated());
+                            if doc.source.is_generated()
+                                && self.lyrics.is_some()
+                                && !cached_generated
+                            {
+                                continue;
+                            }
+                            // Genius manda en el texto: una revalidación que
+                            // devuelve LRCLIB/lrcmux no puede sustituir la
+                            // letra de Genius que ya se está mostrando.
+                            if self
+                                .lyrics
+                                .as_ref()
+                                .is_some_and(|old| old.source == LyricsSource::Genius)
+                                && doc.source != LyricsSource::Genius
+                            {
+                                continue;
+                            }
                             // Un plain de un proveedor de reserva no debe
                             // reemplazar un LRC sincronizado (o alineado) que
-                            // ya se está mostrando.
-                            let incoming = if doc.aligned {
+                            // ya se está mostrando. Las letras generadas valen
+                            // menos que cualquier fuente real.
+                            let incoming = if doc.source.is_generated() {
+                                0
+                            } else if doc.aligned {
                                 3
                             } else if doc.synced {
                                 2
@@ -4043,7 +4246,9 @@ impl App {
                                 self.lyrics
                                     .as_ref()
                                     .map(|old| {
-                                        if old.aligned {
+                                        if old.source.is_generated() {
+                                            0
+                                        } else if old.aligned {
                                             3
                                         } else if old.synced {
                                             2
@@ -4064,6 +4269,7 @@ impl App {
                                         doc.synced,
                                         doc.source.label(),
                                         doc.aligned,
+                                        doc.captions_timed,
                                     )
                                     .ok();
                                 // La versión ASR ya está alineada: arrastrar el
@@ -4074,7 +4280,11 @@ impl App {
                                     self.lib.set_lyrics_offset(&key, 0).ok();
                                 }
                             }
-                            self.lyrics_status = if doc.aligned {
+                            self.lyrics_status = if doc.source.is_generated() {
+                                doc.source.display_label().to_string()
+                            } else if doc.captions_timed {
+                                format!("{} · tiempos", doc.source.label())
+                            } else if doc.aligned {
                                 "asr".to_string()
                             } else {
                                 doc.source.label().to_string()
@@ -4100,15 +4310,19 @@ impl App {
                             self.refine_lyrics_words();
                         }
                         None => {
-                            if self.lib.local_path(&key).is_some() {
-                                self.lyrics_retry.remove(&key);
-                            }
+                            self.lyrics_retry.remove(&key);
                             if self.lyrics_key == key && self.lyrics.is_some() {
                                 self.lyrics_status = error
                                     .unwrap_or_else(|| "letra aproximada (sin mejorar)".into());
                             } else {
                                 self.lyrics = None;
-                                self.lyrics_status = error.unwrap_or_else(|| "sin letra".into());
+                                self.lyrics_status = error.unwrap_or_else(|| {
+                                    if self.cfg.lyrics.allow_generated {
+                                        "sin letra".into()
+                                    } else {
+                                        "sin letra verificada".into()
+                                    }
+                                });
                             }
                         }
                     }
@@ -4563,13 +4777,7 @@ impl App {
     /// Algunas acciones (favorita, lista) llegan desde resultados remotos que
     /// aún no están en SQLite. Se materializa la pista antes de tocar la BD.
     pub(super) fn ensure_track_key(&mut self, key: &str) -> bool {
-        if self
-            .lib
-            .track_by_key(key)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        if self.lib.track_by_key(key).ok().flatten().is_some() {
             return true;
         }
         if let Some(track) = self
@@ -4721,7 +4929,10 @@ impl App {
     /// Reproduce la entrada marcada en la cola local desde el teclado.
     pub fn play_queue_selected(&mut self) {
         if !self.room_queue.is_empty() {
-            self.toast("la cola de la sala la controla el servidor", ToastKind::Info);
+            self.toast(
+                "la cola de la sala la controla el servidor",
+                ToastKind::Info,
+            );
             return;
         }
         let index = self.queue_selected.min(self.queue_len().saturating_sub(1));
@@ -4855,10 +5066,7 @@ impl App {
             .iter()
             .map(|item| {
                 let track = item.to_track();
-                let path = self
-                    .lib
-                    .local_path(&track.key)
-                    .filter(|path| path.exists());
+                let path = self.lib.local_path(&track.key).filter(|path| path.exists());
                 QueueEntry { track, path }
             })
             .collect();
@@ -5085,12 +5293,13 @@ mod tests {
     fn tab_cycles_in_both_directions() {
         assert_eq!(Tab::Now.next(), Tab::Search);
         assert_eq!(Tab::Library.next(), Tab::Audio);
-        assert_eq!(Tab::Audio.next(), Tab::Room);
+        assert_eq!(Tab::Audio.next(), Tab::Albums);
+        assert_eq!(Tab::Albums.next(), Tab::Room);
         assert_eq!(Tab::Room.next(), Tab::Settings);
         assert_eq!(Tab::Settings.next(), Tab::Now);
         assert_eq!(Tab::Now.prev(), Tab::Settings);
         assert_eq!(Tab::Settings.prev(), Tab::Room);
-        assert_eq!(Tab::Room.prev(), Tab::Audio);
+        assert_eq!(Tab::Room.prev(), Tab::Albums);
     }
 
     #[test]
@@ -5110,6 +5319,14 @@ mod tests {
         let unrelated = catalog_match_score(query, "azulado", "superreservao");
         assert!(exact > other, "{exact} vs {other}");
         assert!(exact > unrelated, "{exact} vs {unrelated}");
+    }
+
+    #[test]
+    fn stale_player_entries_only_when_both_ids_are_known() {
+        assert!(!stale_player_entry(0, 7));
+        assert!(!stale_player_entry(7, 0));
+        assert!(!stale_player_entry(7, 7));
+        assert!(stale_player_entry(6, 7));
     }
 
     #[test]

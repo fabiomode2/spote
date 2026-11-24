@@ -22,37 +22,85 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         pal,
         app.focus == crate::app::Pane::Center,
         0.72,
-        Some("álbumes"),
+        Some("discos"),
         app.audio.kick_pulse,
     );
     let inner = inset(rect, 2, 2);
+    // Buscador de discos guardados, con el mismo lenguaje visual que el
+    // buscador inline de la biblioteca.
+    let search = Rect::new(inner.x, inner.y, inner.width, 1);
+    fill(
+        buf,
+        search,
+        if app.album_search_focus {
+            pal.surface_alt
+        } else {
+            pal.surface
+        },
+    );
+    let mut search_text = if app.album_query.is_empty() {
+        "buscar discos…  ( / )".to_string()
+    } else {
+        format!("⌕ {}", app.album_query)
+    };
+    if app.album_search_focus {
+        search_text.push('▏');
+    }
+    truncate_chars(&mut search_text, search.width.saturating_sub(1) as usize);
+    text_at(
+        buf,
+        search,
+        search_text,
+        Style::new().fg(color(if app.album_search_focus {
+            pal.text
+        } else if app.album_query.is_empty() {
+            pal.dim
+        } else {
+            pal.primary
+        })),
+        Alignment::Left,
+    );
+    app.hit.add(search, Action::AlbumSearch);
+    let list = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
     if app.albums.is_empty() {
-        let message = if app.lib.count().unwrap_or(0) > 0 {
+        let message = if !app.album_query.is_empty() {
+            "sin discos para la búsqueda · Esc limpia"
+        } else if app.lib.count().unwrap_or(0) > 0 {
             "sin metadatos de álbum · usa clic derecho → portada de Spotify"
         } else {
             "biblioteca vacía · / para buscar o spote ingest <dir>"
         };
         text_at(
             buf,
-            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            Rect::new(list.x, list.y + 1, list.width, 1),
             message,
             Style::new().fg(color(pal.dim)),
             Alignment::Center,
         );
         return;
     }
+    // A partir de aquí se usan las coordenadas de la lista, no las del panel.
+    let inner = list;
     let card_h = 3u16;
     let columns = if inner.width >= 100 { 2u16 } else { 1 };
     let card_w = (inner.width.saturating_sub(columns.saturating_sub(1) * 2)) / columns;
     let per_col = (inner.height / card_h).max(1) as usize;
     let visible = per_col * columns as usize;
-    let start = app
-        .album_selected
-        .saturating_sub(visible / 2)
-        .min(app.albums.len().saturating_sub(visible.min(app.albums.len())));
+    let start = app.album_selected.saturating_sub(visible / 2).min(
+        app.albums
+            .len()
+            .saturating_sub(visible.min(app.albums.len())),
+    );
     for offset in 0..visible {
         let index = start + offset;
-        let Some(album) = app.albums.get(index).cloned() else { break };
+        let Some(album) = app.albums.get(index).cloned() else {
+            break;
+        };
         let column = offset as u16 / per_col as u16;
         let row = offset % per_col;
         let x = inner.x + column * (card_w + 2);
@@ -90,6 +138,10 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         let mut artist = album.artist.clone();
         truncate_chars(&mut artist, text_w as usize);
         put(buf, text_x, y + 1, &artist, color(pal.secondary), None);
+        // La tarjeta se registra antes que el nombre del artista: en el
+        // HitMap gana el último, así el clic en el artista abre el artista y
+        // el resto de la tarjeta sigue abriendo el álbum.
+        app.hit.add(card, Action::AlbumOpen(index));
         app.hit.add(
             Rect::new(text_x, y + 1, artist.chars().count() as u16, 1),
             Action::OpenArtist(album.artist.clone()),
@@ -97,7 +149,11 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         let mut meta = format!(
             "{} {} · {}/{} descargadas · {}",
             album.track_count,
-            if album.track_count == 1 { "pista" } else { "pistas" },
+            if album.track_count == 1 {
+                "pista"
+            } else {
+                "pistas"
+            },
             album.ready_count,
             album.track_count,
             format_ms(album.duration_ms)
@@ -107,9 +163,8 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         }
         truncate_chars(&mut meta, text_w as usize);
         put(buf, text_x, y + 2, &meta, color(pal.dim), None);
-        app.hit.add(card, Action::AlbumOpen(index));
     }
-    let footer = "enter abre · d baja el álbum · s guarda como lista";
+    let footer = "enter abre · d baja el álbum · s guarda como lista · / busca";
     if rect.height > 4 {
         text_at(
             buf,
@@ -147,14 +202,7 @@ fn draw_album_detail(
     draw_thumb(app, buf, thumb, &track, pal);
     let text_x = thumb.x + thumb.width + 2;
     let _text_w = (inner.x + inner.width).saturating_sub(text_x);
-    put(
-        buf,
-        text_x,
-        inner.y,
-        &album.album,
-        color(pal.text),
-        None,
-    );
+    put(buf, text_x, inner.y, &album.album, color(pal.text), None);
     put(
         buf,
         text_x,
@@ -164,12 +212,7 @@ fn draw_album_detail(
         None,
     );
     app.hit.add(
-        Rect::new(
-            text_x,
-            inner.y + 1,
-            album.artist.chars().count() as u16,
-            1,
-        ),
+        Rect::new(text_x, inner.y + 1, album.artist.chars().count() as u16, 1),
         Action::OpenArtist(album.artist.clone()),
     );
     put(
@@ -179,7 +222,11 @@ fn draw_album_detail(
         &format!(
             "{} {} · {}/{} descargadas · {}",
             album.track_count,
-            if album.track_count == 1 { "pista" } else { "pistas" },
+            if album.track_count == 1 {
+                "pista"
+            } else {
+                "pistas"
+            },
             album.ready_count,
             album.track_count,
             format_ms(album.duration_ms)
@@ -234,7 +281,9 @@ fn draw_album_detail(
         .min(app.view.len().saturating_sub(rows.min(app.view.len())));
     for offset in 0..rows {
         let index = start + offset;
-        let Some(row) = app.view.get(index) else { break };
+        let Some(row) = app.view.get(index) else {
+            break;
+        };
         let y = list_y + offset as u16;
         let row_rect = Rect::new(inner.x, y, inner.width, 1);
         let selected = index == app.selected;

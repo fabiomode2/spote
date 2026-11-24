@@ -89,6 +89,67 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        // Buscador de discos guardados.
+        if self.tab == Tab::Albums && self.album_search_focus {
+            match key.code {
+                KeyCode::Esc => {
+                    if self.album_query.is_empty() {
+                        self.album_search_focus = false;
+                    } else {
+                        self.album_query.clear();
+                        self.album_selected = 0;
+                        self.refresh_view();
+                    }
+                }
+                KeyCode::Enter => {
+                    self.album_search_focus = false;
+                    self.open_album_selected();
+                }
+                KeyCode::Backspace => {
+                    self.album_query.pop();
+                    self.album_selected = 0;
+                    self.refresh_view();
+                }
+                KeyCode::Tab => {
+                    self.album_search_focus = false;
+                    self.tab = self.tab.next();
+                    self.enter_tab();
+                }
+                KeyCode::BackTab => {
+                    self.album_search_focus = false;
+                    self.tab = self.tab.prev();
+                    self.enter_tab();
+                }
+                KeyCode::Up => {
+                    self.album_selected = self.album_selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    if !self.albums.is_empty() {
+                        self.album_selected = (self.album_selected + 1).min(self.albums.len() - 1);
+                    }
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.album_query.clear();
+                    self.album_selected = 0;
+                    self.refresh_view();
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.persist_volume();
+                    self.should_quit = true;
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.album_query.push(c);
+                    self.album_selected = 0;
+                    self.refresh_view();
+                }
+                _ => {}
+            }
+            self.needs_redraw = true;
+            return;
+        }
         // En la vista de búsqueda se escribe directamente: no hace falta "/".
         if self.tab == Tab::Search {
             match key.code {
@@ -228,6 +289,8 @@ impl App {
             KeyCode::Char('/') => {
                 if self.tab == Tab::Library {
                     self.lib_search_focus = true;
+                } else if self.tab == Tab::Albums {
+                    self.album_search_focus = true;
                 } else {
                     self.tab = Tab::Search;
                     self.search.results.clear();
@@ -239,6 +302,7 @@ impl App {
             KeyCode::Char('e') if !upper => self.overlay = Overlay::Effects,
             KeyCode::Char('A') => self.open_audio(),
             KeyCode::Char('w') if !upper => self.open_mini(),
+            KeyCode::Char('W') => self.open_wrapped(),
             KeyCode::Char('E') => self.overlay = Overlay::Layout,
             KeyCode::Char('g') if !upper => self.open_artist(),
             KeyCode::Delete => {
@@ -290,6 +354,11 @@ impl App {
                 } else {
                     CenterFocus::Lyrics
                 };
+            }
+            KeyCode::Char('G')
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics =>
+            {
+                self.toggle_generated_lyrics()
             }
             KeyCode::Char('D') => {
                 self.lyrics_debug = !self.lyrics_debug;
@@ -375,6 +444,9 @@ impl App {
                 } else {
                     self.move_selection(8);
                 }
+            }
+            KeyCode::Home if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics => {
+                self.follow_current_lyric()
             }
             KeyCode::Home if self.tab == Tab::Now => self.trim_start_here(),
             KeyCode::End if self.tab == Tab::Now => self.trim_end_here(),

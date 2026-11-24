@@ -201,6 +201,7 @@ pub(crate) fn parse_compat(
                 source: lrcmux_source(),
                 offset_ms: parsed.offset_ms,
                 aligned: false,
+                captions_timed: false,
             }));
         }
     }
@@ -339,6 +340,7 @@ fn build_native_synced(rows: Vec<(Option<u64>, String)>, duration_ms: u64) -> Ly
         source: lrcmux_source(),
         offset_ms: 0,
         aligned: false,
+        captions_timed: false,
     }
 }
 
@@ -361,7 +363,7 @@ fn build_plain_doc(texts: Vec<String>, duration_ms: u64) -> Option<LyricsDoc> {
         lines: Vec::with_capacity(texts.len()),
         synced: false,
         instrumental: false,
-        source: LyricsSource::Plain,
+        source: lrcmux_source(),
         ..LyricsDoc::default()
     };
     for (index, text) in texts.into_iter().enumerate() {
@@ -586,6 +588,9 @@ mod tests {
     #[test]
     fn compat_parses_plain_lyrics() {
         let value = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "albumName": "AM",
             "duration": 120.0,
             "plainLyrics": "uno\r\n\r\ndos\r\ntres",
             "syncedLyrics": null
@@ -595,7 +600,7 @@ mod tests {
             .expect("hay letra");
 
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.lines[0].text, "uno");
         assert_eq!(doc.lines[0].start_ms, 0);
@@ -607,6 +612,9 @@ mod tests {
     fn compat_without_usable_sync_falls_back_to_plain() {
         // Una sola línea sincronizada no da para karaoke: se usa la plana.
         let value = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "albumName": "AM",
             "duration": 20.0,
             "syncedLyrics": "[00:01.00]solo una línea",
             "plainLyrics": "uno\ndos"
@@ -616,7 +624,7 @@ mod tests {
             .expect("hay letra");
 
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
         assert_eq!(doc.lines.len(), 2);
         assert_eq!(doc.lines[0].text, "uno");
         assert_eq!(doc.lines[0].start_ms, 0);
@@ -652,7 +660,12 @@ mod tests {
     #[test]
     fn native_without_start_is_plain_text() {
         let value = json!({
-            "track": { "duration": 90.0 },
+            "track": {
+                "title": "Do I Wanna Know?",
+                "artist": "Arctic Monkeys",
+                "album": "AM",
+                "duration": 90.0
+            },
             "lines": [
                 { "text": "uno" },
                 { "text": "dos" },
@@ -664,7 +677,7 @@ mod tests {
             .expect("hay letra");
 
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.lines[0].start_ms, 0);
         assert_eq!(doc.lines[1].start_ms, 30_000);
@@ -676,6 +689,9 @@ mod tests {
     fn empty_lines_and_crlf_are_normalized() {
         // Compat: CRLF, líneas en blanco y espacios se descartan.
         let compat = json!({
+            "trackName": "Do I Wanna Know?",
+            "artistName": "Arctic Monkeys",
+            "albumName": "AM",
             "duration": 8.0,
             "plainLyrics": "\r\nuno\r\n\r\n  dos  \r\n"
         });
@@ -689,7 +705,12 @@ mod tests {
         // Nativo: una línea vacía no rompe la detección de sincronizada ni el
         // reparto temporal de las que sí tienen texto.
         let native = json!({
-            "track": { "duration": 20.0 },
+            "track": {
+                "title": "Do I Wanna Know?",
+                "artist": "Arctic Monkeys",
+                "album": "AM",
+                "duration": 20.0
+            },
             "lines": [
                 { "text": "", "start": 0.0 },
                 { "text": "  uno  ", "start": 2.0 },
@@ -757,7 +778,7 @@ mod tests {
             .expect("respuesta válida")
             .expect("hay letra plana");
         assert!(!doc.synced, "la sync imposible se descarta");
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
     }
 
     #[test]
@@ -779,7 +800,7 @@ mod tests {
             .expect("respuesta válida")
             .expect("hay letra");
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
     }
 
     #[tokio::test]

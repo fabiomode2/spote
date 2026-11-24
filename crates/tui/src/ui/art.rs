@@ -74,7 +74,9 @@ pub(super) fn badges(app: &App, pal: &Palette) -> Vec<(String, Rgb)> {
         out.push(("local".into(), pal.secondary));
     }
     if let Some(doc) = &app.lyrics {
-        if doc.synced {
+        if doc.source.is_generated() {
+            out.push(("letra inventada".into(), pal.warn));
+        } else if doc.synced {
             out.push(("sincronizada".into(), pal.primary));
         } else if !doc.is_empty() {
             out.push(("aprox".into(), pal.warn));

@@ -12,9 +12,9 @@ use eframe::egui;
 fn main() -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_title("spote mini")
-        .with_inner_size([420.0, 220.0])
-        .with_min_inner_size([420.0, 220.0])
-        .with_max_inner_size([420.0, 220.0])
+        .with_inner_size([520.0, 170.0])
+        .with_min_inner_size([520.0, 170.0])
+        .with_max_inner_size([520.0, 170.0])
         .with_resizable(false)
         .with_decorations(false)
         .with_always_on_top()

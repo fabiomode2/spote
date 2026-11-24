@@ -50,6 +50,10 @@ pub struct LyricsCfg {
     pub asr_device: String,
     /// `auto` deja que el modelo detecte el idioma.
     pub asr_language: String,
+    /// Permite generar letra cuando no hay una fuente fiable: captions de
+    /// YouTube como texto y transcripción ASR. Desactivado por defecto porque
+    /// las auto-captions y el ASR pueden inventar líneas.
+    pub allow_generated: bool,
 }
 
 impl Default for LyricsCfg {
@@ -61,6 +65,7 @@ impl Default for LyricsCfg {
             asr_model: "small".to_string(),
             asr_device: "auto".to_string(),
             asr_language: "auto".to_string(),
+            allow_generated: false,
         }
     }
 }
@@ -388,14 +393,30 @@ impl Config {
         let path = config_path();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
-                let mut cfg: Config = toml::from_str(&text).unwrap_or_else(|err| {
-                    eprintln!("spote: config inválida en {}: {err}", path.display());
-                    Self::default()
-                });
+                let parsed = toml::from_str::<Config>(&text);
+                let mut valid = true;
+                let mut cfg = match parsed {
+                    Ok(cfg) => cfg,
+                    Err(err) => {
+                        valid = false;
+                        eprintln!("spote: config inválida en {}: {err}", path.display());
+                        // Se conserva una copia para que el usuario pueda
+                        // recuperar sus ajustes si el siguiente save() escribe
+                        // los defaults. Con timestamp para no pisar el backup
+                        // bueno si hay dos cargas inválidas seguidas.
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let _ =
+                            std::fs::copy(&path, path.with_extension(format!("toml.bak-{stamp}")));
+                        Self::default()
+                    }
+                };
                 cfg.audio = cfg.audio.sanitized();
                 // Configs anteriores al rediseño: la rotación venía encendida y
-                // no existía `[ui.layout]`. Se migra una vez, sin tocar el resto.
-                if !text.contains("[ui.layout]") {
+                // no existía `[ui.layout]`. Solo se migra si el TOML era válido.
+                if valid && !text.contains("[ui.layout]") {
                     cfg.ui.layout = LayoutCfg::default();
                     cfg.ui.layout.vcenter = true;
                     cfg.ui.art_rotate = false;
@@ -516,7 +537,26 @@ mod tests {
     #[test]
     fn old_audio_section_gets_leveling_enabled() {
         let cfg: Config = toml::from_str("[audio]\nnormalizer = \"off\"\n").unwrap();
-        assert!(cfg.audio.normalize_tracks, "la nivelación debe venir activa");
+        assert!(
+            cfg.audio.normalize_tracks,
+            "la nivelación debe venir activa"
+        );
+    }
+
+    #[test]
+    fn generated_lyrics_are_opt_in_and_roundtrip() {
+        assert!(!Config::default().lyrics.allow_generated);
+        let old: Config = toml::from_str(
+            "[lyrics]
+asr = true\n",
+        )
+        .unwrap();
+        assert!(!old.lyrics.allow_generated, "config vieja = off");
+        let mut cfg = Config::default();
+        cfg.lyrics.allow_generated = true;
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert!(back.lyrics.allow_generated);
     }
 
     #[test]
