@@ -15,9 +15,9 @@ use spote_core::library::{Library, TrackRow};
 use spote_core::lyrics::LyricsDoc;
 use spote_core::playback::{self, Advance, RepeatMode, ShuffleState};
 use spote_core::player::{Player, PlayerEvent};
+use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
 use spote_core::stream::{StreamEvent, StreamResolver};
 use spote_core::system_media::SystemMediaState;
-use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
 use spote_core::util;
 use spote_core::ToolStatus;
 use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackRef};
@@ -26,23 +26,23 @@ use crate::fetch::{
     ArtKind, ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker,
     SearchWorker, SongMapEvent, SongMapWorker,
 };
-use crate::system_media::{SystemCommand, SystemMediaWorker};
 use crate::social::{Social, SocialCmd, SocialEvent};
+use crate::system_media::{SystemCommand, SystemMediaWorker};
 use crate::theme::{FpsMeter, FxClock, PaletteRuntime, Pulse, Spring};
 use crate::viz::Viz;
 
 mod actions;
-mod audio_ui;
-mod mini;
-mod mpris;
-mod wrapped;
 pub(crate) mod albums;
 mod artist;
+mod audio_ui;
 mod context;
 mod downloads;
 mod input;
 mod keymap;
 mod layout_editor;
+mod mini;
+mod mpris;
+mod wrapped;
 pub use keymap::help_sections;
 mod lyrics_search;
 mod playlists;
@@ -994,6 +994,9 @@ pub struct App {
     pub mpris_last_update: Instant,
     pub wrapped: Option<spote_core::library::WrappedStats>,
     pub wrapped_all_time: bool,
+    /// Canvas independiente para el fondo del mini; no compite con la franja
+    /// de la TUI.
+    pub mini_viz: Viz,
     pub player_events: Option<tokio::sync::broadcast::Receiver<PlayerEvent>>,
     pub queue: Vec<QueueEntry>,
     pub queue_selected: usize,
@@ -1194,6 +1197,7 @@ impl App {
         let lib = Library::open(&config::db_path())?;
         let art_mode = ArtMode::from_str(&cfg.ui.art_mode).unwrap_or_default();
         let viz = Viz::from_preset(&cfg.ui.viz);
+        let mini_viz = Viz::from_preset(&cfg.ui.viz);
         let player_volume = cfg.player.volume;
         let fx_fps = cfg.ui.fx_fps.clamp(5, 60) as f32;
         let social = if cfg.server.url.is_empty() {
@@ -1267,6 +1271,7 @@ impl App {
             mpris_last_update: Instant::now(),
             wrapped: None,
             wrapped_all_time: false,
+            mini_viz,
             player_events: None,
             queue: Vec::new(),
             queue_selected: 0,
@@ -1520,10 +1525,8 @@ impl App {
                     if matches!(self.lib_filter, LibFilter::All) {
                         next = found;
                     } else {
-                        let keys: std::collections::HashSet<String> = found
-                            .into_iter()
-                            .map(|row| row.track.key)
-                            .collect();
+                        let keys: std::collections::HashSet<String> =
+                            found.into_iter().map(|row| row.track.key).collect();
                         next.retain(|row| keys.contains(&row.track.key));
                     }
                 }
@@ -1751,8 +1754,7 @@ impl App {
         self.song_section = None;
         self.map_worker.request(track.key.clone(), path.clone());
         if !self.follow_spotify {
-            self.spectrum
-                .decode_file(path, start_ms as f64 / 1000.0);
+            self.spectrum.decode_file(path, start_ms as f64 / 1000.0);
             self.spectrum_at = Instant::now();
         }
         self.set_status(format!("▶ {}", track.label()));
@@ -1773,13 +1775,13 @@ impl App {
             self.lib.set_art(&track.key, None, Some(url)).ok();
         }
         let hint = track.source_hint.clone().or_else(|| {
-            self.lib.source_hint(&track.key).map(|(provider, id)| {
-                spote_protocol::SourceHint {
+            self.lib
+                .source_hint(&track.key)
+                .map(|(provider, id)| spote_protocol::SourceHint {
                     provider,
                     id,
                     duration_ms: track.duration_ms,
-                }
-            })
+                })
         });
         let (trim_start, trim_end) = self.lib.trim(&track.key).unwrap_or((0, None));
         let duration = track.duration_ms.max(1);
@@ -2040,12 +2042,8 @@ impl App {
         let Some((key, url)) = self.stream_cache_pending.clone() else {
             return;
         };
-        let same_track = self
-            .now
-            .track
-            .as_ref()
-            .map(|track| track.key.as_str())
-            == Some(key.as_str());
+        let same_track =
+            self.now.track.as_ref().map(|track| track.key.as_str()) == Some(key.as_str());
         if !same_track {
             self.stream_cache_pending = None;
             return;
@@ -2639,7 +2637,9 @@ impl App {
             let current = self.context_index.min(len.saturating_sub(1));
             let index = if self.shuffle_on {
                 self.ensure_shuffle(len, current);
-                self.shuffle_state.as_mut().and_then(|state| state.prev(len))
+                self.shuffle_state
+                    .as_mut()
+                    .and_then(|state| state.prev(len))
             } else {
                 playback::advance_index(current, len, self.repeat_mode, playback::Direction::Prev)
             };
@@ -2854,9 +2854,7 @@ impl App {
                 && doc
                     .lines
                     .windows(2)
-                    .filter(|pair| {
-                        pair[1].start_ms.saturating_sub(pair[0].start_ms) < 400
-                    })
+                    .filter(|pair| pair[1].start_ms.saturating_sub(pair[0].start_ms) < 400)
                     .count()
                     >= 2;
             // Las captions antiguas pudieron entrar como texto de emergencia
@@ -2898,11 +2896,8 @@ impl App {
                     "verificando la letra…".into()
                 };
                 let request_track = self.lyrics_track(&track);
-                self.lyrics_worker.request(
-                    request_track,
-                    audio,
-                    stale_alignment || broken_sync,
-                );
+                self.lyrics_worker
+                    .request(request_track, audio, stale_alignment || broken_sync);
             } else {
                 return;
             }
@@ -3111,7 +3106,10 @@ impl App {
         self.lyrics_worker.forget(&track.key);
         self.reset_lyrics_view();
         self.load_lyrics(&track);
-        self.toast("caché de letra borrada · buscando de nuevo", ToastKind::Info);
+        self.toast(
+            "caché de letra borrada · buscando de nuevo",
+            ToastKind::Info,
+        );
     }
 
     /// Refina los tiempos de palabra estimados con el mapa de energía de la
@@ -3202,10 +3200,7 @@ impl App {
             if let Some(first) = starts.first_mut() {
                 *first = line.start_ms;
             }
-            let tail_end = line
-                .end_ms
-                .saturating_sub(150)
-                .max(line.start_ms + 1);
+            let tail_end = line.end_ms.saturating_sub(150).max(line.start_ms + 1);
             // Deja al menos 250 ms para que la última palabra se encienda.
             let last_start_limit = tail_end.saturating_sub(250).max(line.start_ms);
             if let Some(last) = starts.last_mut() {
@@ -3501,8 +3496,7 @@ impl App {
                     if self.streaming
                         && self.repeat_mode != RepeatMode::One
                         && self.effective_duration_ms() > 0
-                        && self.now.position_ms.saturating_add(700)
-                            >= self.effective_duration_ms()
+                        && self.now.position_ms.saturating_add(700) >= self.effective_duration_ms()
                     {
                         self.now.ended = true;
                         if let Some(track) = self.now.track.clone() {
@@ -3542,10 +3536,7 @@ impl App {
                     if self.now.awaiting_load {
                         continue;
                     }
-                    if entry != 0
-                        && self.now.player_entry != 0
-                        && entry != self.now.player_entry
-                    {
+                    if entry != 0 && self.now.player_entry != 0 && entry != self.now.player_entry {
                         continue;
                     }
                     // Un end-file de la pista anterior puede llegar después de
@@ -3565,10 +3556,7 @@ impl App {
                     self.auto_next();
                 }
                 PlayerEvent::Error(message, entry) => {
-                    if entry != 0
-                        && self.now.player_entry != 0
-                        && entry != self.now.player_entry
-                    {
+                    if entry != 0 && self.now.player_entry != 0 && entry != self.now.player_entry {
                         continue;
                     }
                     self.now.awaiting_load = false;
@@ -3627,10 +3615,8 @@ impl App {
                         catalog_match_score(&query, &b.title, &b.artists)
                             .cmp(&catalog_match_score(&query, &a.title, &a.artists))
                     });
-                    self.search.results = tracks
-                        .into_iter()
-                        .map(search_item_from_spotify)
-                        .collect();
+                    self.search.results =
+                        tracks.into_iter().map(search_item_from_spotify).collect();
                     self.search.selected = 0;
                     self.search.loading = false;
                     self.search.message = format!(
@@ -4646,13 +4632,7 @@ impl App {
     /// Algunas acciones (favorita, lista) llegan desde resultados remotos que
     /// aún no están en SQLite. Se materializa la pista antes de tocar la BD.
     pub(super) fn ensure_track_key(&mut self, key: &str) -> bool {
-        if self
-            .lib
-            .track_by_key(key)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        if self.lib.track_by_key(key).ok().flatten().is_some() {
             return true;
         }
         if let Some(track) = self
@@ -4804,7 +4784,10 @@ impl App {
     /// Reproduce la entrada marcada en la cola local desde el teclado.
     pub fn play_queue_selected(&mut self) {
         if !self.room_queue.is_empty() {
-            self.toast("la cola de la sala la controla el servidor", ToastKind::Info);
+            self.toast(
+                "la cola de la sala la controla el servidor",
+                ToastKind::Info,
+            );
             return;
         }
         let index = self.queue_selected.min(self.queue_len().saturating_sub(1));
@@ -4938,10 +4921,7 @@ impl App {
             .iter()
             .map(|item| {
                 let track = item.to_track();
-                let path = self
-                    .lib
-                    .local_path(&track.key)
-                    .filter(|path| path.exists());
+                let path = self.lib.local_path(&track.key).filter(|path| path.exists());
                 QueueEntry { track, path }
             })
             .collect();

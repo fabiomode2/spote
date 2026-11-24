@@ -54,6 +54,8 @@ pub struct MiniSnapshot {
     pub repeat: String,
     /// Ruta local de la portada, si ya está descargada.
     pub art_path: Option<String>,
+    /// URL remota de la portada; el mini la descarga si no hay `art_path`.
+    pub art_url: Option<String>,
     /// Color dominante de la portada.
     pub accent: [u8; 3],
     /// 32 bandas `0.0..=1.0`. Si viene vacío, el cliente dibuja su animación.

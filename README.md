@@ -68,9 +68,10 @@ la propia TUI.
   en el escritorio (teclas multimedia, OSD, widgets) y `t` sigue lo que suene
   en Spotify, SoundCloud, VLC o cualquier otro reproductor MPRIS.
 - **Mini reproductor**: `w` abre `spote-mini`, una ventana pequeña siempre
-  encima con portada, progreso y controles pixel-art. Reutiliza los mismos
-  presets de visualización de la TUI y se pueden cambiar desde el propio mini;
-  también se lanza con `spote mini`.
+  encima con la estética del transporte de la TUI: tipografía monoespaciada,
+  barra de bloques, controles pixel-art y la portada del disco sonando. El
+  visual de la ventana grande ocupa todo el fondo y el chip `viz` cambia de
+  preset desde el propio mini; también se lanza con `spote mini`.
 - **Audio ajustable**: pestaña `♫ audio` con ecualizador gráfico de 10 bandas,
   preamp, normalizador en directo y limitador. La nivelación entre pistas mide
   el audio completo y deja todas las canciones al mismo volumen; se aplica en
