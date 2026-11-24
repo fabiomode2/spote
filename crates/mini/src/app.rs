@@ -520,7 +520,7 @@ impl MiniApp {
         painter.rect_stroke(
             rect,
             CornerRadius::same(8),
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
             StrokeKind::Inside,
         );
         // Mantén el acento visible en el borde inferior, como la franja TUI.
@@ -529,7 +529,7 @@ impl MiniApp {
                 pos2(rect.left() + 1.0, rect.bottom() - 1.0),
                 pos2(rect.right() - 1.0, rect.bottom() - 1.0),
             ],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 90)),
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 90)),
         );
     }
 
