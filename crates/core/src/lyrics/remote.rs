@@ -87,18 +87,20 @@ const MIN_TEXT_COVERAGE: f64 = 0.28;
 ///    lrcmux y las captions solo pueden prestarle tiempos.
 /// 2. Sin Genius, LRCLIB y lrcmux siguen siendo fuentes de texto fiables. Un
 ///    LRC sincronizado se devuelve tal cual; uno plano queda como respaldo.
-/// 3. Las captions nunca aportan texto: solo alinean una letra ya conocida
-///    (Genius, LRCLIB o lrcmux) contra el audio del vídeo. Sin letra conocida
-///    no se consultan, porque las auto-captions pueden inventar líneas.
+/// 3. Las captions solo aportan texto si `allow_generated` está activo y no
+///    hay ninguna letra conocida; en el resto de casos únicamente alinean
+///    (Genius, LRCLIB o lrcmux) contra el audio del vídeo.
 ///
 /// Cuando Genius es plano y un proveedor trae LRC sincronizado, se comprueba
 /// que el texto coincida (Dice sobre palabras y alineación por líneas). Si
 /// coincide, se conservan las líneas de Genius y se les aplican esos tiempos;
 /// si no, se devuelve Genius plano antes que una letra sincronizada de otra
-/// canción. El ASR, más abajo, solo puede reafinar esos mismos tiempos.
+/// canción. El ASR, más abajo, solo reafina esos mismos tiempos salvo que el
+/// usuario active las letras generadas.
 pub async fn fetch_track(
     client: &reqwest::Client,
     track: &TrackRef,
+    allow_generated: bool,
 ) -> Result<Option<LyricsDoc>, LyricsError> {
     if track.title.trim().is_empty() {
         return Ok(None);
@@ -186,15 +188,17 @@ pub async fn fetch_track(
         }
     }
 
-    // 3) Captions: solo con letra conocida y solo para poner tiempos. Nunca
-    //    se usan como fuente de texto, ni siquiera como último recurso.
+    // 3) Captions: tiempos sobre una letra conocida; y, si el usuario activó
+    //    el modo de letras generadas, texto de emergencia cuando no hay nada.
     let known = genius.as_ref().or(timing.as_ref()).or(fallback.as_ref());
     let known_source = known.map(|doc| doc.source.label()).unwrap_or("");
+    let allow_caption_text = allow_generated && known.is_none();
     let mut captions = None;
-    if known.is_some() {
+    if known.is_some() || allow_caption_text {
         let youtube_deadline = slice(deadline, YOUTUBE_BUDGET);
         if has_budget(youtube_deadline, Duration::from_secs(2)) {
-            captions = super::youtube::fetch(track, known, youtube_deadline).await;
+            captions =
+                super::youtube::fetch(track, known, youtube_deadline, allow_caption_text).await;
         }
     }
 
@@ -203,10 +207,21 @@ pub async fn fetch_track(
         log_resolution(&doc, resolution);
         return Ok(Some(doc));
     }
-    if let Some(doc) = captions {
+    if let Some(mut doc) = captions {
+        // Si las captions solo prestaron tiempos, el texto (y por tanto la
+        // procedencia real) es el de `known`. Guardar "captions" aquí hacía
+        // que la caché se revalidara en cada sesión y mentía sobre la fuente.
+        if let Some(known) = known {
+            doc.source = known.source;
+        }
         tracing::info!(
             target: "spote::lyrics",
-            "letra: captions aportan tiempos sobre texto de {known_source}"
+            "letra: captions {}",
+            if known.is_some() {
+                format!("aportan tiempos sobre texto de {known_source}")
+            } else {
+                "generan texto de emergencia".to_string()
+            }
         );
         return Ok(Some(doc));
     }
@@ -362,6 +377,7 @@ fn resolve_genius(
         if doc.synced {
             if let Some(mut merged) = merge_text_with_timing(&genius, &doc) {
                 merged.source = genius.source;
+                merged.captions_timed = true;
                 return (merged, Resolution::CaptionTiming);
             }
         }
@@ -725,6 +741,7 @@ fn build_timed_from_anchors(
         source: text_doc.source,
         offset_ms: 0,
         aligned: false,
+        captions_timed: false,
     }
 }
 
@@ -1210,29 +1227,75 @@ fn is_generic_title(title: &str) -> bool {
     words <= 2 || letters <= 8
 }
 
+/// Símbolos que forman parte de la identidad de un título (`#1`, `(_8(|)`).
+/// El apóstrofo, las comas y los separadores no convierten un título en
+/// simbólico: `Don't Stop` debe seguir el camino de similitud normal.
+fn is_identity_symbol(ch: char) -> bool {
+    !ch.is_alphanumeric()
+        && !ch.is_whitespace()
+        && !matches!(
+            ch,
+            '\'' | '\u{2018}'
+                | '\u{2019}'
+                | '`'
+                | '´'
+                | '"'
+                | '\u{201c}'
+                | '\u{201d}'
+                | '-'
+                | '\u{2013}'
+                | '\u{2014}'
+                | '\u{2212}'
+                | '.'
+                | ','
+                | ':'
+                | ';'
+                | '&'
+                | '/'
+                | '+'
+        )
+}
+
 /// Título con símbolos que lo identifican aunque tenga pocas letras o palabras
-/// (`(_8(|)`, `#1`, `R U Mine?`). No es genérico: el símbolo forma parte del
-/// nombre. Exige un núcleo alfanumérico (`$$$` no identifica nada).
+/// (`(_8(|)`, `#1`). No es genérico: el símbolo forma parte del nombre. Exige
+/// un núcleo alfanumérico (`$$$` no identifica nada).
 pub(crate) fn is_symbolic_title(title: &str) -> bool {
     let cleaned = clean_title(title);
     if !cleaned.chars().any(|ch| ch.is_alphanumeric()) {
         return false;
     }
-    cleaned
-        .chars()
-        .any(|ch| !ch.is_alphanumeric() && !ch.is_whitespace())
+    cleaned.chars().any(is_identity_symbol)
 }
 
-/// Compara títulos conservando los símbolos. [`similarity`] normaliza el texto
-/// y se come los paréntesis, así que `(_8(|)` quedaría vacío; para títulos
-/// simbólicos hace falta una igualdad literal (sin espacios ni mayúsculas).
+/// Solo los títulos que la normalización común reduciría a un núcleo mínimo
+/// necesitan comparación literal. `R U Mine?` o `Don't Stop` se comparan por
+/// similitud normal; `(_8(|)` y `#1` no.
+fn needs_exact_symbolic(title: &str) -> bool {
+    is_generic_title(title)
+        && is_symbolic_title(title)
+        && crate::util::normalize(title).chars().count() <= 3
+}
+
+/// Compara títulos conservando los símbolos de identidad, pero plegando
+/// mayúsculas, acentos, apóstrofos tipográficos y espacios. Así `Don't Stop`
+/// casa con `Don’t Stop`, `Árbol` con `arbol`, y `(_8(|)` no casa con `8`.
 pub(crate) fn titles_match_exactly(left: &str, right: &str) -> bool {
     fn canonical(text: &str) -> String {
-        clean_title(text)
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
+        let mut out = String::new();
+        for ch in clean_title(text).chars().flat_map(char::to_lowercase) {
+            let ch = match ch {
+                '\u{2018}' | '\u{2019}' | '`' | '´' => '\'',
+                '\u{201c}' | '\u{201d}' => '"',
+                '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
+                other => other,
+            };
+            if ch.is_alphanumeric() {
+                out.push_str(&crate::util::normalize(&ch.to_string()));
+            } else if is_identity_symbol(ch) {
+                out.push(ch);
+            }
+        }
+        out
     }
     let left = canonical(left);
     let right = canonical(right);
@@ -1414,7 +1477,7 @@ fn build_doc_with_source(
     if let Some(doc) = synced_doc(raw, duration_ms, source) {
         return Some(doc);
     }
-    plain_doc(raw, track)
+    plain_doc_with_source(raw, track, source)
 }
 
 /// Letra con tiempos reales, tal cual viene en LRC. `None` si el LRC no trae
@@ -1446,6 +1509,7 @@ fn synced_doc(raw: &RemoteLyrics, duration_ms: u64, source: LyricsSource) -> Opt
         source,
         offset_ms: parsed.offset_ms,
         aligned: false,
+        captions_timed: false,
     })
 }
 
@@ -1490,10 +1554,6 @@ pub(crate) fn sync_problem(doc: &LyricsDoc, duration_ms: u64) -> Option<&'static
 }
 
 /// Letra sin tiempos: líneas repartidas a lo largo de la canción.
-fn plain_doc(raw: &RemoteLyrics, track: &TrackRef) -> Option<LyricsDoc> {
-    plain_doc_with_source(raw, track, LyricsSource::Plain)
-}
-
 fn plain_doc_with_source(
     raw: &RemoteLyrics,
     track: &TrackRef,
@@ -1537,6 +1597,7 @@ fn plain_doc_with_source(
         source,
         offset_ms: 0,
         aligned: false,
+        captions_timed: false,
     };
     for (index, text) in texts.into_iter().enumerate() {
         let index = index as u64;
@@ -1845,8 +1906,7 @@ fn ranked_genius_songs<'a>(search: &'a GeniusSearch, target: &MatchTarget) -> Ve
             if offered != target.version && offered.is_incompatible() {
                 continue;
             }
-            let symbolic_generic =
-                is_generic_title(&target.title) && is_symbolic_title(&target.title);
+            let symbolic_generic = needs_exact_symbolic(&target.title);
             let mut title_score = title_similarity_for(&song.title, target);
             if symbolic_generic {
                 if !titles_match_exactly(&song.title, &target.title) {
@@ -2798,7 +2858,10 @@ mod tests {
     fn symbolic_titles_are_distinguished_from_generic_ones() {
         assert!(is_symbolic_title("(_8(|)"));
         assert!(is_symbolic_title("#1"));
+        // El apóstrofo no convierte un título en simbólico; `?` y `!` sí
+        // forman parte del nombre en casos como `R U Mine?`.
         assert!(is_symbolic_title("R U Mine?"));
+        assert!(!is_symbolic_title("Don't Stop"));
         // Sin núcleo alfanumérico o sin símbolos no hay nada distintivo.
         assert!(!is_symbolic_title("$$$"));
         assert!(!is_symbolic_title("(((("));
@@ -2807,6 +2870,14 @@ mod tests {
         assert!(!is_symbolic_title("Love"));
         assert!(titles_match_exactly("(_8(|)", "(_8(|)"));
         assert!(!titles_match_exactly("(_8(|)", "(_9(|)"));
+        // La normalización común evita falsos negativos por tipografía.
+        assert!(titles_match_exactly("Don't Stop", "Don’t Stop"));
+        assert!(titles_match_exactly("Árbol", "arbol"));
+        // El canónico conserva los símbolos de identidad: no confundas el
+        // título simbólico con su núcleo alfanumérico.
+        assert!(!titles_match_exactly("(_8(|)", "8"));
+        assert!(!titles_match_exactly("#1", "1"));
+        assert!(!titles_match_exactly("A (B)", "A"));
     }
 
     #[test]
@@ -2987,7 +3058,7 @@ mod tests {
         };
         let doc = build_doc(&raw, &track()).expect("hay letra plana");
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrclib);
         assert_eq!(doc.lines.len(), 3, "las líneas vacías se descartan");
         assert_eq!(doc.lines[0].start_ms, 0);
         assert_eq!(doc.lines[0].end_ms, doc.lines[1].start_ms);
@@ -3016,6 +3087,24 @@ mod tests {
     }
 
     #[test]
+    fn plain_lyrics_keep_the_provider_source() {
+        let raw = RemoteLyrics {
+            id: 10,
+            track_name: "Do I Wanna Know?".into(),
+            artist_name: "Arctic Monkeys".into(),
+            album_name: "AM".into(),
+            duration: 272.0,
+            plain_lyrics: Some("uno\ndos".into()),
+            synced_lyrics: None,
+        };
+        let doc =
+            build_doc_with_source(&raw, &track(), LyricsSource::Lrclib).expect("hay letra plana");
+        assert!(!doc.synced);
+        assert_eq!(doc.source, LyricsSource::Lrclib);
+        assert!(!doc.captions_timed);
+    }
+
+    #[test]
     fn absurd_sync_falls_back_to_plain_lyrics() {
         let raw = RemoteLyrics {
             id: 9,
@@ -3028,6 +3117,6 @@ mod tests {
         };
         let doc = build_doc(&raw, &track()).expect("cae a letra plana");
         assert!(!doc.synced, "la sync con tiempos imposibles se descarta");
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrclib);
     }
 }

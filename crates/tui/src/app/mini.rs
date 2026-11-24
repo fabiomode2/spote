@@ -58,6 +58,7 @@ impl App {
                 MiniCommand::CycleRepeat => self.cycle_repeat(),
                 MiniCommand::CycleViz => {
                     self.show_viz = true;
+                    self.viz.paused = false;
                     self.viz.next_preset();
                     self.cfg.ui.viz = self.viz.preset_name().to_string();
                     self.cfg.save().ok();

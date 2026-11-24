@@ -125,8 +125,7 @@ impl App {
                 }
                 KeyCode::Down => {
                     if !self.albums.is_empty() {
-                        self.album_selected =
-                            (self.album_selected + 1).min(self.albums.len() - 1);
+                        self.album_selected = (self.album_selected + 1).min(self.albums.len() - 1);
                     }
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -356,6 +355,11 @@ impl App {
                     CenterFocus::Lyrics
                 };
             }
+            KeyCode::Char('G')
+                if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics =>
+            {
+                self.toggle_generated_lyrics()
+            }
             KeyCode::Char('D') => {
                 self.lyrics_debug = !self.lyrics_debug;
                 self.lyrics_debug_last = None;
@@ -440,6 +444,9 @@ impl App {
                 } else {
                     self.move_selection(8);
                 }
+            }
+            KeyCode::Home if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics => {
+                self.follow_current_lyric()
             }
             KeyCode::Home if self.tab == Tab::Now => self.trim_start_here(),
             KeyCode::End if self.tab == Tab::Now => self.trim_end_here(),

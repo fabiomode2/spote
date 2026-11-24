@@ -91,13 +91,16 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
     let card_w = (inner.width.saturating_sub(columns.saturating_sub(1) * 2)) / columns;
     let per_col = (inner.height / card_h).max(1) as usize;
     let visible = per_col * columns as usize;
-    let start = app
-        .album_selected
-        .saturating_sub(visible / 2)
-        .min(app.albums.len().saturating_sub(visible.min(app.albums.len())));
+    let start = app.album_selected.saturating_sub(visible / 2).min(
+        app.albums
+            .len()
+            .saturating_sub(visible.min(app.albums.len())),
+    );
     for offset in 0..visible {
         let index = start + offset;
-        let Some(album) = app.albums.get(index).cloned() else { break };
+        let Some(album) = app.albums.get(index).cloned() else {
+            break;
+        };
         let column = offset as u16 / per_col as u16;
         let row = offset % per_col;
         let x = inner.x + column * (card_w + 2);
@@ -135,6 +138,10 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         let mut artist = album.artist.clone();
         truncate_chars(&mut artist, text_w as usize);
         put(buf, text_x, y + 1, &artist, color(pal.secondary), None);
+        // La tarjeta se registra antes que el nombre del artista: en el
+        // HitMap gana el último, así el clic en el artista abre el artista y
+        // el resto de la tarjeta sigue abriendo el álbum.
+        app.hit.add(card, Action::AlbumOpen(index));
         app.hit.add(
             Rect::new(text_x, y + 1, artist.chars().count() as u16, 1),
             Action::OpenArtist(album.artist.clone()),
@@ -142,7 +149,11 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         let mut meta = format!(
             "{} {} · {}/{} descargadas · {}",
             album.track_count,
-            if album.track_count == 1 { "pista" } else { "pistas" },
+            if album.track_count == 1 {
+                "pista"
+            } else {
+                "pistas"
+            },
             album.ready_count,
             album.track_count,
             format_ms(album.duration_ms)
@@ -152,7 +163,6 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         }
         truncate_chars(&mut meta, text_w as usize);
         put(buf, text_x, y + 2, &meta, color(pal.dim), None);
-        app.hit.add(card, Action::AlbumOpen(index));
     }
     let footer = "enter abre · d baja el álbum · s guarda como lista · / busca";
     if rect.height > 4 {
@@ -192,14 +202,7 @@ fn draw_album_detail(
     draw_thumb(app, buf, thumb, &track, pal);
     let text_x = thumb.x + thumb.width + 2;
     let _text_w = (inner.x + inner.width).saturating_sub(text_x);
-    put(
-        buf,
-        text_x,
-        inner.y,
-        &album.album,
-        color(pal.text),
-        None,
-    );
+    put(buf, text_x, inner.y, &album.album, color(pal.text), None);
     put(
         buf,
         text_x,
@@ -209,12 +212,7 @@ fn draw_album_detail(
         None,
     );
     app.hit.add(
-        Rect::new(
-            text_x,
-            inner.y + 1,
-            album.artist.chars().count() as u16,
-            1,
-        ),
+        Rect::new(text_x, inner.y + 1, album.artist.chars().count() as u16, 1),
         Action::OpenArtist(album.artist.clone()),
     );
     put(
@@ -224,7 +222,11 @@ fn draw_album_detail(
         &format!(
             "{} {} · {}/{} descargadas · {}",
             album.track_count,
-            if album.track_count == 1 { "pista" } else { "pistas" },
+            if album.track_count == 1 {
+                "pista"
+            } else {
+                "pistas"
+            },
             album.ready_count,
             album.track_count,
             format_ms(album.duration_ms)
@@ -279,7 +281,9 @@ fn draw_album_detail(
         .min(app.view.len().saturating_sub(rows.min(app.view.len())));
     for offset in 0..rows {
         let index = start + offset;
-        let Some(row) = app.view.get(index) else { break };
+        let Some(row) = app.view.get(index) else {
+            break;
+        };
         let y = list_y + offset as u16;
         let row_rect = Rect::new(inner.x, y, inner.width, 1);
         let selected = index == app.selected;

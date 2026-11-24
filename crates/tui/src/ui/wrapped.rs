@@ -15,6 +15,9 @@ pub(super) fn draw_wrapped(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         );
         return;
     };
+    if inner.width < 24 || inner.height < 8 {
+        return;
+    }
 
     let period = if stats.all_time {
         "todo el tiempo".to_string()
@@ -32,7 +35,9 @@ pub(super) fn draw_wrapped(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             stats.plays,
             stats.distinct_artists
         ),
-        Style::new().fg(color(pal.primary)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.primary))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
 
@@ -41,14 +46,18 @@ pub(super) fn draw_wrapped(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         buf,
         Rect::new(inner.x, y, 44, 1),
         "CANCIONES MÁS ESCUCHADAS",
-        Style::new().fg(color(pal.secondary)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.secondary))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     text_at(
         buf,
         Rect::new(inner.x + 46, y, inner.width.saturating_sub(46), 1),
         "ARTISTAS Y DISCOS",
-        Style::new().fg(color(pal.secondary)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.secondary))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     y += 1;
@@ -62,9 +71,14 @@ pub(super) fn draw_wrapped(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             Alignment::Left,
         );
     }
-    for (index, track) in stats.top_tracks.iter().take(8).enumerate() {
+    let chart_y = inner.y + inner.height.saturating_sub(3);
+    let track_limit = (chart_y.saturating_sub(y) as usize).clamp(1, 8);
+    for (index, track) in stats.top_tracks.iter().take(track_limit).enumerate() {
         let row = Rect::new(inner.x, y + index as u16, 44, 1);
-        let title = truncate(&format!("{}. {} · {}", index + 1, track.title, track.artist), 42);
+        let title = truncate(
+            &format!("{}. {} · {}", index + 1, track.title, track.artist),
+            42,
+        );
         put(
             buf,
             row.x,
@@ -84,44 +98,55 @@ pub(super) fn draw_wrapped(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         );
     }
 
-    for (index, artist) in stats.top_artists.iter().take(4).enumerate() {
-        let row = Rect::new(inner.x + 46, y + index as u16, inner.width.saturating_sub(46), 1);
-        put(
-            buf,
-            row.x,
-            row.y,
-            &truncate(
-                &format!(
-                    "♪ {}  ·  {}m  ·  {}x",
-                    artist.artist,
-                    (artist.ms_played / 60_000).max(1),
-                    artist.plays
+    if inner.height >= 14 {
+        for (index, artist) in stats.top_artists.iter().take(4).enumerate() {
+            let row = Rect::new(
+                inner.x + 46,
+                y + index as u16,
+                inner.width.saturating_sub(46),
+                1,
+            );
+            put(
+                buf,
+                row.x,
+                row.y,
+                &truncate(
+                    &format!(
+                        "♪ {}  ·  {}m  ·  {}x",
+                        artist.artist,
+                        (artist.ms_played / 60_000).max(1),
+                        artist.plays
+                    ),
+                    row.width.saturating_sub(1) as usize,
                 ),
-                row.width.saturating_sub(1) as usize,
-            ),
-            color(if index == 0 { pal.text } else { pal.muted }),
-            None,
-        );
+                color(if index == 0 { pal.text } else { pal.muted }),
+                None,
+            );
+        }
     }
     let albums_y = y + 5;
-    for (index, album) in stats.top_albums.iter().take(4).enumerate() {
-        let row = Rect::new(
-            inner.x + 46,
-            albums_y + index as u16,
-            inner.width.saturating_sub(46),
-            1,
-        );
-        put(
-            buf,
-            row.x,
-            row.y,
-            &truncate(&format!("▤ {} · {}", album.album, album.artist), row.width.saturating_sub(1) as usize),
-            color(pal.muted),
-            None,
-        );
+    if inner.height >= 16 {
+        for (index, album) in stats.top_albums.iter().take(4).enumerate() {
+            let row = Rect::new(
+                inner.x + 46,
+                albums_y + index as u16,
+                inner.width.saturating_sub(46),
+                1,
+            );
+            put(
+                buf,
+                row.x,
+                row.y,
+                &truncate(
+                    &format!("▤ {} · {}", album.album, album.artist),
+                    row.width.saturating_sub(1) as usize,
+                ),
+                color(pal.muted),
+                None,
+            );
+        }
     }
 
-    let chart_y = inner.y + inner.height - 3;
     text_at(
         buf,
         Rect::new(inner.x, chart_y, 44, 1),
@@ -131,20 +156,27 @@ pub(super) fn draw_wrapped(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     );
     let max = stats.by_month.iter().copied().max().unwrap_or(0).max(1);
     let bars = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-    for (month, ms) in stats.by_month.iter().enumerate() {
-        let level = ((*ms as f32 / max as f32) * 8.0).round() as usize;
-        put(
-            buf,
-            inner.x + month as u16 * 3,
-            chart_y + 1,
-            bars[level.min(8)],
-            color(if *ms > 0 { pal.primary } else { pal.border_dim }),
-            None,
-        );
+    if inner.height >= 9 {
+        for (month, ms) in stats.by_month.iter().enumerate() {
+            let level = ((*ms as f32 / max as f32) * 8.0).round() as usize;
+            put(
+                buf,
+                inner.x + month as u16 * 3,
+                chart_y + 1,
+                bars[level.min(8)],
+                color(if *ms > 0 { pal.primary } else { pal.border_dim }),
+                None,
+            );
+        }
     }
     text_at(
         buf,
-        Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+        Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
+        ),
         "a  este año / todo  ·  esc  cerrar",
         Style::new().fg(color(pal.dim)),
         Alignment::Left,

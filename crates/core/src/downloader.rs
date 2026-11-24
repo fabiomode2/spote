@@ -58,18 +58,34 @@ impl SearchItem {
 
 #[derive(Debug, Clone)]
 pub enum DownloadEvent {
-    Found { query_id: u64, items: Vec<SearchItem> },
-    SearchFailed { query_id: u64, message: String },
+    Found {
+        query_id: u64,
+        items: Vec<SearchItem>,
+    },
+    SearchFailed {
+        query_id: u64,
+        message: String,
+    },
     /// Progreso "clásico": el paso ya viene formateado para pintarlo tal cual.
-    Progress { key: String, percent: f32, stage: String },
+    Progress {
+        key: String,
+        percent: f32,
+        stage: String,
+    },
     /// El mismo progreso pero con el paso tipado: la UI puede elegir icono o color.
     StageProgress {
         key: String,
         stage: DownloadStage,
         percent: f32,
     },
-    Done { key: String, path: PathBuf },
-    Failed { key: String, message: String },
+    Done {
+        key: String,
+        path: PathBuf,
+    },
+    Failed {
+        key: String,
+        message: String,
+    },
     Message(String),
 }
 
@@ -168,8 +184,15 @@ impl ProgressReporter {
 
 #[derive(Debug)]
 enum Job {
-    Search { id: u64, query: String },
-    Download { key: String, source: DownloadSource, out: PathBuf },
+    Search {
+        id: u64,
+        query: String,
+    },
+    Download {
+        key: String,
+        source: DownloadSource,
+        out: PathBuf,
+    },
     /// Busca la mejor fuente para una pista del catálogo y la descarga.
     Resolve {
         key: String,
@@ -349,7 +372,10 @@ fn worker(
                 let result = search(&query);
                 match result {
                     Ok(items) => {
-                        let _ = events.send(DownloadEvent::Found { query_id: id, items });
+                        let _ = events.send(DownloadEvent::Found {
+                            query_id: id,
+                            items,
+                        });
                     }
                     Err(err) => {
                         let _ = events.send(DownloadEvent::SearchFailed {
@@ -392,10 +418,17 @@ fn worker(
                     .map_err(|err| anyhow!("{err:#}"))
                     .and_then(|ids| {
                         let mut last_error: Option<anyhow::Error> = None;
-                        for id in ids {
+                        for (attempt, id) in ids.into_iter().enumerate() {
                             let source = DownloadSource::Url(format!(
                                 "https://www.youtube.com/watch?v={id}"
                             ));
+                            if attempt > 0 {
+                                // El target es el mismo para todos los
+                                // candidatos. Si el anterior dejó un `.part`
+                                // o una miniatura a medias, el siguiente no
+                                // debe reanudarlo ni heredar la portada.
+                                remove_download_artifacts(&download_target(&out, &key));
+                            }
                             match download(&key, &source, &out, &events, &children) {
                                 Ok(path) => return Ok(path),
                                 Err(err) => last_error = Some(err),
@@ -424,7 +457,10 @@ fn worker(
                     Ok(output) => {
                         let text = String::from_utf8_lossy(&output.stdout).to_string()
                             + &String::from_utf8_lossy(&output.stderr);
-                        text.lines().last().unwrap_or("yt-dlp actualizado").to_string()
+                        text.lines()
+                            .last()
+                            .unwrap_or("yt-dlp actualizado")
+                            .to_string()
                     }
                     Err(err) => err.to_string(),
                 };
@@ -482,8 +518,8 @@ fn search(query: &str) -> Result<Vec<SearchItem>> {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("yt-dlp: {}", last_lines(&err, 3)));
     }
-    let json: SearchJson = serde_json::from_slice(&output.stdout)
-        .context("respuesta de búsqueda ilegible")?;
+    let json: SearchJson =
+        serde_json::from_slice(&output.stdout).context("respuesta de búsqueda ilegible")?;
     let mut items: Vec<SearchItem> = json
         .entries
         .into_iter()
@@ -541,8 +577,14 @@ fn parse_percent(line: &str) -> Option<f32> {
 fn parse_byte_progress(rest: &str) -> Option<f32> {
     let mut parts = rest.split_whitespace();
     let downloaded: f64 = parts.next().and_then(|value| value.parse().ok())?;
-    let estimate: f64 = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0.0);
-    let total: f64 = parts.next().and_then(|value| value.parse().ok()).unwrap_or(0.0);
+    let estimate: f64 = parts
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.0);
+    let total: f64 = parts
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0.0);
     let total = if estimate > 0.0 { estimate } else { total };
     if total <= 0.0 {
         return None;
@@ -596,6 +638,47 @@ fn clean_title(title: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn download_target(out_dir: &Path, key: &str) -> PathBuf {
+    // Nombre estable por pista. Ojo: `slug(...).max(...)` NO es un fallback,
+    // es comparación lexicográfica y colapsaba todo a "track".
+    let name = util::slug(key, 80);
+    let name = if name.is_empty() {
+        "track".to_string()
+    } else {
+        name
+    };
+    out_dir.join(name)
+}
+
+/// Borra restos de un intento anterior (`foo.webm.part`, `foo.jpg`, etc.).
+/// Solo toca ficheros que empiezan por el nombre estable del target.
+fn remove_download_artifacts(target: &Path) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let prefix = format!("{name}.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.starts_with(&prefix) {
+            continue;
+        }
+        let ext = file_name.rsplit('.').next().unwrap_or_default();
+        if ext.starts_with("part")
+            || matches!(
+                ext,
+                "ytdl" | "opus" | "ogg" | "webm" | "m4a" | "mp3" | "jpg" | "png" | "webp"
+            )
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn download(
     key: &str,
     source: &DownloadSource,
@@ -605,11 +688,7 @@ fn download(
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(out_dir).ok();
     let DownloadSource::Url(url) = source;
-    // Nombre estable por pista. Ojo: `slug(...).max(...)` NO es un fallback,
-    // es comparación lexicográfica y colapsaba todo a "track".
-    let name = util::slug(key, 80);
-    let name = if name.is_empty() { "track".to_string() } else { name };
-    let target = out_dir.join(name);
+    let target = download_target(out_dir, key);
     // El `media_dir` del usuario puede contener `%`: yt-dlp lo interpreta
     // como plantilla. Se escapa el prefijo y se deja solo el `%(ext)s` real.
     let template_base = target.display().to_string().replace('%', "%%");
@@ -626,6 +705,8 @@ fn download(
         .arg("--no-playlist")
         .arg("--newline")
         .arg("--no-warnings")
+        .arg("--force-overwrites")
+        .arg("--no-continue")
         .arg("--socket-timeout")
         .arg("15")
         .arg("--embed-metadata")
@@ -779,7 +860,10 @@ pub fn ingest_dir(lib: &mut Library, dir: &Path, copy_to: &Path) -> Result<Inges
             .unwrap_or("track")
             .to_string();
         let manifest_entry = manifest.get(&file).cloned();
-        let manifest_duration = manifest_entry.as_ref().map(|entry| entry.duration_ms).unwrap_or(0);
+        let manifest_duration = manifest_entry
+            .as_ref()
+            .map(|entry| entry.duration_ms)
+            .unwrap_or(0);
         let (title, artist, album) = match (tags.title.clone(), tags.artist.clone()) {
             (Some(title), Some(artist)) => (title, artist, tags.album.clone()),
             _ => match manifest_entry {
@@ -787,7 +871,10 @@ pub fn ingest_dir(lib: &mut Library, dir: &Path, copy_to: &Path) -> Result<Inges
                 None => (stem.clone(), "Unknown".to_string(), None),
             },
         };
-        let duration_ms = tags.duration_ms.filter(|value| *value > 0).unwrap_or(manifest_duration);
+        let duration_ms = tags
+            .duration_ms
+            .filter(|value| *value > 0)
+            .unwrap_or(manifest_duration);
         let key = util::fallback_key(&artist, &title, duration_ms);
         let track = TrackRef {
             key,
@@ -834,15 +921,15 @@ pub fn ingest_dir(lib: &mut Library, dir: &Path, copy_to: &Path) -> Result<Inges
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .unwrap_or("jpg");
-            let cover_dest = copy_to.join(format!(
-                "{}.{}",
-                util::slug(&track.key, 90),
-                extension
-            ));
+            let cover_dest = copy_to.join(format!("{}.{}", util::slug(&track.key, 90), extension));
             if !cover_dest.exists() {
                 std::fs::copy(&cover, &cover_dest).ok();
             }
-            let source = if cover_dest.exists() { cover_dest } else { cover };
+            let source = if cover_dest.exists() {
+                cover_dest
+            } else {
+                cover
+            };
             lib.set_art(&track.key, Some(&source), None)?;
         }
         report.imported += 1;
@@ -886,7 +973,10 @@ fn read_manifest(dir: &Path) -> std::collections::HashMap<PathBuf, ManifestEntry
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            album: value.get("album").and_then(|v| v.as_str()).map(str::to_string),
+            album: value
+                .get("album")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             duration_ms: value
                 .get("duration_ms")
                 .and_then(|v| v.as_u64())
@@ -927,7 +1017,14 @@ struct Tags {
 
 fn ffprobe_tags(path: &Path) -> Option<Tags> {
     let output = Command::new("ffprobe")
-        .args(["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams"])
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
         .arg(path)
         .output()
         .ok()?;
@@ -1010,8 +1107,10 @@ mod tests {
 
     #[test]
     fn splits_dash_titles_and_strips_noise() {
-        let (artist, title) =
-            split_artist_title("Tame Impala - The Less I Know (Official Video)", "Tame Impala");
+        let (artist, title) = split_artist_title(
+            "Tame Impala - The Less I Know (Official Video)",
+            "Tame Impala",
+        );
         assert_eq!(artist, "Tame Impala");
         assert_eq!(title, "The Less I Know");
     }
@@ -1034,11 +1133,17 @@ mod tests {
             parse_percent("[download]  42.3% of 3.2MiB at 1.20MiB/s ETA 00:02"),
             Some(42.3)
         );
-        assert_eq!(parse_percent("[download] 100% of 3.2MiB in 00:02"), Some(100.0));
+        assert_eq!(
+            parse_percent("[download] 100% of 3.2MiB in 00:02"),
+            Some(100.0)
+        );
         assert_eq!(parse_percent("  [download]    7.5% of ~12.0MiB"), Some(7.5));
         // Sin porcentaje no hay nada que inventar.
         assert_eq!(parse_percent("[download] Destination: /tmp/foo.opus"), None);
-        assert_eq!(parse_percent("[ExtractAudio] Destination: /tmp/foo.opus"), None);
+        assert_eq!(
+            parse_percent("[ExtractAudio] Destination: /tmp/foo.opus"),
+            None
+        );
         assert_eq!(parse_percent("SPOTE_PROGRESS 1024 4096"), None);
         assert_eq!(parse_percent(""), None);
     }
@@ -1122,6 +1227,21 @@ mod tests {
             stages,
             vec![DownloadStage::Downloading, DownloadStage::Converting]
         );
+    }
+
+    #[test]
+    fn retry_cleanup_removes_only_this_track_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = download_target(dir.path(), "sha1:abc");
+        for ext in ["webm.part", "webm", "jpg"] {
+            std::fs::write(target.with_extension(ext), b"x").unwrap();
+        }
+        std::fs::write(dir.path().join("otra.opus"), b"x").unwrap();
+        remove_download_artifacts(&target);
+        assert!(!target.with_extension("webm.part").exists());
+        assert!(!target.with_extension("webm").exists());
+        assert!(!target.with_extension("jpg").exists());
+        assert!(dir.path().join("otra.opus").exists());
     }
 
     #[test]

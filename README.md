@@ -29,13 +29,14 @@ la propia TUI.
 - **Visuales**: `clean`, `aurora`, `bloom`, `inferno`, `crt`, `lcd`, `rack`,
   `braille` y `stage`; `v` cicla y `V` los pone a pantalla completa.
 - **Letras**: Genius es la referencia de texto. LRCLIB, lrcmux y las captions
-  de YouTube solo aportan tiempos cuando su letra coincide; las captions no
-  generan texto y el ASR solo alinea una letra existente. Si no hay una fuente
-  fiable, se muestra “sin letra” antes que inventarla. La barra de la letra
-  permite zoom (`A−`/`A+`), ajuste fino de ±100/±250 ms por pista, scroll
-  manual con rueda o flechas y volver a la línea actual. `⌕`/`b` abre una
-  búsqueda manual: lista las versiones de LRCLIB, las previsualiza y deja
-  aceptar a mano la que sea correcta. `⟳` descarta la caché y busca otra letra.
+  de YouTube solo aportan tiempos cuando su letra coincide. Si no hay una
+  fuente fiable, se muestra “sin letra verificada”. El chip `inv` (o `G` en el
+  foco de letra) permite activar/desactivar las letras generadas con
+  captions/ASR; por defecto están apagadas. La barra permite zoom (`A−`/`A+`),
+  ajuste de ±100/±250 ms por pista, scroll manual y volver a la línea actual
+  (`⟲`/`home`). `⌕`/`b` abre una búsqueda manual: lista las versiones de
+  LRCLIB, las previsualiza y deja aceptar a mano la que sea correcta. `⟳`
+  descarta la caché y busca otra letra.
 - **Karaoke**: palabra a palabra, frases largas en dos filas y la última palabra
   se llena antes de cambiar de línea.
 - **Ficha de artista y álbum**: se abren en un panel fijo a la derecha, no en
@@ -57,13 +58,13 @@ la propia TUI.
   biblioteca abre un filtro inline por título, artista o álbum.
 - **Discos guardados**: pestaña `discos` con todos los álbumes de la
   biblioteca agrupados por artista, portadas y un buscador propio (`/`).
-  `X` o ⇧clic en la × quita una pista; si es la actual, detiene la
-  reproducción.
+  `X` o ⇧clic en la × oculta una pista de la biblioteca sin borrar el audio
+  ni su historial; en favoritas quita el corazón. `spote dedupe` fusiona
+  duplicados de forma explícita, con `--dry-run` y backup previo.
 - **Wrapped**: `W` abre un resumen de escucha con horas, reproducciones,
   artistas, canciones, discos y actividad por meses. `a` alterna entre el
-  año actual y todo el tiempo. `X` quita la
-  pista seleccionada y, manteniendo `shift`, aparece una `×` en cada fila para
-  borrar varias seguidas de un clic.
+  año actual y todo el tiempo. Manteniendo `shift` aparece una `×` en cada
+  fila para ocultar varias seguidas de un clic.
 - **Media del sistema**: MPRIS bidireccional. spote aparece como reproductor
   en el escritorio (teclas multimedia, OSD, widgets) y `t` sigue lo que suene
   en Spotify, SoundCloud, VLC o cualquier otro reproductor MPRIS.
@@ -156,6 +157,7 @@ limiter = false
 
 [lyrics]
 asr = true
+allow_generated = false # captions/ASR pueden inventar letra (chip inv)
 asr_model = "small"    # tiny | base | small | medium | large-v3
 ```
 
@@ -164,6 +166,8 @@ asr_model = "small"    # tiny | base | small | medium | large-v3
 ```bash
 spote ingest ~/Music                            # indexa audio local
 spote import <url-spotify> --download           # importa y baja
+spote dedupe --dry-run                          # lista duplicados sin tocar nada
+spote dedupe --yes                              # fusiona con backup previo
 spote doctor                                    # comprueba dependencias
 spote record [--flac]                           # graba lo que suena
 spoted                                          # backend social (requiere secretos)

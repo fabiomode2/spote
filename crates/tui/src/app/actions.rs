@@ -23,13 +23,19 @@ impl App {
     pub fn on_mouse(&mut self, mouse: MouseEvent) {
         // Shift no genera eventos de teclado por sí solo (el terminal no manda
         // la tecla suelta), pero los eventos de ratón sí traen los modifiers.
-        // Con shift se enseña la × de borrado; al soltarlo y mover el ratón
-        // desaparece. Un clic sin el bit de shift no la apaga: algunos
-        // terminales no mandan modifiers en el clic y romperían el borrado
-        // seguido.
-        if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+        // Con shift se enseña la × de borrado; al soltarlo se apaga también en
+        // clic/arrastre, no solo al mover: si no, la × quedaba armada y un clic
+        // sin shift podía borrar la fila.
+        let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+        if shift {
             self.shift_held = true;
-        } else if matches!(mouse.kind, MouseEventKind::Moved) {
+        } else if matches!(
+            mouse.kind,
+            MouseEventKind::Moved
+                | MouseEventKind::Up(_)
+                | MouseEventKind::Drag(_)
+                | MouseEventKind::Down(_)
+        ) {
             self.shift_held = false;
         }
         match mouse.kind {
@@ -105,6 +111,13 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let action = self.hit.hit(mouse.column, mouse.row).cloned();
                 let Some(action) = action else { return };
+                // El borrado rápido exige Shift real en este clic. El estado
+                // `shift_held` solo decide si se dibuja la ×; nunca autoriza
+                // por sí solo un DELETE.
+                if matches!(&action, Action::LibraryRemove(_)) && !shift {
+                    self.shift_held = false;
+                    return;
+                }
                 match &action {
                     Action::Resize(pane) => {
                         self.resize_drag = Some(*pane);
@@ -148,8 +161,8 @@ impl App {
                             if rect.height > 2 {
                                 let half = rect.height as f32 / 2.0;
                                 let zero = rect.y as f32 + half;
-                                let gain = ((zero - mouse.row as f32) / half * 12.0)
-                                    .clamp(-12.0, 12.0);
+                                let gain =
+                                    ((zero - mouse.row as f32) / half * 12.0).clamp(-12.0, 12.0);
                                 self.cfg.audio.bands[index] = gain.round();
                                 self.audio_changed();
                             }
@@ -167,7 +180,9 @@ impl App {
                         let now = Instant::now();
                         let double = self
                             .last_click
-                            .map(|(at, last)| last == *index && at.elapsed() < Duration::from_millis(320))
+                            .map(|(at, last)| {
+                                last == *index && at.elapsed() < Duration::from_millis(320)
+                            })
                             .unwrap_or(false);
                         self.last_click = Some((now, *index));
                         if double && self.queue_len() > 0 {
@@ -190,7 +205,9 @@ impl App {
                         let now = Instant::now();
                         let double = self
                             .last_click
-                            .map(|(at, last)| last == *index && at.elapsed() < Duration::from_millis(320))
+                            .map(|(at, last)| {
+                                last == *index && at.elapsed() < Duration::from_millis(320)
+                            })
                             .unwrap_or(false);
                         self.last_click = Some((now, *index));
                         if double {
@@ -294,7 +311,6 @@ impl App {
             _ => {}
         }
     }
-
 
     pub fn perform(&mut self, action: Action) {
         match action {
@@ -480,6 +496,7 @@ impl App {
             Action::LyricsSyncReset => self.reset_lyrics_offset(),
             Action::LyricsScroll(delta) => self.scroll_lyrics(delta),
             Action::LyricsFollow => self.follow_current_lyric(),
+            Action::LyricsToggleGenerated => self.toggle_generated_lyrics(),
             Action::LyricsRefetch => self.refetch_lyrics(),
             Action::LyricsSearchOpen => self.open_lyrics_search(),
             Action::LyricsSearchRun => self.run_lyrics_search(),
@@ -575,5 +592,4 @@ impl App {
             }
         }
     }
-
 }

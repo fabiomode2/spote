@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::align::{align_lines, AlignStats, AsrWord};
-use super::LyricLine;
+use super::{LyricLine, Word};
 
 /// Tope de una lectura. Si el modelo se atasca, el worker no se queda esperando
 /// minutos: se mata el proceso y se conserva la letra anterior.
@@ -323,6 +323,162 @@ pub fn align_track_with(
     Some((best_lines, best_confidence))
 }
 
+/// Transcribe el audio completo y agrupa las palabras en líneas. Es la única
+/// ruta que inventa texto: solo se llama si el usuario activó el modo de
+/// letras generadas y no hay una fuente fiable.
+pub fn transcribe_track_with(
+    cfg: &AsrConfig,
+    audio: &Path,
+    duration_s: f64,
+    cancel: Option<&AtomicBool>,
+    deadline: Option<Instant>,
+) -> Option<(Vec<LyricLine>, f64)> {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + TOTAL_BUDGET);
+    if is_cancelled(cancel) || Instant::now() >= deadline {
+        return None;
+    }
+    let mut session = AsrSession::start(cfg)?;
+    let (reads, helper_duration) = session.read(audio, &[(0.0, duration_s)], cancel, deadline)?;
+    let words = reads.into_iter().next()?;
+    let duration = if duration_s > 0.0 {
+        duration_s
+    } else {
+        helper_duration.unwrap_or(0.0)
+    };
+    lines_from_words(&words, duration)
+}
+
+/// Agrupa palabras ASR en versos: corta por silencios, puntuación y longitud.
+/// La confianza es la probabilidad media que devolvió el modelo.
+fn lines_from_words(words: &[AsrWord], duration_s: f64) -> Option<(Vec<LyricLine>, f64)> {
+    let mut words: Vec<&AsrWord> = words
+        .iter()
+        .filter(|word| {
+            word.end_s >= word.start_s
+                && word.start_s.is_finite()
+                && word.end_s.is_finite()
+                && word.probability >= 0.20
+                && !is_asr_noise(&word.text)
+                && !super::align::normalize_word(&word.text).is_empty()
+        })
+        .collect();
+    words.sort_by(|a, b| a.start_s.total_cmp(&b.start_s));
+    if words.len() < 2 {
+        return None;
+    }
+
+    let mut groups: Vec<Vec<&AsrWord>> = Vec::new();
+    let mut current: Vec<&AsrWord> = Vec::new();
+    for word in words {
+        if let Some(previous) = current.last() {
+            let gap = word.start_s - previous.end_s;
+            let chars: usize = current
+                .iter()
+                .map(|word| word.text.chars().count() + 1)
+                .sum();
+            if gap > 0.65 || current.len() >= 8 || chars >= 48 || ends_sentence(&previous.text) {
+                groups.push(std::mem::take(&mut current));
+            }
+        }
+        current.push(word);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    if groups.len() < 2 {
+        return None;
+    }
+
+    let mut total_probability = 0.0f32;
+    let mut count = 0usize;
+    for group in &groups {
+        for word in group {
+            total_probability += word.probability.clamp(0.0, 1.0);
+            count += 1;
+        }
+    }
+    let confidence = if count > 0 {
+        (total_probability / count as f32) as f64
+    } else {
+        0.0
+    };
+
+    let mut lines = Vec::with_capacity(groups.len());
+    let mut previous_line = String::new();
+    for group in groups {
+        let Some(first) = group.first() else { continue };
+        let Some(last) = group.last() else { continue };
+        let start_ms = (first.start_s.max(0.0) * 1000.0) as u64;
+        let end_ms =
+            ((last.end_s.max(first.start_s) * 1000.0) as u64).max(start_ms.saturating_add(250));
+        let text = group
+            .iter()
+            .map(|word| word.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.is_empty() || text == previous_line {
+            continue;
+        }
+        previous_line = text.clone();
+        let words = group
+            .iter()
+            .map(|word| Word {
+                start_ms: (word.start_s.max(0.0) * 1000.0) as u64,
+                end_ms: (word.end_s.max(word.start_s) * 1000.0) as u64,
+                text: word.text.trim().to_string(),
+                optional: false,
+            })
+            .collect();
+        lines.push(LyricLine {
+            start_ms,
+            end_ms,
+            text,
+            words,
+            words_exact: true,
+        });
+    }
+    if lines.len() < 2 {
+        return None;
+    }
+    for index in 0..lines.len().saturating_sub(1) {
+        let next = lines[index + 1].start_ms;
+        let start = lines[index].start_ms;
+        if next > start {
+            let cap = next.saturating_sub(1);
+            lines[index].end_ms = lines[index]
+                .end_ms
+                .min(cap)
+                .max(start.saturating_add(1).min(cap));
+        }
+    }
+    if duration_s > 0.0 {
+        if let Some(last) = lines.last_mut() {
+            let max = (duration_s * 1000.0) as u64;
+            last.end_ms = last.end_ms.min(max.max(last.start_ms.saturating_add(250)));
+        }
+    }
+    Some((lines, confidence.clamp(0.0, 1.0)))
+}
+
+fn ends_sentence(text: &str) -> bool {
+    text.trim_end()
+        .chars()
+        .next_back()
+        .is_some_and(|ch| matches!(ch, '.' | '!' | '?' | '…' | ';' | ':'))
+}
+
+fn is_asr_noise(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return true;
+    }
+    if text.chars().all(|ch| ch == '♪' || ch.is_whitespace()) {
+        return true;
+    }
+    text.starts_with('[') && text.ends_with(']') && !text[1..text.len() - 1].contains('[')
+}
+
 fn crammed(lines: &[LyricLine]) -> usize {
     lines
         .windows(2)
@@ -464,6 +620,34 @@ mod tests {
         assert!(windows
             .iter()
             .any(|(begin, end)| *begin <= 30.0 && *end >= 59.0));
+    }
+
+    #[test]
+    fn generated_lines_group_by_silence_and_skip_noise() {
+        let word = |start: f64, text: &str, probability: f32| AsrWord {
+            start_s: start,
+            end_s: start + 0.4,
+            text: text.to_string(),
+            probability,
+        };
+        let words = vec![
+            word(1.0, "hola", 0.9),
+            word(1.5, "mundo", 0.8),
+            word(2.0, "hermoso", 0.7),
+            word(2.5, "[Música]", 0.99),
+            word(5.0, "la", 0.9),
+            word(5.5, "noche", 0.8),
+            word(6.0, "es", 0.1),
+            word(6.5, "larga", 0.8),
+        ];
+        let (lines, confidence) = lines_from_words(&words, 10.0).expect("hay dos versos");
+        let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, ["hola mundo hermoso", "la noche larga"]);
+        assert!(confidence > 0.7);
+        assert!(lines
+            .windows(2)
+            .all(|pair| pair[0].end_ms <= pair[1].start_ms));
+        assert!(lines.iter().all(|line| line.end_ms > line.start_ms));
     }
 
     #[test]

@@ -1,10 +1,10 @@
-//! Captions de YouTube: solo tiempos sobre una letra ya conocida.
+//! Captions de YouTube: tiempos sobre una letra conocida y, si el usuario
+//! activa las letras generadas, texto de emergencia cuando no hay nada.
 //!
-//! Las captions no son una fuente de texto. Las auto-captions pueden inventar
-//! líneas, cambiar el idioma o repetir fragmentos, así que únicamente se usan
-//! para alinear contra el audio una letra que ya existe (Genius, LRCLIB o
-//! lrcmux). Sin letra conocida se devuelve `None`: mejor sin letra que una
-//! transcripción inventada.
+//! Las auto-captions pueden inventar líneas, cambiar el idioma o repetir
+//! fragmentos, por eso por defecto solo se usan para alinear contra una letra
+//! que ya existe (Genius, LRCLIB o lrcmux). Con `allow_text` se permite la
+//! ruta antigua: construir líneas con el texto del VTT.
 //!
 //! Se buscan vídeos candidatos con `yt-dlp`, se baja su VTT y se alinean las
 //! palabras del VTT contra las líneas conocidas. Si `yt-dlp` no está, el vídeo
@@ -33,9 +33,9 @@ struct Candidate {
     id: String,
 }
 
-/// Busca captions para `track` y los usa **solo** para poner tiempos sobre
-/// `known`. Sin letra conocida devuelve `None`: las captions no son una
-/// fuente de texto.
+/// Busca captions para `track`. Si `known` existe, solo se usan para poner
+/// tiempos. Si no existe y `allow_text` es `true`, se construye un documento
+/// con el texto del VTT (letra inventada); si no, se devuelve `None`.
 ///
 /// Si la pista viene de YouTube con `videoId`, solo se usan las captions de ese
 /// vídeo: son las del audio descargado y no hay que adivinar por búsqueda. Si
@@ -45,14 +45,16 @@ pub async fn fetch(
     track: &TrackRef,
     known: Option<&LyricsDoc>,
     deadline: Instant,
+    allow_text: bool,
 ) -> Option<LyricsDoc> {
-    let Some(known) = known.filter(|doc| doc.lines.len() >= 2) else {
+    let known = known.filter(|doc| doc.lines.len() >= 2);
+    if known.is_none() && !allow_text {
         tracing::debug!(
             target: "spote::lyrics",
             "captions: sin letra conocida no se consultan (no son fuente de texto)"
         );
         return None;
-    };
+    }
     let ytdlp = util::which("yt-dlp")?;
     if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(1) {
         return None;
@@ -65,15 +67,20 @@ pub async fn fetch(
         let Some(texts) = subtitles(&ytdlp, &candidate.id, deadline).await else {
             continue;
         };
-        let Some(vtt) = pick_subtitle(&texts, known) else {
+        let Some(vtt) = pick_subtitle(&texts, known, allow_text) else {
             continue;
         };
         let cues = parse_vtt(&vtt);
-        if let Some(doc) = build_doc(track, known, &cues) {
+        if let Some(doc) = build_doc(track, known, &cues, allow_text) {
             tracing::info!(
                 target: "spote::lyrics",
-                "captions: {} líneas alineadas sobre texto conocido (vídeo {})",
+                "captions: {} líneas {} (vídeo {})",
                 doc.lines.len(),
+                if known.is_some() {
+                    "alineadas sobre texto conocido"
+                } else {
+                    "de texto generado"
+                },
                 candidate.id
             );
             return Some(doc);
@@ -252,11 +259,17 @@ async fn subtitles(ytdlp: &PathBuf, video_id: &str, deadline: Instant) -> Option
 
 /// Elige el VTT que mejor casa con la letra conocida. yt-dlp puede bajar la
 /// pista original y su traducción; el archivo más grande no siempre es el
-/// bueno. Sin letra conocida no se llama: las captions no son fuente de texto.
-fn pick_subtitle(texts: &[String], known: &LyricsDoc) -> Option<String> {
+/// bueno. Sin letra conocida se queda el más largo, pero solo si se permite
+/// generar texto.
+fn pick_subtitle(texts: &[String], known: Option<&LyricsDoc>, allow_text: bool) -> Option<String> {
     if texts.is_empty() {
         return None;
     }
+    let Some(known) = known else {
+        return allow_text
+            .then(|| texts.iter().max_by_key(|text| text.len()).cloned())
+            .flatten();
+    };
     let wanted: HashSet<String> = known
         .lines
         .iter()
@@ -291,14 +304,15 @@ struct Cue {
     words: Vec<AsrWord>,
 }
 
-/// Alinea las palabras del VTT contra `known`. Las líneas devueltas son
-/// siempre las de `known`: los cues solo aportan tiempos. Si no hay alineación
-/// fiable devuelve `None`; nunca se construye un documento con el texto de los
-/// captions.
-fn build_doc(track: &TrackRef, known: &LyricsDoc, cues: &[Cue]) -> Option<LyricsDoc> {
-    if known.lines.len() < 2 {
-        return None;
-    }
+/// Alinea las palabras del VTT contra `known`. Si no hay letra conocida y
+/// `allow_text`, construye líneas con el texto de los cues (letra inventada).
+/// En el modo alineado, las líneas devueltas son siempre las de `known`.
+fn build_doc(
+    track: &TrackRef,
+    known: Option<&LyricsDoc>,
+    cues: &[Cue],
+    allow_text: bool,
+) -> Option<LyricsDoc> {
     let duration_s = track.duration_ms as f64 / 1000.0;
     let words: Vec<AsrWord> = cues
         .iter()
@@ -313,54 +327,130 @@ fn build_doc(track: &TrackRef, known: &LyricsDoc, cues: &[Cue]) -> Option<Lyrics
         return None;
     }
 
-    // `align_lines` calcula contra tiempo de audio: hay que quitar el offset
-    // del documento (hoy siempre 0, pero el parser lo hornea) y las marcas
-    // instrumentales, que no se cantan.
-    let offset = known.offset_ms;
-    let known_lines: Vec<LyricLine> = known
-        .lines
-        .iter()
-        .filter(|line| {
-            let text = line.text.trim();
-            !text.is_empty() && text != "♪" && text.chars().any(|ch| ch.is_alphanumeric())
-        })
-        .map(|line| {
-            let mut line = line.clone();
-            line.start_ms = (line.start_ms as i64 - offset).max(0) as u64;
-            line.end_ms = (line.end_ms as i64 - offset).max(0) as u64;
-            line.words.clear();
-            line.words_exact = false;
-            line
-        })
-        .collect();
-    if known_lines.len() < 2 {
+    if let Some(known) = known.filter(|doc| doc.lines.len() >= 2) {
+        // `align_lines` calcula contra tiempo de audio: hay que quitar el
+        // offset del documento (hoy siempre 0, pero el parser lo hornea) y
+        // las marcas instrumentales, que no se cantan.
+        let offset = known.offset_ms;
+        let known_lines: Vec<LyricLine> = known
+            .lines
+            .iter()
+            .filter(|line| {
+                let text = line.text.trim();
+                !text.is_empty() && text != "♪" && text.chars().any(|ch| ch.is_alphanumeric())
+            })
+            .map(|line| {
+                let mut line = line.clone();
+                line.start_ms = (line.start_ms as i64 - offset).max(0) as u64;
+                line.end_ms = (line.end_ms as i64 - offset).max(0) as u64;
+                line.words.clear();
+                line.words_exact = false;
+                line
+            })
+            .collect();
+        if known_lines.len() < 2 {
+            return None;
+        }
+        let Some((lines, confidence, _)) = align_lines(&known_lines, &words, duration_s) else {
+            tracing::debug!(
+                target: "spote::lyrics",
+                "captions: sin anclas suficientes sobre la letra conocida"
+            );
+            return None;
+        };
+        // Sustituir un LRC ya sincronizado exige más confianza que completar
+        // una letra plana.
+        let minimum = if known.synced { 0.45 } else { 0.35 };
+        if confidence < minimum {
+            tracing::debug!(
+                target: "spote::lyrics",
+                "captions: confianza {confidence:.2} < {minimum:.2}; se conserva la letra conocida"
+            );
+            return None;
+        }
+        return Some(LyricsDoc {
+            lines,
+            synced: true,
+            instrumental: known.instrumental,
+            source: known.source,
+            offset_ms: 0,
+            aligned: false,
+            captions_timed: true,
+        });
+    }
+
+    if !allow_text {
         return None;
     }
-    let Some((lines, confidence, _)) = align_lines(&known_lines, &words, duration_s) else {
-        tracing::debug!(
-            target: "spote::lyrics",
-            "captions: sin anclas suficientes sobre la letra conocida"
-        );
+
+    // Ruta antigua de emergencia: el VTT se convierte en letra. Se eliminan
+    // anotaciones ([Música], [Applause]), líneas vacías y repeticiones
+    // consecutivas típicas de las auto-captions.
+    let mut lines: Vec<LyricLine> = Vec::new();
+    let mut previous_text = String::new();
+    for cue in cues {
+        let text = cue
+            .words
+            .iter()
+            .map(|word| word.text.trim())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let text = collapse(&text);
+        if text.is_empty() || text == previous_text || is_caption_noise(&text) {
+            continue;
+        }
+        previous_text = text.clone();
+        let start_ms = cue
+            .words
+            .first()
+            .map(|word| (word.start_s.max(0.0) * 1000.0) as u64)
+            .unwrap_or(0);
+        let end_ms = cue
+            .words
+            .last()
+            .map(|word| (word.end_s.max(word.start_s) * 1000.0) as u64)
+            .unwrap_or(start_ms.saturating_add(250))
+            .max(start_ms.saturating_add(250));
+        lines.push(LyricLine {
+            start_ms,
+            end_ms,
+            text,
+            ..LyricLine::default()
+        });
+    }
+    if lines.len() < 2 {
         return None;
-    };
-    // Sustituir un LRC ya sincronizado exige más confianza que completar una
-    // letra plana.
-    let minimum = if known.synced { 0.45 } else { 0.35 };
-    if confidence < minimum {
-        tracing::debug!(
-            target: "spote::lyrics",
-            "captions: confianza {confidence:.2} < {minimum:.2}; se conserva la letra conocida"
-        );
-        return None;
+    }
+    lines.sort_by_key(|line| line.start_ms);
+    for index in 0..lines.len().saturating_sub(1) {
+        lines[index].end_ms = lines[index]
+            .end_ms
+            .min(lines[index + 1].start_ms.saturating_sub(40))
+            .max(lines[index].start_ms + 250);
     }
     Some(LyricsDoc {
         lines,
         synced: true,
-        instrumental: known.instrumental,
+        instrumental: false,
         source: LyricsSource::Captions,
         offset_ms: 0,
         aligned: false,
+        captions_timed: false,
     })
+}
+
+/// Anotaciones de auto-captions que no son letra: `[Música]`, `[Applause]`,
+/// `♪` suelto. Si se cuelan, el documento parece tener versos que no existen.
+fn is_caption_noise(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return true;
+    }
+    if text.chars().all(|ch| ch == '♪' || ch.is_whitespace()) {
+        return true;
+    }
+    text.starts_with('[') && text.ends_with(']') && !text[1..text.len() - 1].contains('[')
 }
 
 fn parse_vtt(text: &str) -> Vec<Cue> {
@@ -584,14 +674,16 @@ mod tests {
                 duration_ms: 60_000,
                 ..TrackRef::default()
             },
-            &known,
+            Some(&known),
             &cues,
+            false,
         )
         .expect("la letra conocida se alinea");
         let texts: Vec<&str> = doc.lines.iter().map(|line| line.text.as_str()).collect();
         assert_eq!(texts, vec!["hola mundo hermoso", "la noche es larga"]);
         assert!(doc.synced);
-        assert_eq!(doc.source, LyricsSource::Captions);
+        assert_eq!(doc.source, LyricsSource::Plain);
+        assert!(doc.captions_timed);
     }
 
     #[test]
@@ -622,12 +714,51 @@ mod tests {
                     duration_ms: 60_000,
                     ..TrackRef::default()
                 },
-                &known,
+                Some(&known),
                 &cues,
+                false,
             )
             .is_none(),
             "sin anclas no hay documento: las captions no son letra"
         );
+    }
+
+    #[test]
+    fn generated_captions_only_when_allowed() {
+        let words = |items: &[&str], offset: f64| -> Vec<AsrWord> {
+            items
+                .iter()
+                .enumerate()
+                .map(|(index, word)| AsrWord {
+                    start_s: offset + index as f64 * 0.5,
+                    end_s: offset + 0.4 + index as f64 * 0.5,
+                    text: (*word).to_string(),
+                    probability: 0.8,
+                })
+                .collect()
+        };
+        let cues = [
+            Cue {
+                words: words(&["hola", "mundo", "hermoso"], 1.0),
+            },
+            Cue {
+                words: words(&["la", "noche", "es", "larga"], 5.0),
+            },
+        ];
+        let track = TrackRef {
+            duration_ms: 60_000,
+            ..TrackRef::default()
+        };
+        assert!(
+            build_doc(&track, None, &cues, false).is_none(),
+            "sin permiso no se inventa texto"
+        );
+        let doc = build_doc(&track, None, &cues, true).expect("captions como texto");
+        assert_eq!(doc.source, LyricsSource::Captions);
+        assert!(!doc.captions_timed);
+        assert_eq!(doc.lines.len(), 2);
+        assert_eq!(doc.lines[0].text, "hola mundo hermoso");
+        assert_eq!(doc.lines[1].text, "la noche es larga");
     }
 
     #[tokio::test]
@@ -640,9 +771,11 @@ mod tests {
             duration_ms: 272_000,
             ..TrackRef::default()
         };
-        assert!(fetch(&track, None, Instant::now() + Duration::from_secs(5))
-            .await
-            .is_none());
+        assert!(
+            fetch(&track, None, Instant::now() + Duration::from_secs(5), false,)
+                .await
+                .is_none()
+        );
     }
 
     #[test]
@@ -687,7 +820,7 @@ mod tests {
         let translated = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nbonjour le monde\n";
         let original = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nhola mundo otra frase\n";
         let texts = vec![translated.to_string(), original.to_string()];
-        let picked = pick_subtitle(&texts, &known).unwrap();
+        let picked = pick_subtitle(&texts, Some(&known), false).unwrap();
         assert!(picked.contains("hola mundo"), "{picked}");
     }
 }

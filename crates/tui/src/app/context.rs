@@ -49,9 +49,9 @@ impl App {
     }
 
     /// Quita de la biblioteca la fila `index` de la vista actual. Es el atajo
-    /// rápido (`X` o ⇧clic en la ×). En el filtro «todo» borra la ficha y sus
-    /// fuentes en cascada, pero deja el fichero de audio en disco; dentro de
-    /// una lista solo la saca de esa lista.
+    /// rápido (`X` o ⇧clic en la ×). En «todo»/«recientes»/«descargadas»
+    /// oculta la pista sin borrar historial ni audio; en favoritas quita el
+    /// favorito y dentro de una lista solo la saca de esa lista.
     pub(super) fn remove_library_row(&mut self, index: usize) {
         let Some(row) = self.view.get(index) else {
             return;
@@ -68,7 +68,11 @@ impl App {
             }
             return;
         }
-        match self.lib.delete_track(&key) {
+        if matches!(self.lib_filter, LibFilter::Favorites) {
+            self.toggle_favorite_key(&key);
+            return;
+        }
+        match self.lib.remove_from_library(&key) {
             Ok(_) => {
                 self.stop_current_if_key(&key);
                 self.toast(format!("«{title}» fuera de la biblioteca"), ToastKind::Ok);
@@ -85,19 +89,16 @@ impl App {
 
     pub(super) fn open_context(&mut self, action: &Action) {
         let menu = match action {
-            Action::SelectRow(index) => self
-                .view
-                .get(*index)
-                .map(|row| ContextMenu {
-                    origin: ContextOrigin::Library,
-                    index: *index,
-                    key: row.track.key.clone(),
-                    title: row.track.title.clone(),
-                    artist: row.track.artist.clone(),
-                    url: None,
-                    path: row.path.clone(),
-                    selected: 0,
-                }),
+            Action::SelectRow(index) => self.view.get(*index).map(|row| ContextMenu {
+                origin: ContextOrigin::Library,
+                index: *index,
+                key: row.track.key.clone(),
+                title: row.track.title.clone(),
+                artist: row.track.artist.clone(),
+                url: None,
+                path: row.path.clone(),
+                selected: 0,
+            }),
             Action::SearchPlay(index) => match self.search_entry(*index) {
                 Some(SearchEntry::Track(track_index)) => {
                     self.search.results.get(track_index).map(|item| {
@@ -250,7 +251,9 @@ impl App {
     }
 
     pub(super) fn apply_context(&mut self) {
-        let Some(menu) = self.context.clone() else { return };
+        let Some(menu) = self.context.clone() else {
+            return;
+        };
         let action = menu.action();
         match action {
             ContextAction::Play => {
@@ -304,16 +307,14 @@ impl App {
             ContextAction::Cover => {
                 self.request_spotify_metadata_forced(&menu.key, true);
             }
-            ContextAction::RemoveLibrary => {
-                match self.lib.delete_track(&menu.key) {
-                    Ok(_) => {
-                        self.stop_current_if_key(&menu.key);
-                        self.toast("pista quitada de la biblioteca", ToastKind::Ok);
-                        self.refresh_library();
-                    }
-                    Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
+            ContextAction::RemoveLibrary => match self.lib.remove_from_library(&menu.key) {
+                Ok(()) => {
+                    self.stop_current_if_key(&menu.key);
+                    self.toast("pista oculta de la biblioteca", ToastKind::Ok);
+                    self.refresh_library();
                 }
-            }
+                Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
+            },
             ContextAction::DeleteFile => {
                 let path = menu.path.clone().or_else(|| self.lib.local_path(&menu.key));
                 if let Some(path) = path {
@@ -402,13 +403,13 @@ impl App {
     /// Descarga sin reproducir: lo usa el menú contextual.
     pub(super) fn download_track(&mut self, track: &TrackRef) {
         let hint = track.source_hint.clone().or_else(|| {
-            self.lib.source_hint(&track.key).map(|(provider, id)| {
-                spote_protocol::SourceHint {
+            self.lib
+                .source_hint(&track.key)
+                .map(|(provider, id)| spote_protocol::SourceHint {
                     provider,
                     id,
                     duration_ms: track.duration_ms,
-                }
-            })
+                })
         });
         if let Some(hint) = hint {
             self.lib.upsert_track(track).ok();
@@ -417,10 +418,7 @@ impl App {
             } else {
                 self.downloader.download(
                     &track.key,
-                    DownloadSource::Url(format!(
-                        "https://www.youtube.com/watch?v={}",
-                        hint.id
-                    )),
+                    DownloadSource::Url(format!("https://www.youtube.com/watch?v={}", hint.id)),
                     self.cfg.media_dir(),
                 );
             }

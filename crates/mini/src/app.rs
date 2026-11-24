@@ -15,6 +15,9 @@ use spote_protocol::mini::{
     format_time, mini_socket_path, MiniCommand, MiniSnapshot, MINI_BAND_COUNT,
 };
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Duration;
+
+type ArtFetch = Receiver<(String, u32, u32, Vec<u8>)>;
 
 const BG: Color32 = Color32::from_rgb(7, 8, 11);
 const PANEL: Color32 = Color32::from_rgb(17, 18, 24);
@@ -39,7 +42,7 @@ pub struct MiniApp {
 
     art_source: Option<String>,
     texture: Option<TextureHandle>,
-    art_fetch: Option<Receiver<(u32, u32, Vec<u8>)>>,
+    art_fetch: Option<ArtFetch>,
 
     smooth: [f32; MINI_BAND_COUNT],
     peaks: [f32; MINI_BAND_COUNT],
@@ -115,9 +118,12 @@ impl MiniApp {
             self.seek_preview = None;
             self.play_hold_until = 0.0;
             // La portada puede llegar después del primer snapshot: al cambiar
-            // de pista se fuerza a releerla aunque la ruta se repita.
+            // de pista se fuerza a releerla aunque la ruta se repita. También
+            // se corta cualquier descarga en vuelo: si termina tarde no puede
+            // pintar la portada de la pista anterior sobre la nueva.
             self.art_source = None;
             self.texture = None;
+            self.art_fetch = None;
         }
         self.snapshot_at = now;
         let optimistic_play = now < self.play_hold_until;
@@ -137,7 +143,13 @@ impl MiniApp {
         // Resultado de la descarga remota en curso.
         if let Some(rx) = &self.art_fetch {
             match rx.try_recv() {
-                Ok((width, height, data)) => {
+                Ok((key, width, height, data)) => {
+                    self.art_fetch = None;
+                    if key != self.snapshot.track_key {
+                        // La descarga era de otra pista: se descarta sin tocar
+                        // la textura actual.
+                        return;
+                    }
                     let color_image = egui::ColorImage::from_rgba_unmultiplied(
                         [width as usize, height as usize],
                         &data,
@@ -147,7 +159,6 @@ impl MiniApp {
                         color_image,
                         TextureOptions::LINEAR,
                     ));
-                    self.art_fetch = None;
                 }
                 Err(TryRecvError::Disconnected) => self.art_fetch = None,
                 Err(TryRecvError::Empty) => {}
@@ -188,20 +199,32 @@ impl MiniApp {
                         color_image,
                         TextureOptions::LINEAR,
                     ));
+                    return;
                 }
             }
-            return;
+            // Si la ruta está rota o el fichero no es una imagen, se intenta
+            // la URL remota en vez de quedarse con el vinilo genérico.
         }
 
         let Some(url) = self.snapshot.art_url.clone() else {
             return;
         };
         // Descarga fuera del hilo de egui: una portada remota lenta no debe
-        // congelar la ventana ni la reproducción.
+        // congelar la ventana ni la reproducción. Con timeout para que un
+        // servidor que no responde no deje el hilo colgado para siempre.
+        let Some(client) = art_client() else {
+            // No marques la fuente como intentada si ni siquiera se pudo
+            // construir el cliente: el siguiente frame reintenta.
+            self.art_source = None;
+            return;
+        };
         let (tx, rx) = mpsc::channel();
         self.art_fetch = Some(rx);
+        let key = self.snapshot.track_key.clone();
         std::thread::spawn(move || {
-            let fetched = reqwest::blocking::get(&url)
+            let fetched = client
+                .get(&url)
+                .send()
                 .and_then(|response| response.error_for_status())
                 .ok()
                 .and_then(|response| response.bytes().ok());
@@ -211,7 +234,7 @@ impl MiniApp {
             };
             let image = image.thumbnail(320, 320);
             let rgba = image.to_rgba8();
-            let _ = tx.send((rgba.width(), rgba.height(), rgba.as_raw().to_vec()));
+            let _ = tx.send((key, rgba.width(), rgba.height(), rgba.as_raw().to_vec()));
         });
     }
 
@@ -815,9 +838,9 @@ impl MiniApp {
         let pulse = self.pulse();
 
         let gap = 4.0;
-        // Proporciones del transporte de la TUI: 9 celdas para shuffle, play y
-        // bucle; 7 para anterior/siguiente, con la altura de sus tres filas.
-        let sizes = [44.0, 34.0, 44.0, 34.0, 44.0];
+        // Proporciones del transporte de la TUI: 9 celdas para shuffle, play,
+        // siguiente y bucle; 7 para anterior, con la altura de sus tres filas.
+        let sizes = [44.0, 34.0, 44.0, 44.0, 44.0];
         let total = sizes.iter().sum::<f32>() + gap * (sizes.len() - 1) as f32;
         let volume_w = 144.0;
         let free = (column.width() - volume_w - 14.0 - total).max(0.0);
@@ -1041,6 +1064,13 @@ enum Icon {
     Pause,
     Next,
     Repeat(bool),
+}
+
+fn art_client() -> Option<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()
 }
 
 fn art_rect(content: Rect) -> Rect {

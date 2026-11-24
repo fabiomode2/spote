@@ -201,6 +201,7 @@ pub(crate) fn parse_compat(
                 source: lrcmux_source(),
                 offset_ms: parsed.offset_ms,
                 aligned: false,
+                captions_timed: false,
             }));
         }
     }
@@ -339,6 +340,7 @@ fn build_native_synced(rows: Vec<(Option<u64>, String)>, duration_ms: u64) -> Ly
         source: lrcmux_source(),
         offset_ms: 0,
         aligned: false,
+        captions_timed: false,
     }
 }
 
@@ -361,7 +363,7 @@ fn build_plain_doc(texts: Vec<String>, duration_ms: u64) -> Option<LyricsDoc> {
         lines: Vec::with_capacity(texts.len()),
         synced: false,
         instrumental: false,
-        source: LyricsSource::Plain,
+        source: lrcmux_source(),
         ..LyricsDoc::default()
     };
     for (index, text) in texts.into_iter().enumerate() {
@@ -598,7 +600,7 @@ mod tests {
             .expect("hay letra");
 
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.lines[0].text, "uno");
         assert_eq!(doc.lines[0].start_ms, 0);
@@ -622,7 +624,7 @@ mod tests {
             .expect("hay letra");
 
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
         assert_eq!(doc.lines.len(), 2);
         assert_eq!(doc.lines[0].text, "uno");
         assert_eq!(doc.lines[0].start_ms, 0);
@@ -675,7 +677,7 @@ mod tests {
             .expect("hay letra");
 
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
         assert_eq!(doc.lines.len(), 3);
         assert_eq!(doc.lines[0].start_ms, 0);
         assert_eq!(doc.lines[1].start_ms, 30_000);
@@ -776,7 +778,7 @@ mod tests {
             .expect("respuesta válida")
             .expect("hay letra plana");
         assert!(!doc.synced, "la sync imposible se descarta");
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
     }
 
     #[test]
@@ -798,7 +800,7 @@ mod tests {
             .expect("respuesta válida")
             .expect("hay letra");
         assert!(!doc.synced);
-        assert_eq!(doc.source, LyricsSource::Plain);
+        assert_eq!(doc.source, LyricsSource::Lrcmux);
     }
 
     #[tokio::test]

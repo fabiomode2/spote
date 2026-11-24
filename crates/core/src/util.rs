@@ -47,13 +47,17 @@ fn normalize_impl(text: &str, cut_collab: bool) -> String {
             ')' | ']' => depth = depth.saturating_sub(1),
             _ if depth > 0 => {}
             _ => {
-                let ch = deaccent(ch);
-                if ch.is_alphanumeric() || ch == ' ' {
-                    out.extend(ch.to_lowercase());
-                } else if ch == '&' {
-                    out.push_str(" and ");
-                } else {
-                    out.push(' ');
+                // Primero minúsculas y luego deaccent: al revés, 'Á' se
+                // quedaba como 'á' y no casaba con 'arbol'.
+                for lower in ch.to_lowercase() {
+                    let plain = deaccent(lower);
+                    if plain.is_alphanumeric() || plain == ' ' {
+                        out.push(plain);
+                    } else if plain == '&' {
+                        out.push_str(" and ");
+                    } else {
+                        out.push(' ');
+                    }
                 }
             }
         }
@@ -95,11 +99,13 @@ fn normalize_impl(text: &str, cut_collab: bool) -> String {
     // para no colisionar con cualquier otro título del mismo artista.
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
-        let ch = deaccent(ch);
-        if ch.is_alphanumeric() {
-            out.extend(ch.to_lowercase());
-        } else {
-            out.push(' ');
+        for lower in ch.to_lowercase() {
+            let plain = deaccent(lower);
+            if plain.is_alphanumeric() {
+                out.push(plain);
+            } else {
+                out.push(' ');
+            }
         }
     }
     let tokens: Vec<&str> = out.split_whitespace().collect();
@@ -216,7 +222,9 @@ pub fn elapsed(start: std::time::Instant) -> Duration {
 
 pub fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     let t = t.clamp(0.0, 1.0);
-    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+    (a as f32 + (b as f32 - a as f32) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// Mezcla dos colores RGB.
@@ -261,7 +269,11 @@ pub fn rgb_to_hsv((r, g, b): (u8, u8, u8)) -> (f32, f32, f32) {
         60.0 * ((r - g) / delta + 4.0)
     };
     let hue = if hue < 0.0 { hue + 360.0 } else { hue };
-    let sat = if max <= f32::EPSILON { 0.0 } else { delta / max };
+    let sat = if max <= f32::EPSILON {
+        0.0
+    } else {
+        delta / max
+    };
     (hue, sat, max)
 }
 
@@ -372,11 +384,15 @@ mod tests {
     }
 
     #[test]
+    fn deaccents_uppercase_letters_too() {
+        assert_eq!(normalize("ÁRBOL"), "arbol");
+        assert_eq!(normalize("ÑANDÚ"), "nandu");
+        assert_eq!(normalize("BÍBERON"), normalize("biberon"));
+    }
+
+    #[test]
     fn normalizes_noise_and_accents() {
-        assert_eq!(
-            normalize("Déjà Vu (Official Video) [HD]"),
-            "deja vu"
-        );
+        assert_eq!(normalize("Déjà Vu (Official Video) [HD]"), "deja vu");
         assert_eq!(normalize("AC/DC"), "ac dc");
     }
 

@@ -12,7 +12,7 @@ use spote_core::audio_map::SongMap;
 use spote_core::config::{self, Config};
 use spote_core::downloader::{DownloadEvent, DownloadSource, Downloader, SearchItem};
 use spote_core::library::{Library, TrackRow};
-use spote_core::lyrics::LyricsDoc;
+use spote_core::lyrics::{LyricsDoc, LyricsSource};
 use spote_core::playback::{self, Advance, RepeatMode, ShuffleState};
 use spote_core::player::{Player, PlayerEvent};
 use spote_core::spotify_api::{AlbumSummary, ArtistSummary};
@@ -310,6 +310,8 @@ pub enum Action {
     LyricsScroll(i32),
     /// Vuelve a seguir la línea que suena.
     LyricsFollow,
+    /// Activa/desactiva captions/ASR como fuente de texto.
+    LyricsToggleGenerated,
     /// Borra la caché de la letra de esta pista y la busca de nuevo.
     LyricsRefetch,
     /// Abre la búsqueda manual dentro de la zona de letra.
@@ -425,6 +427,13 @@ pub struct NowPlaying {
     /// volver a reproducir (no basta con unpause/seek).
     pub ended: bool,
     pub message: String,
+}
+
+/// ¿El evento pertenece a una entrada anterior de mpv? Si falta cualquiera
+/// de los dos ids no se puede afirmar nada y se deja pasar (mpv puede no
+/// mandar `playlist_entry_id` en eventos de versiones viejas).
+fn stale_player_entry(entry: i64, current: i64) -> bool {
+    entry != 0 && current != 0 && entry != current
 }
 
 impl Default for NowPlaying {
@@ -2829,7 +2838,23 @@ impl App {
         // 1. Cache SQLite. Si es una letra aproximada y hay audio local, se
         // muestra mientras se reintenta con ASR: las de Genius repartidas a
         // ojo fueron justo el problema de sincronización.
-        if let Ok(Some(row)) = self.lib.lyrics(&track.key) {
+        let cached = self.lib.lyrics(&track.key).ok().flatten();
+        let cached = if let Some(row) = cached {
+            let generated = matches!(
+                LyricsSource::from_label(&row.source),
+                Some(LyricsSource::Captions | LyricsSource::Asr)
+            );
+            if generated && !self.cfg.lyrics.allow_generated {
+                // Se ignora, pero no se borra: si el usuario vuelve a activar
+                // el modo, la caché sigue ahí.
+                None
+            } else {
+                Some(row)
+            }
+        } else {
+            None
+        };
+        if let Some(row) = cached {
             let mut doc = LyricsDoc::from_lrc(&row.lrc, row.synced);
             let lrc_offset = doc.offset_ms;
             // Un offset manual guardado manda; si no hay, conservamos el
@@ -2840,7 +2865,8 @@ impl App {
                 lrc_offset
             };
             doc.aligned = row.aligned;
-            if let Some(source) = spote_core::lyrics::LyricsSource::from_label(&row.source) {
+            doc.captions_timed = row.captions_timed;
+            if let Some(source) = LyricsSource::from_label(&row.source) {
                 doc.source = source;
             }
             // Un alineado de una versión anterior del pipeline pudo dejar
@@ -2857,35 +2883,38 @@ impl App {
                     .filter(|pair| pair[1].start_ms.saturating_sub(pair[0].start_ms) < 400)
                     .count()
                     >= 2;
-            // Las captions antiguas pudieron entrar como texto de emergencia
-            // (auto-captions inventadas). Con la política Genius-first se
-            // revalidan una vez por sesión y se sustituyen si hay mejor letra.
-            let stale_captions = row.source.eq_ignore_ascii_case("captions");
-            // Antes Genius se cacheaba como "plain" y no se distinguía de una
-            // letra plana genérica. Se revalida una vez por sesión.
-            let stale_plain = row.source.eq_ignore_ascii_case("plain") && !row.synced;
+            // La versión va con la fila, no con la etiqueta: una letra nueva
+            // de LRCLIB no se vuelve a pedir en cada sesión solo por ser
+            // "plain" o "captions".
+            let stale_policy = row.policy_version < spote_core::library::LYRICS_POLICY_VERSION;
             self.lyrics_offset_ms = doc.offset_ms;
             let source = doc.source;
+            let captions_timed = doc.captions_timed;
             self.lyrics = Some(doc);
             self.lyrics_status = if stale_alignment || broken_sync {
                 "afinando de nuevo…".to_string()
+            } else if source.is_generated() {
+                source.display_label().to_string()
             } else if row.aligned {
                 "asr".to_string()
+            } else if captions_timed {
+                format!("{} · tiempos", source.label())
             } else {
                 match source {
-                    spote_core::lyrics::LyricsSource::Plain
-                    | spote_core::lyrics::LyricsSource::Estimated => "aprox".to_string(),
+                    LyricsSource::Plain | LyricsSource::Estimated => "aprox".to_string(),
                     source => source.label().to_string(),
                 }
             };
             self.lyrics_key = track.key.clone();
             self.refine_lyrics_words();
             let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-            let manual = row.source == "manual";
+            let manual = row.source.eq_ignore_ascii_case("manual");
+            let local = row.source.eq_ignore_ascii_case("local");
             let needs_audio = ((!row.synced && !row.aligned) || stale_alignment || broken_sync)
                 && !manual
+                && !local
                 && audio.is_some();
-            if (needs_audio || (!manual && (stale_captions || stale_plain)))
+            if (needs_audio || (!manual && !local && stale_policy))
                 && !self.lyrics_retry.contains(&track.key)
             {
                 self.lyrics_retry.insert(track.key.clone());
@@ -2895,7 +2924,7 @@ impl App {
                 } else {
                     "verificando la letra…".into()
                 };
-                let request_track = self.lyrics_track(&track);
+                let request_track = self.lyrics_track(track);
                 self.lyrics_worker
                     .request(request_track, audio, stale_alignment || broken_sync);
             } else {
@@ -2924,7 +2953,7 @@ impl App {
         self.lyrics_loading = true;
         self.lyrics_status = "buscando letra…".into();
         let audio = self.lib.local_path(&track.key).filter(|path| path.exists());
-        let request_track = self.lyrics_track(&track);
+        let request_track = self.lyrics_track(track);
         self.lyrics_worker.request(request_track, audio, false);
     }
 
@@ -3071,9 +3100,14 @@ impl App {
             return;
         }
         let max = doc.lines.len().saturating_sub(1) as f32;
-        self.lyrics_follow = false;
         let base = self.lyrics_scroll.target.round();
         let next = (base + delta as f32).clamp(0.0, max);
+        if (next - base).abs() < f32::EPSILON {
+            // Ya estamos en el tope: no desconectes el seguimiento por un
+            // scroll que no ha movido nada.
+            return;
+        }
+        self.lyrics_follow = false;
         self.lyrics_scroll.set_target(next);
         self.needs_redraw = true;
     }
@@ -3081,10 +3115,58 @@ impl App {
     /// Vuelve a la línea que suena y reactiva el seguimiento.
     pub fn follow_current_lyric(&mut self) {
         self.lyrics_follow = true;
-        let index = self.lyrics_scroll_index.unwrap_or(0);
+        let ms = self.display_position_ms();
+        let index = self
+            .lyrics
+            .as_ref()
+            .and_then(|doc| doc.index_at_target(doc.aligned_ms(ms)))
+            .or(self.lyrics_scroll_index)
+            .unwrap_or(0);
+        self.lyrics_scroll_index = Some(index);
         self.lyrics_scroll.value = index as f32;
         self.lyrics_scroll.velocity = 0.0;
         self.lyrics_scroll.set_target(index as f32);
+        self.needs_redraw = true;
+    }
+
+    /// Activa/desactiva las letras generadas con captions o ASR. Al apagarlo,
+    /// si la letra visible era inventada se descarta y se vuelve a buscar una
+    /// fuente real; al encenderlo, si no había letra, se intenta generar.
+    pub fn toggle_generated_lyrics(&mut self) {
+        let allow = !self.cfg.lyrics.allow_generated;
+        self.cfg.lyrics.allow_generated = allow;
+        self.cfg.save().ok();
+        self.lyrics_worker.set_allow_generated(allow);
+
+        let generated = self
+            .lyrics
+            .as_ref()
+            .is_some_and(|doc| doc.source.is_generated());
+        if !allow && generated {
+            if let Some(track) = self.now.track.clone() {
+                self.lyrics = None;
+                self.lyrics_key.clear();
+                self.lyrics_status.clear();
+                self.lyrics_loading = false;
+                self.lyrics_retry.remove(&track.key);
+                self.lyrics_worker.forget(&track.key);
+                self.reset_lyrics_view();
+                self.load_lyrics(&track);
+            }
+        } else if allow && self.lyrics.is_none() {
+            if let Some(track) = self.now.track.clone() {
+                self.lyrics_loading = false;
+                self.load_lyrics(&track);
+            }
+        }
+        self.toast(
+            if allow {
+                "letras inventadas: on · captions/ASR pueden generar texto"
+            } else {
+                "letras inventadas: off · solo fuentes fiables"
+            },
+            ToastKind::Info,
+        );
         self.needs_redraw = true;
     }
 
@@ -3451,8 +3533,19 @@ impl App {
             return;
         };
         let mut events = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
-            events.push(event);
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                    // Si el canal desborda se pueden perder StartFile/FileLoaded
+                    // y la UI se quedaría ignorando TimePos para siempre. Es
+                    // preferible perder la identidad de la entrada que congelar
+                    // la posición y la letra.
+                    self.now.awaiting_load = false;
+                    self.now.player_entry = 0;
+                }
+                Err(_) => break,
+            }
         }
         if self.follow_spotify {
             // En modo acompañante la posición/duración las manda MPRIS, pero
@@ -3475,8 +3568,13 @@ impl App {
         }
         for event in events {
             match event {
-                PlayerEvent::FileLoaded(entry) => {
+                PlayerEvent::StartFile(entry) => {
+                    // `playlist_entry_id` solo llega en `start-file`/`end-file`.
+                    // Guardarlo aquí es lo que permite descartar EOF/errores de
+                    // la pista anterior después de cargar la siguiente.
                     self.now.player_entry = entry;
+                }
+                PlayerEvent::FileLoaded => {
                     self.now.awaiting_load = false;
                 }
                 PlayerEvent::TimePos(position) => {
@@ -3520,6 +3618,9 @@ impl App {
                     }
                 }
                 PlayerEvent::Duration(duration) => {
+                    if self.now.awaiting_load {
+                        continue;
+                    }
                     let reported = (duration * 1000.0) as u64;
                     if reported > 0 {
                         self.now.stream_duration_ms = reported;
@@ -3536,7 +3637,7 @@ impl App {
                     if self.now.awaiting_load {
                         continue;
                     }
-                    if entry != 0 && self.now.player_entry != 0 && entry != self.now.player_entry {
+                    if stale_player_entry(entry, self.now.player_entry) {
                         continue;
                     }
                     // Un end-file de la pista anterior puede llegar después de
@@ -3556,7 +3657,7 @@ impl App {
                     self.auto_next();
                 }
                 PlayerEvent::Error(message, entry) => {
-                    if entry != 0 && self.now.player_entry != 0 && entry != self.now.player_entry {
+                    if stale_player_entry(entry, self.now.player_entry) {
                         continue;
                     }
                     self.now.awaiting_load = false;
@@ -4049,6 +4150,7 @@ impl App {
         };
         if doc.offset_ms != 0
             || doc.aligned
+            || doc.captions_timed
             || matches!(
                 doc.source,
                 spote_core::lyrics::LyricsSource::Estimated
@@ -4056,6 +4158,7 @@ impl App {
                     | spote_core::lyrics::LyricsSource::Local
                     | spote_core::lyrics::LyricsSource::Manual
                     | spote_core::lyrics::LyricsSource::Captions
+                    | spote_core::lyrics::LyricsSource::Asr
             )
         {
             // Una letra estimada no tiene una rejilla fiable: desplazarla
@@ -4095,10 +4198,41 @@ impl App {
                     self.lyrics_loading = false;
                     match doc {
                         Some(doc) => {
+                            // Si el usuario apagó el modo mientras la petición
+                            // estaba en vuelo, el documento generado se tira.
+                            if doc.source.is_generated() && !self.cfg.lyrics.allow_generated {
+                                self.lyrics_status = "sin letra verificada".into();
+                                continue;
+                            }
+                            // Una letra real no se sustituye por captions/ASR.
+                            let cached_generated = self
+                                .lyrics
+                                .as_ref()
+                                .is_some_and(|old| old.source.is_generated());
+                            if doc.source.is_generated()
+                                && self.lyrics.is_some()
+                                && !cached_generated
+                            {
+                                continue;
+                            }
+                            // Genius manda en el texto: una revalidación que
+                            // devuelve LRCLIB/lrcmux no puede sustituir la
+                            // letra de Genius que ya se está mostrando.
+                            if self
+                                .lyrics
+                                .as_ref()
+                                .is_some_and(|old| old.source == LyricsSource::Genius)
+                                && doc.source != LyricsSource::Genius
+                            {
+                                continue;
+                            }
                             // Un plain de un proveedor de reserva no debe
                             // reemplazar un LRC sincronizado (o alineado) que
-                            // ya se está mostrando.
-                            let incoming = if doc.aligned {
+                            // ya se está mostrando. Las letras generadas valen
+                            // menos que cualquier fuente real.
+                            let incoming = if doc.source.is_generated() {
+                                0
+                            } else if doc.aligned {
                                 3
                             } else if doc.synced {
                                 2
@@ -4112,7 +4246,9 @@ impl App {
                                 self.lyrics
                                     .as_ref()
                                     .map(|old| {
-                                        if old.aligned {
+                                        if old.source.is_generated() {
+                                            0
+                                        } else if old.aligned {
                                             3
                                         } else if old.synced {
                                             2
@@ -4133,6 +4269,7 @@ impl App {
                                         doc.synced,
                                         doc.source.label(),
                                         doc.aligned,
+                                        doc.captions_timed,
                                     )
                                     .ok();
                                 // La versión ASR ya está alineada: arrastrar el
@@ -4143,7 +4280,11 @@ impl App {
                                     self.lib.set_lyrics_offset(&key, 0).ok();
                                 }
                             }
-                            self.lyrics_status = if doc.aligned {
+                            self.lyrics_status = if doc.source.is_generated() {
+                                doc.source.display_label().to_string()
+                            } else if doc.captions_timed {
+                                format!("{} · tiempos", doc.source.label())
+                            } else if doc.aligned {
                                 "asr".to_string()
                             } else {
                                 doc.source.label().to_string()
@@ -4169,15 +4310,19 @@ impl App {
                             self.refine_lyrics_words();
                         }
                         None => {
-                            if self.lib.local_path(&key).is_some() {
-                                self.lyrics_retry.remove(&key);
-                            }
+                            self.lyrics_retry.remove(&key);
                             if self.lyrics_key == key && self.lyrics.is_some() {
                                 self.lyrics_status = error
                                     .unwrap_or_else(|| "letra aproximada (sin mejorar)".into());
                             } else {
                                 self.lyrics = None;
-                                self.lyrics_status = error.unwrap_or_else(|| "sin letra".into());
+                                self.lyrics_status = error.unwrap_or_else(|| {
+                                    if self.cfg.lyrics.allow_generated {
+                                        "sin letra".into()
+                                    } else {
+                                        "sin letra verificada".into()
+                                    }
+                                });
                             }
                         }
                     }
@@ -5174,6 +5319,14 @@ mod tests {
         let unrelated = catalog_match_score(query, "azulado", "superreservao");
         assert!(exact > other, "{exact} vs {other}");
         assert!(exact > unrelated, "{exact} vs {unrelated}");
+    }
+
+    #[test]
+    fn stale_player_entries_only_when_both_ids_are_known() {
+        assert!(!stale_player_entry(0, 7));
+        assert!(!stale_player_entry(7, 0));
+        assert!(!stale_player_entry(7, 7));
+        assert!(stale_player_entry(6, 7));
     }
 
     #[test]

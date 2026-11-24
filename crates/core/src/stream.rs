@@ -494,44 +494,45 @@ fn resolve_job(job: &Job, cache_dir: &Path, cancel: Option<&Cancel>) -> Result<R
         job.hint.as_ref().map(|hint| hint.duration_ms).unwrap_or(0)
     };
 
-    let candidates: Vec<(String, String)> = match hinted_video(job.hint.as_ref()) {
-        Some((id, provider)) => vec![(id, provider)],
-        None => search_ranked(&job.artist, &job.title, wanted_duration, cancel)?
-            .into_iter()
-            .take(4)
-            .map(|candidate| (candidate.id, "youtube".to_string()))
-            .collect(),
+    let hinted = hinted_video(job.hint.as_ref());
+    let first = match &hinted {
+        // El hint exacto se intenta primero, sin buscar: es el audio del que
+        // salió la pista. Si falla, luego se buscan alternativas.
+        Some((id, provider)) => (id.clone(), provider.clone()),
+        None => {
+            let candidate = search(&job.artist, &job.title, wanted_duration, cancel)?;
+            (candidate.id, "youtube".to_string())
+        }
     };
 
-    let mut last_error: Option<anyhow::Error> = None;
-    for (id, provider) in candidates {
-        // Defensa en profundidad: todo ID que llega aquí debe tener ya la forma
-        // exacta de YouTube. La URL de watch se construye siempre desde el ID.
-        if !is_valid_video_id(&id) {
-            last_error = Some(failure(
-                FailureKind::Unavailable,
-                format!("ID de vídeo inválido: {id:?}"),
-            ));
-            continue;
-        }
-        if job.strategy == Strategy::DownloadOnly {
-            match download_audio(&id, &job.key, cache_dir, cancel) {
-                Ok(path) => return Ok(Resolution::File { path, provider, id }),
+    let mut last_error: Option<anyhow::Error>;
+    match try_candidate(&first.0, &first.1, job, cache_dir, cancel) {
+        Ok(resolution) => return Ok(resolution),
+        Err(err) if is_cancelled(&err) => return Err(err),
+        Err(err) => last_error = Some(err),
+    }
+
+    // Solo si el primer candidato falló se paga el coste de buscar más. Antes
+    // de este cambio toda reproducción sin hint hacía las tres variantes de
+    // búsqueda aunque la primera ya hubiera encontrado el tema.
+    if cancel.is_some_and(Cancel::requested) {
+        return Err(cancelled_error());
+    }
+    let mut tried: HashSet<String> = HashSet::new();
+    tried.insert(first.0);
+    if let Ok(alternates) = search_ranked(&job.artist, &job.title, wanted_duration, cancel) {
+        for candidate in alternates.into_iter().take(4) {
+            if !tried.insert(candidate.id.clone()) {
+                continue;
+            }
+            if cancel.is_some_and(Cancel::requested) {
+                return Err(cancelled_error());
+            }
+            match try_candidate(&candidate.id, "youtube", job, cache_dir, cancel) {
+                Ok(resolution) => return Ok(resolution),
                 Err(err) if is_cancelled(&err) => return Err(err),
                 Err(err) => last_error = Some(err),
             }
-            continue;
-        }
-        match resolve_media_url(&watch_url(&id), cancel) {
-            Ok(url) => return Ok(Resolution::Url(StreamSource { url, provider, id })),
-            Err(err) if is_cancelled(&err) => return Err(err),
-            Err(stream_error) => match download_audio(&id, &job.key, cache_dir, cancel) {
-                Ok(path) => return Ok(Resolution::File { path, provider, id }),
-                Err(err) if is_cancelled(&err) => return Err(err),
-                Err(download_error) => {
-                    last_error = Some(combined_failure(stream_error, download_error));
-                }
-            },
         }
     }
     Err(last_error.unwrap_or_else(|| {
@@ -540,6 +541,49 @@ fn resolve_job(job: &Job, cache_dir: &Path, cancel: Option<&Cancel>) -> Result<R
             "ningún candidato de YouTube se pudo reproducir ni descargar",
         )
     }))
+}
+
+/// Intenta un único vídeo: primero `-g`, y si falla la descarga directa a
+/// caché. La cancelación se propaga sin probar más candidatos.
+fn try_candidate(
+    id: &str,
+    provider: &str,
+    job: &Job,
+    cache_dir: &Path,
+    cancel: Option<&Cancel>,
+) -> Result<Resolution> {
+    // Defensa en profundidad: todo ID que llega aquí debe tener ya la forma
+    // exacta de YouTube. La URL de watch se construye siempre desde el ID.
+    if !is_valid_video_id(id) {
+        return Err(failure(
+            FailureKind::Unavailable,
+            format!("ID de vídeo inválido: {id:?}"),
+        ));
+    }
+    if job.strategy == Strategy::DownloadOnly {
+        return download_audio(id, &job.key, cache_dir, cancel).map(|path| Resolution::File {
+            path,
+            provider: provider.to_string(),
+            id: id.to_string(),
+        });
+    }
+    match resolve_media_url(&watch_url(id), cancel) {
+        Ok(url) => Ok(Resolution::Url(StreamSource {
+            url,
+            provider: provider.to_string(),
+            id: id.to_string(),
+        })),
+        Err(err) if is_cancelled(&err) => Err(err),
+        Err(stream_error) => match download_audio(id, &job.key, cache_dir, cancel) {
+            Ok(path) => Ok(Resolution::File {
+                path,
+                provider: provider.to_string(),
+                id: id.to_string(),
+            }),
+            Err(err) if is_cancelled(&err) => Err(err),
+            Err(download_error) => Err(combined_failure(stream_error, download_error)),
+        },
+    }
 }
 
 /// ¿La entrada de caché corresponde al hint actual? Un id vacío (caché de
@@ -620,8 +664,9 @@ fn query_variants(artist: &str, title: &str) -> Vec<String> {
     out
 }
 
-/// Busca un vídeo para una pista y devuelve su ID. La usa el `Downloader`
-/// para no mantener un segundo matcher más laxo que el de reproducción.
+/// Busca un vídeo para una pista y devuelve su ID. La usan diagnósticos y
+/// tests; la reproducción usa [`search`] + [`try_candidate`] y el Downloader
+/// usa [`find_video_ids`].
 pub fn find_video_id(artist: &str, title: &str, duration_ms: u64) -> Result<String> {
     search(artist, title, duration_ms, None).map(|candidate| candidate.id)
 }
@@ -757,9 +802,9 @@ fn search_ranked(
         if any_search_succeeded {
             return Err(failure(FailureKind::NoMatch, format!("«{first_query}»")));
         }
-        return Err(last_error.unwrap_or_else(|| {
-            failure(FailureKind::NoMatch, format!("«{first_query}»"))
-        }));
+        return Err(
+            last_error.unwrap_or_else(|| failure(FailureKind::NoMatch, format!("«{first_query}»")))
+        );
     }
     Ok(ranked)
 }
@@ -928,7 +973,10 @@ fn ranked_candidates(
     if scored.is_empty() {
         return Vec::new();
     }
-    if scored.iter().any(|(_, candidate)| candidate.duration_ms > 0) {
+    if scored
+        .iter()
+        .any(|(_, candidate)| candidate.duration_ms > 0)
+    {
         scored.retain(|(_, candidate)| candidate.duration_ms > 0);
     }
     scored.sort_by(|(score_a, a), (score_b, b)| {
@@ -1727,11 +1775,7 @@ pub fn ytdlp_available() -> bool {
 
 /// Ejecuta yt-dlp y convierte timeout, cancelación, salida no cero y stderr en
 /// errores accionables.
-fn run_ytdlp(
-    args: &[String],
-    timeout: Duration,
-    cancel: Option<&Cancel>,
-) -> Result<CommandOutput> {
+fn run_ytdlp(args: &[String], timeout: Duration, cancel: Option<&Cancel>) -> Result<CommandOutput> {
     let bin = ytdlp_bin();
     let output = run_with_timeout(&bin, args, timeout, cancel)?;
 
@@ -2327,8 +2371,9 @@ mod tests {
     #[test]
     #[ignore = "diagnóstico manual con red"]
     fn live_finds_biberon_symbol_song() {
-        let id = find_video_id("Biberon", "(_8(|) (feat. superreservao)", 139_000)
+        let ids = find_video_ids("Biberon", "(_8(|) (feat. superreservao)", 139_000, 4)
             .expect("debe encontrar el tema de Biberon");
+        let id = ids.first().expect("algún candidato");
         eprintln!("biberon id={id}");
         assert_eq!(id, "MV0tXxfV5kg");
     }
@@ -2349,13 +2394,8 @@ mod tests {
             "Biberon - Topic",
             140_000,
         );
-        let score = score_candidate(
-            &correct,
-            "Biberon",
-            "(_8(|) (feat. superreservao)",
-            139_000,
-        )
-        .expect("el tema simbólico debe puntuar");
+        let score = score_candidate(&correct, "Biberon", "(_8(|) (feat. superreservao)", 139_000)
+            .expect("el tema simbólico debe puntuar");
         assert!(score >= MIN_MATCH_SCORE, "score={score}");
 
         let other = candidate(
@@ -2364,13 +2404,9 @@ mod tests {
             "zz (z)",
             110_000,
         );
-        assert!(score_candidate(
-            &other,
-            "Biberon",
-            "(_8(|) (feat. superreservao)",
-            139_000
-        )
-        .is_none());
+        assert!(
+            score_candidate(&other, "Biberon", "(_8(|) (feat. superreservao)", 139_000).is_none()
+        );
 
         let nightcore = candidate(
             "B9Ci7K5-jos",

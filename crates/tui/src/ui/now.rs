@@ -345,8 +345,12 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
         return;
     }
     let Some(doc) = &app.lyrics else {
-        let message = if app.lyrics_status.is_empty() {
-            "sin letra".to_string()
+        let message = if app.lyrics_status.is_empty() || app.lyrics_status == "sin letra" {
+            if app.cfg.lyrics.allow_generated {
+                "sin letra".to_string()
+            } else {
+                "sin letra verificada".to_string()
+            }
         } else {
             app.lyrics_status.clone()
         };
@@ -385,6 +389,40 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
             );
             app.hit.add(chip, Action::LyricsSearchOpen);
         }
+        // El toggle también debe estar disponible cuando no hay letra: es
+        // justo el momento en el que se quiere probar a generarla.
+        if rect.height > 5 {
+            let inv_width = 5u16;
+            let inv = Rect::new(
+                rect.x + (rect.width.saturating_sub(inv_width)) / 2,
+                rect.y + rect.height / 2 + 2,
+                inv_width,
+                1,
+            );
+            let hover = app.hover == Some(Action::LyricsToggleGenerated);
+            let active = app.cfg.lyrics.allow_generated;
+            fill(
+                buf,
+                inv,
+                if hover {
+                    pal.surface_alt
+                } else if active {
+                    mix(pal.surface, pal.primary, 0.32)
+                } else {
+                    pal.surface
+                },
+            );
+            text_at(
+                buf,
+                inv,
+                "inv",
+                Style::new()
+                    .fg(color(if active { pal.text } else { pal.muted }))
+                    .add_modifier(Modifier::BOLD),
+                Alignment::Center,
+            );
+            app.hit.add(inv, Action::LyricsToggleGenerated);
+        }
         return;
     };
     if doc.is_empty() {
@@ -401,7 +439,11 @@ pub(super) fn draw_lyrics(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Pal
     // Barra de controles de la letra: zoom, ajuste fino del offset (motor de
     // sync real, persistido por pista), scroll manual y vuelta a la línea
     // actual. Solo ocupa una fila.
-    let toolbar_h = if rect.height >= 8 && rect.width >= 34 { 1 } else { 0 };
+    let toolbar_h = if rect.height >= 8 && rect.width >= 34 {
+        1
+    } else {
+        0
+    };
     if toolbar_h > 0 {
         let bar = Rect::new(rect.x, rect.y, rect.width, 1);
         draw_lyrics_toolbar(app, buf, bar, pal);
@@ -586,13 +628,62 @@ fn draw_lyrics_toolbar(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
     let mut x = rect.x + 1;
     let right = (rect.x + rect.width).saturating_sub(1);
 
-    lyric_chip(app, buf, pal, &mut x, right, rect.y, "A−", Action::LyricsZoom(-1));
-    lyric_chip(app, buf, pal, &mut x, right, rect.y, "A+", Action::LyricsZoom(1));
+    lyric_chip(
+        app,
+        buf,
+        pal,
+        &mut x,
+        right,
+        rect.y,
+        "A−",
+        Action::LyricsZoom(-1),
+    );
+    lyric_chip(
+        app,
+        buf,
+        pal,
+        &mut x,
+        right,
+        rect.y,
+        "A+",
+        Action::LyricsZoom(1),
+    );
     if x + 1 < right {
         put(buf, x, rect.y, "│", color(pal.border_dim), None);
         x += 2;
     }
-    for (label, delta) in [("−250", -250i64), ("−100", -100), ("+100", 100), ("+250", 250)] {
+    // Modo "letras inventadas" y volver a la línea actual. Van antes de los
+    // offsets para que sigan visibles en columnas estrechas.
+    lyric_chip(
+        app,
+        buf,
+        pal,
+        &mut x,
+        right,
+        rect.y,
+        "inv",
+        Action::LyricsToggleGenerated,
+    );
+    lyric_chip(
+        app,
+        buf,
+        pal,
+        &mut x,
+        right,
+        rect.y,
+        "⟲",
+        Action::LyricsFollow,
+    );
+    if x + 1 < right {
+        put(buf, x, rect.y, "│", color(pal.border_dim), None);
+        x += 2;
+    }
+    for (label, delta) in [
+        ("−250", -250i64),
+        ("−100", -100),
+        ("+100", 100),
+        ("+250", 250),
+    ] {
         if x >= right {
             break;
         }
@@ -631,18 +722,6 @@ fn draw_lyrics_toolbar(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palett
         "↓",
         Action::LyricsScroll(1),
     );
-    if !app.lyrics_follow {
-        lyric_chip(
-            app,
-            buf,
-            pal,
-            &mut x,
-            right,
-            rect.y,
-            "⟲",
-            Action::LyricsFollow,
-        );
-    }
     if app.now.track.is_some() {
         lyric_chip(
             app,
@@ -684,7 +763,13 @@ fn lyric_chip(
     }
     let rect = Rect::new(*x, y, width, 1);
     let hover = app.hover == Some(action.clone());
-    let active = app.lyrics_offset_ms != 0 && matches!(&action, Action::LyricsSyncReset);
+    let active = match &action {
+        Action::LyricsSyncReset => app.lyrics_offset_ms != 0,
+        Action::LyricsToggleGenerated => app.cfg.lyrics.allow_generated,
+        // Resaltado cuando estás en manual y el botón sirve para volver.
+        Action::LyricsFollow => !app.lyrics_follow,
+        _ => false,
+    };
     fill(
         buf,
         rect,
@@ -722,7 +807,13 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
     let Some(state) = app.lyrics_search.clone() else {
         return;
     };
-    fill_soft(buf, rect, mix(pal.bg_deep, pal.surface, 0.55), 0.55, pal.bg_deep);
+    fill_soft(
+        buf,
+        rect,
+        mix(pal.bg_deep, pal.surface, 0.55),
+        0.55,
+        pal.bg_deep,
+    );
     let inner = Rect::new(
         rect.x + 1,
         rect.y,
@@ -750,12 +841,26 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
     let query_y = inner.y + 1;
     let query_rect = Rect::new(inner.x, query_y, inner.width, 1);
     fill(buf, query_rect, mix(pal.surface, pal.primary, 0.10));
-    put(buf, query_rect.x + 1, query_y, "⌕", color(pal.primary), None);
+    put(
+        buf,
+        query_rect.x + 1,
+        query_y,
+        "⌕",
+        color(pal.primary),
+        None,
+    );
     let mut query = state.query.clone();
     truncate_chars(&mut query, inner.width.saturating_sub(6) as usize);
-    put(buf, query_rect.x + 3, query_y, &query, color(pal.text), None);
-    let cursor_x = (query_rect.x + 3 + query.chars().count() as u16)
-        .min(query_rect.x + query_rect.width - 1);
+    put(
+        buf,
+        query_rect.x + 3,
+        query_y,
+        &query,
+        color(pal.text),
+        None,
+    );
+    let cursor_x =
+        (query_rect.x + 3 + query.chars().count() as u16).min(query_rect.x + query_rect.width - 1);
     put(buf, cursor_x, query_y, "▏", color(pal.primary), None);
     if !state.status.is_empty() && inner.width > 30 {
         let mut status = state.status.clone();
@@ -784,9 +889,7 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
         0
     };
     let results = state.results.clone();
-    let selected = state
-        .selected
-        .min(results.len().saturating_sub(1));
+    let selected = state.selected.min(results.len().saturating_sub(1));
     if results.is_empty() {
         let message = if state.loading {
             "buscando…".to_string()
@@ -806,11 +909,9 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
         // Lista de candidatos.
         let row_h = 2u16;
         let visible = (body_h / row_h).max(1) as usize;
-        let start = selected.saturating_sub(visible / 2).min(
-            results
-                .len()
-                .saturating_sub(visible.min(results.len())),
-        );
+        let start = selected
+            .saturating_sub(visible / 2)
+            .min(results.len().saturating_sub(visible.min(results.len())));
         for (offset, candidate) in results.iter().skip(start).take(visible).enumerate() {
             let index = start + offset;
             let y = body_y + offset as u16 * row_h;
@@ -821,12 +922,12 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
             } else if app.hover == Some(Action::LyricsSearchSelect(index)) {
                 fill(buf, row, pal.surface_alt);
             }
-            let sync = if candidate.synced { "♪ sync" } else { "· texto" };
-            let header = format!(
-                "{}  ·  {}",
-                candidate.title.trim(),
-                candidate.artist.trim()
-            );
+            let sync = if candidate.synced {
+                "♪ sync"
+            } else {
+                "· texto"
+            };
+            let header = format!("{}  ·  {}", candidate.title.trim(), candidate.artist.trim());
             let mut header = header;
             truncate_chars(&mut header, results_w.saturating_sub(10) as usize);
             put(
@@ -834,7 +935,11 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
                 row.x + 2,
                 y,
                 &header,
-                color(if index == selected { pal.text } else { pal.muted }),
+                color(if index == selected {
+                    pal.text
+                } else {
+                    pal.muted
+                }),
                 None,
             );
             let meta = format!(
@@ -863,12 +968,7 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
         // Previsualización de la candidata seleccionada.
         if two_cols {
             if let Some(candidate) = results.get(selected) {
-                let preview = Rect::new(
-                    inner.x + results_w + 2,
-                    body_y,
-                    preview_w,
-                    body_h,
-                );
+                let preview = Rect::new(inner.x + results_w + 2, body_y, preview_w, body_h);
                 fill_soft(
                     buf,
                     preview,
@@ -942,15 +1042,7 @@ fn draw_lyrics_search(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette
             }
             let chip = Rect::new(x, footer_y, w, 1);
             let hover = app.hover == Some(action.clone());
-            fill(
-                buf,
-                chip,
-                if hover {
-                    pal.surface_alt
-                } else {
-                    pal.surface
-                },
-            );
+            fill(buf, chip, if hover { pal.surface_alt } else { pal.surface });
             text_at(
                 buf,
                 chip,
@@ -1155,14 +1247,13 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 
 /// Igual que [`wrap_text`] pero con las celdas del karaoke, conservando el
 /// estado de encendido de cada carácter.
-fn wrap_cells(cells: Vec<(char, f32, bool, bool)>, width: usize, max_rows: usize) -> Vec<Vec<(char, f32, bool, bool)>> {
+fn wrap_cells(
+    cells: Vec<(char, f32, bool, bool)>,
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<(char, f32, bool, bool)>> {
     type Cell = (char, f32, bool, bool);
-    fn flush(
-        rows: &mut Vec<Vec<Cell>>,
-        current: &mut Vec<Cell>,
-        word: Vec<Cell>,
-        width: usize,
-    ) {
+    fn flush(rows: &mut Vec<Vec<Cell>>, current: &mut Vec<Cell>, word: Vec<Cell>, width: usize) {
         if word.is_empty() {
             return;
         }
