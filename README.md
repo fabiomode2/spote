@@ -59,8 +59,11 @@ la propia TUI.
 - **Discos guardados**: pestaña `discos` con todos los álbumes de la
   biblioteca agrupados por artista, portadas y un buscador propio (`/`).
   `X` o ⇧clic en la × oculta una pista de la biblioteca sin borrar el audio
-  ni su historial; en favoritas quita el corazón. `spote dedupe` fusiona
-  duplicados de forma explícita, con `--dry-run` y backup previo.
+  ni su historial; en favoritas quita el corazón. `d` sobre una lista y `X`
+  sobre un disco piden confirmación y quitan **todas sus canciones** de la
+  biblioteca (el audio sigue en disco); en la lista, `t` permite conservarlas.
+  `spote dedupe` fusiona duplicados de forma explícita, con `--dry-run` y
+  backup previo.
 - **Wrapped**: `W` abre un resumen de escucha con horas, reproducciones,
   artistas, canciones, discos y actividad por meses. `a` alterna entre el
   año actual y todo el tiempo. Manteniendo `shift` aparece una `×` en cada
@@ -86,6 +89,12 @@ la propia TUI.
   audio ni rutas locales.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
   `config.toml`.
+
+Los vídeos con verificación de edad necesitan una cuenta de YouTube ya
+verificada. Si configuras `[stream] cookies_from_browser`, spote reintenta el
+streaming y la descarga con las cookies de ese navegador. Para este tipo de
+vídeos también hace falta tener la edad verificada en la cuenta; sin eso
+YouTube no entrega ningún formato.
 
 ## Atajos
 
@@ -140,6 +149,10 @@ mosaic_beat = true     # salta con el bombo
 [player]
 streaming = true       # resuelve YouTube y suena mientras descarga
 stream_cache = true    # guarda la copia local al terminar (tras unos segundos de escucha)
+
+[stream]
+cookies_from_browser = ""  # firefox | chrome | brave | chromium | edge
+cookies_file = ""          # cookies.txt exportado; tiene prioridad si no está vacío
 
 [playback]
 repeat = "off"         # off | all | one

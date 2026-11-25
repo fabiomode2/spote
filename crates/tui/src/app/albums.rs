@@ -15,6 +15,75 @@ impl App {
         self.refresh_view();
     }
 
+    /// Pide confirmación para quitar el disco seleccionado de la biblioteca.
+    pub(super) fn open_delete_album(&mut self) {
+        let album = self
+            .album_open
+            .clone()
+            .or_else(|| self.albums.get(self.album_selected).cloned());
+        let Some(album) = album else {
+            self.toast("elige un disco para quitarlo", ToastKind::Warn);
+            return;
+        };
+        self.open_delete_album_named(&album.album, &album.artist);
+    }
+
+    pub(super) fn open_delete_album_named(&mut self, album: &str, artist: &str) {
+        let tracks = self
+            .lib
+            .album_tracks(album, artist)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        if tracks == 0 {
+            self.toast("ese disco ya no está en la biblioteca", ToastKind::Warn);
+            return;
+        }
+        self.overlay = Overlay::ConfirmDeleteAlbum {
+            album: album.to_string(),
+            artist: artist.to_string(),
+            tracks,
+        };
+    }
+
+    /// `x` en el tracklist: quita la pista seleccionada de la biblioteca.
+    pub(super) fn remove_album_track_selected(&mut self) {
+        let Some(row) = self.selected_row().cloned() else {
+            self.toast("no hay una pista seleccionada", ToastKind::Warn);
+            return;
+        };
+        if self.hide_library_keys(std::slice::from_ref(&row.track.key)) > 0 {
+            self.toast(
+                format!("«{}» fuera de la biblioteca", row.track.title),
+                ToastKind::Ok,
+            );
+        } else {
+            self.toast("esa pista ya no estaba en la biblioteca", ToastKind::Warn);
+        }
+    }
+
+    /// `x` en la ficha remota de un álbum: quita la pista si está en la
+    /// biblioteca. Si solo es un resultado de catálogo, no hay nada que hacer.
+    pub(super) fn remove_album_page_track(&mut self) {
+        let Some(page) = self.album_page.clone() else {
+            return;
+        };
+        let Some(track) = page.tracks.get(page.selected).cloned() else {
+            return;
+        };
+        if self.lib.track_by_key(&track.key).ok().flatten().is_none() {
+            self.toast("esa pista aún no está en la biblioteca", ToastKind::Warn);
+            return;
+        }
+        if self.hide_library_keys(std::slice::from_ref(&track.key)) > 0 {
+            self.toast(
+                format!("«{}» fuera de la biblioteca", track.title),
+                ToastKind::Ok,
+            );
+        } else {
+            self.toast("esa pista ya no estaba en la biblioteca", ToastKind::Warn);
+        }
+    }
+
     /// Abre el álbum por nombre desde cualquier nombre clicable de la UI.
     pub(super) fn open_album_by_name(&mut self, album: &str, artist: &str) {
         // La pestaña de álbumes ya no existe: en «ahora» o biblioteca
@@ -94,7 +163,8 @@ impl App {
         self.album_page_status = format!("cargando {}…", album.title);
         self.detail = Some(Detail::Album);
         self.overlay = Overlay::None;
-        self.meta_worker.album(album.provider.clone(), album.id.clone());
+        self.meta_worker
+            .album(album.provider.clone(), album.id.clone());
     }
 
     pub(super) fn open_album_info(&mut self, info: spote_core::spotify_api::AlbumInfo) {
@@ -143,7 +213,11 @@ impl App {
     }
 
     pub(super) fn handle_album_key(&mut self, key: KeyEvent) -> bool {
-        let len = self.album_page.as_ref().map(|page| page.tracks.len()).unwrap_or(0);
+        let len = self
+            .album_page
+            .as_ref()
+            .map(|page| page.tracks.len())
+            .unwrap_or(0);
         match key.code {
             KeyCode::Esc | KeyCode::Backspace => self.close_detail(),
             KeyCode::Up | KeyCode::Char('k') => {
@@ -171,6 +245,15 @@ impl App {
             }
             KeyCode::Char('d') => self.download_album_page(),
             KeyCode::Char('s') => self.save_album_page_playlist(),
+            KeyCode::Char('x') => self.remove_album_page_track(),
+            KeyCode::Char('X') => {
+                if let Some(page) = &self.album_page {
+                    if page.provider == "local" {
+                        let (album, artist) = (page.title.clone(), page.artist.clone());
+                        self.open_delete_album_named(&album, &artist);
+                    }
+                }
+            }
             _ => return false,
         }
         true
@@ -187,10 +270,7 @@ impl App {
             .tracks
             .iter()
             .map(|track| {
-                let path = self
-                    .lib
-                    .local_path(&track.key)
-                    .filter(|path| path.exists());
+                let path = self.lib.local_path(&track.key).filter(|path| path.exists());
                 QueueEntry {
                     track: track.clone(),
                     path,
@@ -213,7 +293,9 @@ impl App {
     }
 
     pub(super) fn download_album_page(&mut self) {
-        let Some(page) = self.album_page.clone() else { return };
+        let Some(page) = self.album_page.clone() else {
+            return;
+        };
         let mut queued = 0;
         for track in page.tracks {
             if self
@@ -241,7 +323,9 @@ impl App {
     }
 
     pub(super) fn save_album_page_playlist(&mut self) {
-        let Some(page) = self.album_page.clone() else { return };
+        let Some(page) = self.album_page.clone() else {
+            return;
+        };
         if page.tracks.is_empty() {
             self.toast("el álbum no tiene pistas", ToastKind::Warn);
             return;
@@ -281,14 +365,17 @@ impl App {
         if self.albums.is_empty() {
             return;
         }
-        let next = (self.album_selected as i32 + delta)
-            .clamp(0, self.albums.len() as i32 - 1) as usize;
+        let next =
+            (self.album_selected as i32 + delta).clamp(0, self.albums.len() as i32 - 1) as usize;
         self.album_selected = next;
     }
 
     /// Baja todas las pistas que falten del álbum seleccionado.
     pub(super) fn download_album(&mut self) {
-        let album = self.album_open.clone().or_else(|| self.albums.get(self.album_selected).cloned());
+        let album = self
+            .album_open
+            .clone()
+            .or_else(|| self.albums.get(self.album_selected).cloned());
         let Some(album) = album else { return };
         let tracks = self
             .lib
@@ -318,7 +405,10 @@ impl App {
 
     /// Guarda el álbum como una lista local con todas sus pistas.
     pub(super) fn save_album_playlist(&mut self) {
-        let album = self.album_open.clone().or_else(|| self.albums.get(self.album_selected).cloned());
+        let album = self
+            .album_open
+            .clone()
+            .or_else(|| self.albums.get(self.album_selected).cloned());
         let Some(album) = album else { return };
         let tracks = self
             .lib
@@ -331,12 +421,10 @@ impl App {
         let name = format!("{} — {}", album.artist, album.album);
         let description = format!("álbum · {} pistas", tracks.len());
         let cover_url = album.art_url.as_deref();
-        let id = match self.lib.create_playlist_full(
-            &name,
-            &description,
-            None,
-            cover_url,
-        ) {
+        let id = match self
+            .lib
+            .create_playlist_full(&name, &description, None, cover_url)
+        {
             Ok(id) => id,
             Err(err) => {
                 self.toast(format!("no pude crear la lista: {err}"), ToastKind::Error);

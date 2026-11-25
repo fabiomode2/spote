@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -73,6 +73,57 @@ const STRONG_MATCH_SCORE: i32 = 130;
 const ERROR_LINES: usize = 4;
 /// Timeout de socket que se pasa a yt-dlp.
 const SOCKET_TIMEOUT_SECS: &str = "15";
+
+/// Cookies opcionales para vídeos con restricción de edad o cuenta. Se
+/// configuran una vez al arrancar desde `Config`; el proceso de búsqueda no
+/// las usa, solo la resolución y la descarga.
+static YTDLP_AUTH: OnceLock<YtDlpAuth> = OnceLock::new();
+
+#[derive(Debug, Clone, Default)]
+struct YtDlpAuth {
+    cookies_from_browser: String,
+    cookies_file: String,
+}
+
+/// Configura las cookies de yt-dlp. La primera llamada manda; las siguientes
+/// se ignoran para no cambiar la autenticación a mitad de sesión.
+pub fn configure_ytdlp_auth(cookies_from_browser: &str, cookies_file: &str) {
+    let auth = YtDlpAuth {
+        cookies_from_browser: cookies_from_browser.trim().to_string(),
+        cookies_file: cookies_file.trim().to_string(),
+    };
+    if auth.cookies_from_browser.is_empty() && auth.cookies_file.is_empty() {
+        return;
+    }
+    let _ = YTDLP_AUTH.set(auth);
+}
+
+fn ytdlp_auth() -> &'static YtDlpAuth {
+    YTDLP_AUTH.get_or_init(YtDlpAuth::default)
+}
+
+pub fn has_ytdlp_auth() -> bool {
+    let auth = ytdlp_auth();
+    !auth.cookies_from_browser.is_empty() || !auth.cookies_file.is_empty()
+}
+
+/// Argumentos de autenticación para cualquier invocación de yt-dlp.
+pub fn ytdlp_auth_args() -> Vec<String> {
+    auth_args(ytdlp_auth())
+}
+
+fn auth_args(auth: &YtDlpAuth) -> Vec<String> {
+    if !auth.cookies_file.is_empty() {
+        vec!["--cookies".to_string(), auth.cookies_file.clone()]
+    } else if !auth.cookies_from_browser.is_empty() {
+        vec![
+            "--cookies-from-browser".to_string(),
+            auth.cookies_from_browser.clone(),
+        ]
+    } else {
+        Vec::new()
+    }
+}
 
 /// Orden de reintento de clientes de YouTube. Los embebidos suelen servir
 /// audio sin PO token para vídeos de discográficas; los web normales son el
@@ -1522,21 +1573,30 @@ fn deaccent(ch: char) -> char {
 /// si falla, una sola vez con los clientes web habituales.
 fn resolve_media_url(watch_url: &str, cancel: Option<&Cancel>) -> Result<String> {
     let mut last_error: Option<anyhow::Error> = None;
-
-    for client in PLAYER_CLIENTS {
-        if cancel.is_some_and(Cancel::requested) {
-            return Err(cancelled_error());
+    // Primero sin cookies (rápido); si el vídeo pide edad/cuenta y hay
+    // navegador configurado, se reintenta con su sesión.
+    for with_auth in [false, true] {
+        if with_auth && !has_ytdlp_auth() {
+            break;
         }
-        let args = stream_args(watch_url, client);
-        let result = run_ytdlp(&args, COMMAND_TIMEOUT, cancel).and_then(|output| {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            parse_media_url(&stdout)
-        });
+        if with_auth {
+            tracing::info!("stream: reintentando el vídeo con cookies del navegador");
+        }
+        for client in PLAYER_CLIENTS {
+            if cancel.is_some_and(Cancel::requested) {
+                return Err(cancelled_error());
+            }
+            let args = stream_args(watch_url, client, with_auth);
+            let result = run_ytdlp(&args, COMMAND_TIMEOUT, cancel).and_then(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                parse_media_url(&stdout)
+            });
 
-        match result {
-            Ok(url) => return Ok(url),
-            Err(err) if is_cancelled(&err) => return Err(err),
-            Err(err) => last_error = Some(err),
+            match result {
+                Ok(url) => return Ok(url),
+                Err(err) if is_cancelled(&err) => return Err(err),
+                Err(err) => last_error = Some(err),
+            }
         }
     }
 
@@ -1549,8 +1609,8 @@ fn resolve_media_url(watch_url: &str, cancel: Option<&Cancel>) -> Result<String>
 }
 
 /// Argumentos de una resolución `-g`. `--` separa la URL de las opciones.
-fn stream_args(watch_url: &str, client: &str) -> Vec<String> {
-    vec![
+fn stream_args(watch_url: &str, client: &str, with_auth: bool) -> Vec<String> {
+    let mut args = vec![
         "-g".to_string(),
         "-f".to_string(),
         "bestaudio/best".to_string(),
@@ -1558,11 +1618,17 @@ fn stream_args(watch_url: &str, client: &str) -> Vec<String> {
         "--no-warnings".to_string(),
         "--socket-timeout".to_string(),
         SOCKET_TIMEOUT_SECS.to_string(),
+    ];
+    if with_auth {
+        args.extend(ytdlp_auth_args());
+    }
+    args.extend([
         "--extractor-args".to_string(),
         client.to_string(),
         "--".to_string(),
         watch_url.to_string(),
-    ]
+    ]);
+    args
 }
 
 /// Toma la primera línea `https://` de la salida de `-g` y valida su host.
@@ -1686,7 +1752,7 @@ fn download_args(base: &Path, watch_url: &str, client: &str) -> Vec<String> {
     // `media_dir` puede contener `%`: yt-dlp lo interpreta como plantilla.
     // Solo se escapa para `-o`; `find_downloaded` sigue usando `base` literal.
     let template = base.display().to_string().replace('%', "%%");
-    vec![
+    let mut args = vec![
         "--no-playlist".to_string(),
         "-f".to_string(),
         "bestaudio/best".to_string(),
@@ -1702,9 +1768,10 @@ fn download_args(base: &Path, watch_url: &str, client: &str) -> Vec<String> {
         client.to_string(),
         "-o".to_string(),
         format!("{template}.%(ext)s"),
-        "--".to_string(),
-        watch_url.to_string(),
-    ]
+    ];
+    args.extend(ytdlp_auth_args());
+    args.extend(["--".to_string(), watch_url.to_string()]);
+    args
 }
 
 /// Nombre estable y seguro para un fichero de caché. Incluye un hash corto
@@ -1925,7 +1992,7 @@ impl FailureKind {
     fn advice(self) -> &'static str {
         match self {
             Self::AgeGated => {
-                "el vídeo pide verificación de edad; usa cookies de una cuenta verificada con --cookies-from-browser"
+                "el vídeo pide verificar la edad en la cuenta de YouTube; inicia sesión y verifica la edad en el navegador, y configura cookies_from_browser en [stream]"
             }
             Self::GeoBlocked => {
                 "el vídeo no está disponible en tu región; prueba una VPN o actualiza yt-dlp"
@@ -2380,6 +2447,32 @@ mod tests {
 
     #[test]
     #[ignore = "diagnóstico manual con red"]
+    fn live_finds_rubito_hood() {
+        let id = find_video_id("superreservao", "Rubito Hood", 132_000)
+            .expect("debe encontrar Rubito Hood");
+        eprintln!("rubito hood id={id}");
+        assert_eq!(id, "VTQfym7wOVQ");
+    }
+
+    #[test]
+    #[ignore = "diagnóstico manual con red y cookies"]
+    fn live_age_gated_video_with_browser_cookies() {
+        configure_ytdlp_auth("firefox", "");
+        let result = resolve_media_url(&watch_url("VTQfym7wOVQ"), None);
+        eprintln!("age-gated result: {result:?}");
+        // Si la cuenta del navegador está verificada, debe devolver una URL;
+        // si no, el error tiene que nombrar la verificación de edad.
+        if let Err(err) = result {
+            let message = format!("{err:#}");
+            assert!(
+                message.contains("AgeGated") || message.contains("age"),
+                "error inesperado: {message}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnóstico manual con red"]
     fn live_finds_superreservao_visualizer() {
         let id = find_video_id("Superreservao", "Alma en pena", 118_000)
             .expect("debe encontrar el visualizer");
@@ -2689,7 +2782,7 @@ mod tests {
     #[test]
     fn stream_args_validate_ids_and_terminate_options() {
         let watch = watch_url("dQw4w9WgXcQ");
-        let args = stream_args(&watch, PLAYER_CLIENTS[0]);
+        let args = stream_args(&watch, PLAYER_CLIENTS[0], false);
         assert!(args.contains(&"-g".to_string()));
         assert!(args
             .windows(2)
@@ -2699,6 +2792,27 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0].as_str() == "--extractor-args" && pair[1].as_str() == PLAYER_CLIENTS[0]
         }));
+    }
+
+    #[test]
+    fn auth_args_prefer_cookie_file_over_browser() {
+        let browser = YtDlpAuth {
+            cookies_from_browser: "firefox".into(),
+            cookies_file: String::new(),
+        };
+        assert_eq!(
+            auth_args(&browser),
+            vec!["--cookies-from-browser".to_string(), "firefox".to_string()]
+        );
+        let file = YtDlpAuth {
+            cookies_from_browser: "firefox".into(),
+            cookies_file: "/tmp/cookies.txt".into(),
+        };
+        assert_eq!(
+            auth_args(&file),
+            vec!["--cookies".to_string(), "/tmp/cookies.txt".to_string()]
+        );
+        assert!(auth_args(&YtDlpAuth::default()).is_empty());
     }
 
     #[test]

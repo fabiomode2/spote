@@ -175,6 +175,16 @@ pub enum Overlay {
     ConfirmDeletePlaylist {
         id: i64,
         name: String,
+        /// Canciones visibles de la lista, para avisar del alcance.
+        tracks: usize,
+        /// `true`: además de la lista, las canciones salen de la biblioteca.
+        remove_tracks: bool,
+    },
+    /// Quitar un disco completo de la biblioteca (sus canciones, no el audio).
+    ConfirmDeleteAlbum {
+        album: String,
+        artist: String,
+        tracks: usize,
     },
     /// Elegir lista destino para la pista seleccionada.
     AddToPlaylist {

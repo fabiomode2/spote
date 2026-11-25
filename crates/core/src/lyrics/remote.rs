@@ -2401,6 +2401,32 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "diagnóstico manual con red: Genius/LRCLIB/YouTube"]
+    async fn live_rubito_hood_lyrics() {
+        let track = TrackRef {
+            key: "diag:rubito-hood".into(),
+            title: "Rubito Hood".into(),
+            artist: "superreservao".into(),
+            album: Some("xki music".into()),
+            duration_ms: 132_000,
+            ..TrackRef::default()
+        };
+        let service = crate::lyrics::LyricsService::new();
+        let doc = service
+            .fetch(&track)
+            .await
+            .expect("sin error de red")
+            .expect("debe haber letra");
+        eprintln!(
+            "rubito hood: fuente={} synced={} lineas={}",
+            doc.source.label(),
+            doc.synced,
+            doc.lines.len()
+        );
+        assert!(doc.lines.len() >= 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnóstico manual con red: Genius/LRCLIB/YouTube"]
     async fn diagnose_superreservao_sources() {
         let service = crate::lyrics::LyricsService::new();
         for (title, artist) in [

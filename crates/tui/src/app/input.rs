@@ -528,6 +528,17 @@ impl App {
                     self.open_delete_playlist();
                 }
             }
+            KeyCode::Char('x' | 'X') if self.tab == Tab::Albums => {
+                if self.album_open.is_some() {
+                    if upper {
+                        self.open_delete_album();
+                    } else {
+                        self.remove_album_track_selected();
+                    }
+                } else {
+                    self.open_delete_album();
+                }
+            }
             KeyCode::Char('x' | 'X') if upper && self.tab == Tab::Library => {
                 self.remove_library_selected()
             }

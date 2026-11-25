@@ -224,6 +224,11 @@ fn run_import(args: &Args) -> Result<()> {
     let Some(target) = args.rest.first() else {
         anyhow::bail!("uso: spote import <url-o-uri-de-spotify> [--download] [--dry-run]");
     };
+    let cfg = Config::load();
+    spote_core::stream::configure_ytdlp_auth(
+        &cfg.stream.cookies_from_browser,
+        &cfg.stream.cookies_file,
+    );
 
     println!("resolviendo catálogo de Spotify …");
     let catalog = catalog::fetch(target)?;
@@ -676,6 +681,10 @@ fn run_tui(args: Args) -> Result<()> {
     init_tracing();
 
     let mut cfg = Config::load();
+    spote_core::stream::configure_ytdlp_auth(
+        &cfg.stream.cookies_from_browser,
+        &cfg.stream.cookies_file,
+    );
     if args.follow {
         cfg.ui.follow_spotify = true;
     }
