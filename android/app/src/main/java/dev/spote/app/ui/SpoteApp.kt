@@ -772,10 +772,10 @@ private fun TrackActionsSheet(
                 icon = if (track.downloaded) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
                 text = when {
                     track.downloaded -> "Ya está descargada"
-                    track.remoteUrl != null -> "Descargar"
+                    track.isRemote -> "Descargar"
                     else -> "Ya está en el dispositivo"
                 },
-                enabled = !track.downloaded && track.remoteUrl != null,
+                enabled = !track.downloaded && track.isRemote,
                 onClick = onDownload,
             )
             SheetAction(
