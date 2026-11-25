@@ -19,7 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.spote.app.model.Album
@@ -49,7 +49,7 @@ fun ArtistScreen(
 ) {
     val colors = LocalSpoteColors.current
     val sorted = tracks.sortedByDescending { it.durationMs }
-    val cover = tracks.firstOrNull()?.cover ?: albums.firstOrNull()?.cover
+    val cover = albums.firstOrNull()?.cover ?: tracks.firstOrNull()?.cover
     val totalMs = tracks.sumOf { it.durationMs }
 
     AppBackground(accentStart = cover?.start ?: colors.coverStart) {
@@ -59,37 +59,51 @@ fun ArtistScreen(
         ) {
             item(key = "topbar") { TopBar(onBack = onBack) }
             item(key = "header") {
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                        .padding(horizontal = 22.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     if (cover != null) {
-                        CoverArt(cover = cover, size = 150.dp, corner = 75.dp, labelSize = 42.sp)
+                        CoverArt(
+                            cover = cover,
+                            size = 132.dp,
+                            corner = 18.dp,
+                            labelSize = 34.sp,
+                        )
                     }
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        text = name,
-                        style = MaterialTheme.typography.headlineLarge,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        textAlign = TextAlign.Center,
-                    )
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        text = "${tracks.size} canciones · ${albums.size} álbumes · ${formatTotal(totalMs)}",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = colors.accent,
-                    )
-                    Spacer(Modifier.height(16.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(5.dp),
                     ) {
+                        Text(
+                            text = "ARTISTA",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.accent,
+                        )
+                        Text(
+                            text = name,
+                            style = MaterialTheme.typography.headlineLarge,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = buildString {
+                                append("${tracks.size} canciones")
+                                if (albums.isNotEmpty()) append(" · ${albums.size} álbumes")
+                                if (totalMs > 0L) append(" · ${formatTotal(totalMs)}")
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(6.dp))
                         PlayButton(
                             isPlaying = false,
                             onClick = { sorted.firstOrNull()?.let(onPlayTrack) },
-                            size = 56.dp,
+                            size = 46.dp,
                         )
                     }
                 }
@@ -100,7 +114,7 @@ fun ArtistScreen(
                     EmptyState(
                         icon = Icons.Rounded.Search,
                         title = "Sin canciones",
-                        text = "Este artista no tiene pistas en tu biblioteca.",
+                        text = "Este artista no tiene pistas en tu biblioteca ni en el catálogo.",
                     )
                 }
             } else {
@@ -112,32 +126,24 @@ fun ArtistScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             items(albums, key = { it.id }) { album ->
-                                AlbumCard(album = album, onClick = { onOpenAlbum(album) }, width = 148.dp)
+                                AlbumCard(
+                                    album = album,
+                                    onClick = { onOpenAlbum(album) },
+                                    width = 148.dp,
+                                )
                             }
                         }
                     }
                 }
-
-                item(key = "popular-title") { SectionHeader(title = "Populares") }
-                items(sorted.take(5), key = { it.key }) { track ->
+                item(key = "tracks-title") { SectionHeader(title = "Canciones") }
+                items(sorted, key = { it.key }) { track ->
                     TrackRow(
                         track = track,
                         onClick = { onPlayTrack(track) },
                         onMore = { onMore(track) },
                         isPlaying = player.track?.key == track.key,
+                        showAlbum = true,
                     )
-                }
-
-                if (sorted.size > 5) {
-                    item(key = "all-title") { SectionHeader(title = "Todas las canciones") }
-                    items(sorted.drop(5), key = { it.key }) { track ->
-                        TrackRow(
-                            track = track,
-                            onClick = { onPlayTrack(track) },
-                            onMore = { onMore(track) },
-                            isPlaying = player.track?.key == track.key,
-                        )
-                    }
                 }
             }
         }

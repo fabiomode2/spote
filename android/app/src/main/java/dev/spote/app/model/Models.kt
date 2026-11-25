@@ -30,8 +30,12 @@ data class Track(
     val streamMimeType: String? = null,
     /** Página web de origen (YouTube/SoundCloud) para resolverla al reproducir. */
     val remoteUrl: String? = null,
+    /** Consulta de catálogo (artista + título) para resolver el audio bajo demanda. */
+    val remoteQuery: String? = null,
     val sourceLabel: String? = null,
-)
+) {
+    val isRemote: Boolean get() = remoteUrl != null || remoteQuery != null
+}
 
 @Immutable
 data class Album(
@@ -95,8 +99,10 @@ data class SearchState(
     val results: List<Track> = emptyList(),
     val albums: List<Album> = emptyList(),
     val artists: List<String> = emptyList(),
-    /** Resultados on-device de YouTube, separados de la biblioteca local. */
+    /** Resultados del catálogo, separados de la biblioteca local. */
     val remoteResults: List<Track> = emptyList(),
+    val remoteAlbums: List<Album> = emptyList(),
+    val remoteArtists: List<String> = emptyList(),
     val remoteLoading: Boolean = false,
     val remoteError: String? = null,
 )

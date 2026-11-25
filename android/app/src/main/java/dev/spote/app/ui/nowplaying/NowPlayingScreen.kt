@@ -14,24 +14,28 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
-import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,6 +54,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import dev.spote.app.model.PlayerState
 import dev.spote.app.model.RepeatMode
 import dev.spote.app.ui.components.AppBackground
@@ -62,9 +68,6 @@ import dev.spote.app.ui.components.PlayButton
 import dev.spote.app.ui.theme.LocalSpoteColors
 import dev.spote.app.util.asTrackDuration
 import kotlinx.coroutines.launch
-
-private const val LyricsHeaderIndex = 4
-private const val LyricsStartIndex = 5
 
 @Composable
 fun NowPlayingScreen(
@@ -85,28 +88,26 @@ fun NowPlayingScreen(
     val track = player.track ?: return
     val colors = LocalSpoteColors.current
     val openArtist = LocalArtistNavigation.current
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    var lyricsPinned by remember { mutableStateOf(false) }
+    var showLyrics by remember { mutableStateOf(false) }
     val activeIndex = remember(player.positionMs, player.lyrics, player.lyricsSynced) {
         if (!player.lyricsSynced) -1
         else player.lyrics.indexOfLast { it.startMs <= player.positionMs }
     }
-
-    LaunchedEffect(listState.firstVisibleItemIndex) {
-        if (listState.firstVisibleItemIndex >= LyricsHeaderIndex) lyricsPinned = true
+    val currentLine = if (player.lyricsSynced) {
+        player.lyrics.getOrNull(activeIndex)
+    } else {
+        player.lyrics.firstOrNull()
     }
-    LaunchedEffect(activeIndex, lyricsPinned, player.lyricsSynced) {
-        if (lyricsPinned && player.lyricsSynced && activeIndex >= 0) {
-            listState.animateScrollToItem(
-                (LyricsStartIndex + activeIndex - 2).coerceAtLeast(LyricsStartIndex),
-            )
-        }
+    val nextLine = if (player.lyricsSynced) {
+        player.lyrics.getOrNull(activeIndex + 1)
+    } else {
+        player.lyrics.getOrNull(1)
     }
 
     AppBackground(accentStart = track.cover.start) {
         BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-            val coverSize = minOf(maxWidth - 64.dp, 300.dp).coerceAtLeast(170.dp)
+            val coverSize = minOf(maxWidth - 64.dp, maxHeight * 0.34f, 300.dp)
+                .coerceAtLeast(160.dp)
 
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(
@@ -146,7 +147,6 @@ fun NowPlayingScreen(
                 }
 
                 LazyColumn(
-                    state = listState,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -183,22 +183,36 @@ fun NowPlayingScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = track.artist,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = if (openArtist != null) {
-                                        colors.accent
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = if (openArtist != null) {
-                                        Modifier.clickable { openArtist(track.artist) }
-                                    } else {
-                                        Modifier
-                                    },
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = track.artist,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = if (openArtist != null) {
+                                            colors.accent
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = if (openArtist != null) {
+                                            Modifier.clickable { openArtist(track.artist) }
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
+                                    track.album?.takeIf { it.isNotBlank() }?.let { album ->
+                                        Text(
+                                            text = "· $album",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
                             }
                             LikeButton(favorite = track.favorite, onClick = onLike)
                         }
@@ -283,100 +297,22 @@ fun NowPlayingScreen(
                             )
                         }
                     }
-                    item(key = "lyrics-header") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 26.dp, end = 20.dp, top = 14.dp, bottom = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = "LETRA",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.accent,
-                            )
-                            Spacer(Modifier.weight(1f))
-                            Text(
-                                text = when {
-                                    player.lyrics.isEmpty() -> ""
-                                    player.lyricsSource == "genius" -> "Genius · sin tiempos"
-                                    player.lyricsSynced -> "Sincronizada"
-                                    else -> player.lyricsSource
-                                        ?.replaceFirstChar { it.uppercase() }
-                                        .orEmpty()
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    if (player.lyrics.isEmpty()) {
-                        item(key = "lyrics-empty") {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 26.dp, vertical = 16.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                            ) {
-                                Text(
-                                    text = if (player.lyricsLoading) "Buscando letra…" else "Sin letra",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                TextButton(onClick = onRetryLyrics) {
-                                    Text("Buscar otra vez")
-                                }
-                            }
-                        }
-                    } else {
-                        itemsIndexed(
-                            player.lyrics,
-                            key = { index, line -> "$index-${line.startMs}" },
-                        ) { index, line ->
-                            val active = player.lyricsSynced && index == activeIndex
-                            Text(
-                                text = line.text,
-                                style = if (active) {
-                                    MaterialTheme.typography.titleLarge
-                                } else {
-                                    MaterialTheme.typography.bodyLarge
-                                },
-                                color = if (active) {
-                                    colors.accent
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 26.dp, vertical = 5.dp)
-                                    .then(
-                                        if (player.lyricsSynced) {
-                                            Modifier.clickable { onSeek(line.startMs) }
-                                        } else {
-                                            Modifier
-                                        },
-                                    ),
-                            )
-                        }
+                    item(key = "lyrics-preview") {
+                        LyricsPreview(
+                            player = player,
+                            currentLine = currentLine?.text,
+                            nextLine = nextLine?.text,
+                            onClick = { showLyrics = true },
+                            onRetry = onRetryLyrics,
+                        )
                     }
                     item(key = "actions") {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 14.dp),
+                                .padding(horizontal = 10.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.SpaceEvenly,
                         ) {
-                            LabelledAction(
-                                icon = Icons.Rounded.Subtitles,
-                                label = "Letra",
-                                onClick = {
-                                    lyricsPinned = true
-                                    scope.launch {
-                                        listState.animateScrollToItem(LyricsHeaderIndex)
-                                    }
-                                },
-                                tint = MaterialTheme.colorScheme.onBackground,
-                            )
                             LabelledAction(
                                 icon = Icons.Rounded.QueueMusic,
                                 label = "Cola",
@@ -392,6 +328,260 @@ fun NowPlayingScreen(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    if (showLyrics) {
+        LyricsOverlay(
+            player = player,
+            onDismiss = { showLyrics = false },
+            onSeek = onSeek,
+            onRetry = onRetryLyrics,
+        )
+    }
+}
+
+@Composable
+private fun LyricsPreview(
+    player: PlayerState,
+    currentLine: String?,
+    nextLine: String?,
+    onClick: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    val colors = LocalSpoteColors.current
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .clickable(onClick = onClick),
+        color = colors.surface,
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "LETRA",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.accent,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = when {
+                        player.lyrics.isEmpty() && player.lyricsLoading -> "Buscando…"
+                        player.lyrics.isEmpty() -> "Sin letra"
+                        player.lyricsSource == "genius" -> "Sin tiempos"
+                        player.lyricsSynced -> "Sincronizada"
+                        else -> player.lyricsSource?.replaceFirstChar { it.uppercase() }.orEmpty()
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(4.dp))
+                Icons.Rounded.KeyboardArrowUp.let { icon ->
+                    androidx.compose.material3.Icon(
+                        imageVector = icon,
+                        contentDescription = "Abrir letra",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+            if (currentLine != null) {
+                Text(
+                    text = currentLine,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (nextLine != null) {
+                    Text(
+                        text = nextLine,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } else if (!player.lyricsLoading) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Sin letra para esta pista.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = onRetry) { Text("Buscar") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LyricsOverlay(
+    player: PlayerState,
+    onDismiss: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onRetry: () -> Unit,
+) {
+    val colors = LocalSpoteColors.current
+    val track = player.track ?: return
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val activeIndex = remember(player.positionMs, player.lyrics, player.lyricsSynced) {
+        if (!player.lyricsSynced) -1
+        else player.lyrics.indexOfLast { it.startMs <= player.positionMs }
+    }
+    val startIndex = 1
+    LaunchedEffect(activeIndex) {
+        if (player.lyricsSynced && activeIndex >= 0) {
+            listState.animateScrollToItem((startIndex + activeIndex - 2).coerceAtLeast(startIndex))
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = colors.background,
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .height(56.dp)
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircleIconButton(
+                        icon = Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = "Cerrar letra",
+                        onClick = onDismiss,
+                        size = 40.dp,
+                        iconSize = 26.dp,
+                        tint = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = track.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = track.artist,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.accent,
+                            maxLines = 1,
+                        )
+                    }
+                    Spacer(Modifier.size(40.dp))
+                }
+
+                if (player.lyrics.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = if (player.lyricsLoading) "Buscando letra…" else "Sin letra",
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            TextButton(onClick = onRetry) { Text("Buscar otra vez") }
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(
+                            start = 28.dp,
+                            end = 28.dp,
+                            top = 18.dp,
+                            bottom = 32.dp,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                    ) {
+                        item(key = "overlay-header") {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "LETRA",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.accent,
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    text = when {
+                                        player.lyricsSource == "genius" -> "Genius · sin tiempos"
+                                        player.lyricsSynced -> "Sincronizada"
+                                        else -> player.lyricsSource.orEmpty()
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        itemsIndexed(
+                            player.lyrics,
+                            key = { index, line -> "$index-${line.startMs}" },
+                        ) { index, line ->
+                            val active = player.lyricsSynced && index == activeIndex
+                            Text(
+                                text = line.text,
+                                style = if (active) {
+                                    MaterialTheme.typography.headlineSmall
+                                } else {
+                                    MaterialTheme.typography.titleLarge
+                                },
+                                color = if (active) {
+                                    colors.accent
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                        alpha = if (player.lyricsSynced) 0.62f else 0.9f,
+                                    )
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (player.lyricsSynced) {
+                                            Modifier.clickable {
+                                                scope.launch { onSeek(line.startMs) }
+                                            }
+                                        } else {
+                                            Modifier
+                                        },
+                                    ),
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "Toca una línea para saltar",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 24.dp, vertical = 10.dp),
+                )
             }
         }
     }

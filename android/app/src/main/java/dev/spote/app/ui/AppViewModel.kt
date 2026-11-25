@@ -9,6 +9,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.spote.app.BuildConfig
 import dev.spote.app.artwork.ArtworkResolver
+import dev.spote.app.data.CatalogResult
+import dev.spote.app.data.DeezerCatalog
+import dev.spote.app.data.FavoriteStore
 import dev.spote.app.data.MockData
 import dev.spote.app.data.EmptySpoteRepository
 import dev.spote.app.data.MockSpoteRepository
@@ -37,12 +40,14 @@ import dev.spote.app.playback.PlaybackUiState
 import dev.spote.app.remote.RemoteDownloader
 import dev.spote.app.remote.RemoteResolver
 import dev.spote.app.remote.RemoteTrack
+import dev.spote.app.remote.ResolvedAudio
 import dev.spote.app.rust.RustBridge
 import dev.spote.app.rust.coverFor
 import java.io.File
 import java.net.URI
 import java.util.Locale
 import java.util.UUID
+import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -82,8 +87,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val player: PlayerState,
     )
 
-    private val remoteCache = object : LinkedHashMap<String, List<Track>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Track>>): Boolean =
+    private val remoteCache = object : LinkedHashMap<String, CatalogResult>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CatalogResult>): Boolean =
             size > 40
     }
 
@@ -114,6 +119,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         SearchHistory.init(application)
+        FavoriteStore.init(application)
         viewModelScope.launch {
             SearchHistory.queries.collect { recent ->
                 _state.update { it.copy(search = it.search.copy(recentQueries = recent)) }
@@ -189,6 +195,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 current.copy(
                     search = local.copy(
                         remoteResults = current.search.remoteResults,
+                        remoteAlbums = current.search.remoteAlbums,
+                        remoteArtists = current.search.remoteArtists,
                         remoteLoading = current.search.remoteLoading,
                         remoteError = null,
                         recentQueries = current.search.recentQueries,
@@ -200,8 +208,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         val normalized = trimmed.lowercase(Locale.ROOT)
         remoteCache[normalized]?.let { cached ->
+            val refreshed = withFavorites(cached)
             _state.update {
-                it.copy(search = it.search.copy(remoteResults = cached, remoteLoading = false))
+                it.copy(
+                    search = it.search.copy(
+                        remoteResults = refreshed.tracks,
+                        remoteAlbums = refreshed.albums,
+                        remoteArtists = refreshed.artists,
+                        remoteLoading = false,
+                    ),
+                )
             }
             return
         }
@@ -211,13 +227,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if (_state.value.search.query.trim() != trimmed) return@launch
             _state.update { it.copy(search = it.search.copy(remoteLoading = true)) }
             val startedAt = System.currentTimeMillis()
-            val result = runCatching { RemoteResolver.search(trimmed, 20) }
-            val tracks = result.getOrNull().orEmpty().map(::remoteToTrack)
-            if (result.isSuccess) remoteCache[normalized] = tracks
+            val result = runCatching { DeezerCatalog.search(trimmed, 25) }
+            val catalog = withFavorites(result.getOrDefault(CatalogResult()))
+            if (result.isSuccess) remoteCache[normalized] = catalog
             ActionLog.log(
-                "search.remote",
+                "search.catalog",
                 "query" to trimmed,
-                "results" to tracks.size,
+                "tracks" to catalog.tracks.size,
+                "albums" to catalog.albums.size,
+                "artists" to catalog.artists.size,
                 "ms" to (System.currentTimeMillis() - startedAt),
                 "error" to result.exceptionOrNull()?.message,
             )
@@ -225,13 +243,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (current.search.query.trim() != trimmed) return@update current
                 current.copy(
                     search = current.search.copy(
-                        remoteResults = tracks,
+                        remoteResults = catalog.tracks,
+                        remoteAlbums = catalog.albums,
+                        remoteArtists = catalog.artists,
                         remoteLoading = false,
                         remoteError = result.exceptionOrNull()?.message,
                     ),
                 )
             }
         }
+    }
+
+    private fun withFavorites(catalog: CatalogResult): CatalogResult {
+        if (catalog.tracks.isEmpty()) return catalog
+        val tracks = catalog.tracks.map { track ->
+            track.copy(favorite = FavoriteStore.isFavorite(track.key))
+        }
+        val byKey = tracks.associateBy { it.key }
+        val albums = catalog.albums.map { album ->
+            album.copy(tracks = album.tracks.map { byKey[it.key] ?: it })
+        }
+        return catalog.copy(tracks = tracks, albums = albums)
     }
 
     fun commitSearch(query: String) {
@@ -250,20 +282,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun clearSearchHistory() {
         SearchHistory.clear()
     }
-
-    private fun remoteToTrack(remote: RemoteTrack): Track = Track(
-        key = remote.key,
-        title = remote.title,
-        artist = remote.artist,
-        album = remote.album,
-        durationMs = remote.durationMs,
-        cover = coverFor(remote.title, null, remote.thumbnailUrl),
-        sourceLabel = when (remote.source) {
-            RemoteTrack.SOURCE_SOUNDCLOUD -> "SoundCloud"
-            else -> "YouTube"
-        },
-        remoteUrl = remote.webUrl,
-    )
 
     fun setFilter(filter: LibraryFilter) {
         _state.update { it.copy(library = it.library.copy(filter = filter)) }
@@ -290,29 +308,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cacheArtist(name: String) {
         val current = _state.value
-        val key = name.lowercase(Locale.ROOT)
+        val key = normalizeName(name)
         artistTracksCache[key] = (
             current.library.tracks +
                 current.home.recent +
                 current.search.results +
-                current.search.remoteResults
+                current.search.remoteResults +
+                current.player.queue
             )
-            .filter { it.artist.equals(name, ignoreCase = true) }
+            .filter { normalizeName(it.artist) == key }
             .distinctBy { it.key }
         artistAlbumsCache[key] = (
             current.library.albums +
                 current.home.albums +
-                current.search.albums
+                current.search.albums +
+                current.search.remoteAlbums
             )
-            .filter { it.artist.equals(name, ignoreCase = true) }
+            .filter { normalizeName(it.artist) == key }
             .distinctBy { it.id }
     }
 
     fun cachedArtistTracks(name: String): List<Track> =
-        artistTracksCache[name.lowercase(Locale.ROOT)].orEmpty()
+        artistTracksCache[normalizeName(name)].orEmpty()
 
     fun cachedArtistAlbums(name: String): List<Album> =
-        artistAlbumsCache[name.lowercase(Locale.ROOT)].orEmpty()
+        artistAlbumsCache[normalizeName(name)].orEmpty()
+
+    private fun normalizeName(value: String): String =
+        java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .lowercase(Locale.ROOT)
+            .trim()
 
     fun playlist(id: String): Playlist? {
         val current = _state.value
@@ -328,7 +354,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             "artist" to track.artist,
             "remote" to (track.remoteUrl != null),
         )
-        if (track.remoteUrl != null && track.localPath == null) {
+        if (track.isRemote && track.localPath == null) {
             playRemote(track)
             return
         }
@@ -346,12 +372,38 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         playback.playQueue(playable, index)
     }
 
-    /** Resuelve el stream de YouTube en el momento de reproducir (las URLs caducan). */
+    /**
+     * Resuelve una pista de catálogo a audio real. Si viene de Deezer no hay
+     * URL de audio: se busca su equivalente en YouTube y se resuelve al momento.
+     */
+    private suspend fun resolveRemoteAudio(track: Track): ResolvedAudio {
+        track.remoteUrl?.let { return RemoteResolver.resolveUrl(it) }
+        val query = track.remoteQuery ?: "${track.artist} ${track.title}"
+        val candidates = RemoteResolver.search(query, 10)
+        if (candidates.isEmpty()) {
+            throw IllegalStateException("sin resultados para «$query»")
+        }
+        val best = candidates.maxByOrNull { candidate ->
+            var score = 0
+            val wantedTitle = track.title.lowercase(Locale.ROOT)
+            val wantedArtist = track.artist.lowercase(Locale.ROOT)
+            val offeredTitle = candidate.title.lowercase(Locale.ROOT)
+            val offeredArtist = candidate.artist.lowercase(Locale.ROOT)
+            if (offeredTitle == wantedTitle) score += 120
+            else if (offeredTitle.contains(wantedTitle) || wantedTitle.contains(offeredTitle)) score += 60
+            if (offeredArtist.contains(wantedArtist) || wantedArtist.contains(offeredArtist)) score += 40
+            if (track.durationMs > 0L && candidate.durationMs > 0L) {
+                score -= (abs(track.durationMs - candidate.durationMs) / 1000L).toInt()
+            }
+            score
+        } ?: candidates.first()
+        return RemoteResolver.resolve(best)
+    }
+
     private fun playRemote(track: Track) {
-        val webUrl = track.remoteUrl ?: return
         viewModelScope.launch {
             _messages.emit("Resolviendo «${track.title}»…")
-            val result = runCatching { RemoteResolver.resolveUrl(webUrl) }
+            val result = runCatching { resolveRemoteAudio(track) }
             val audio = result.getOrNull()
             if (audio == null) {
                 _messages.emit(
@@ -362,9 +414,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val resolved = track.copy(
                 streamUrl = audio.url,
                 streamMimeType = audio.mimeType,
-                album = audio.album ?: track.album,
-                durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
-                cover = coverFor(audio.title, null, audio.thumbnailUrl ?: track.cover.remoteUrl),
+                album = track.album ?: audio.album,
+                durationMs = if (track.durationMs > 0L) track.durationMs else audio.durationMs,
+                cover = track.cover.remoteUrl?.let { track.cover }
+                    ?: coverFor(audio.title, null, audio.thumbnailUrl),
                 sourceLabel = track.sourceLabel ?: "YouTube",
             )
             _state.update { ui ->
@@ -529,6 +582,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val current = findTrack(key) ?: return
         val next = !current.favorite
         ActionLog.log("favorite.toggle", "track" to key, "next" to next)
+        if (current.isRemote) {
+            FavoriteStore.toggle(key)
+            _state.update { state -> state.mapTrack(key) { it.copy(favorite = next) } }
+            knownTracks = knownTracks + (key to current.copy(favorite = next))
+            return
+        }
         _state.update { state -> state.mapTrack(key) { it.copy(favorite = next) } }
         knownTracks = knownTracks + (key to current.copy(favorite = next))
         if (bridge != null) {
@@ -548,7 +607,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleDownload(key: String) {
         val track = findTrack(key) ?: return
-        if (track.remoteUrl != null) {
+        if (track.isRemote) {
             if (track.downloaded) {
                 viewModelScope.launch { _messages.emit("«${track.title}» ya está descargada") }
             } else {
@@ -563,7 +622,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Descarga una pista remota, la indexa en el SQLite del core y refresca la UI. */
     private fun downloadRemote(track: Track) {
-        val webUrl = track.remoteUrl ?: return
         if (downloadJobs.containsKey(track.key)) return
 
         fun publish(progress: Float, status: DownloadStatus, error: String? = null) {
@@ -586,7 +644,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ActionLog.log("download.start", "key" to track.key, "title" to track.title)
             _messages.emit("Descargando «${track.title}»…")
             publish(0f, DownloadStatus.Resolving)
-            val audio = runCatching { RemoteResolver.resolveUrl(webUrl) }
+            val audio = runCatching { resolveRemoteAudio(track) }
                 .getOrElse { error ->
                     publish(0f, DownloadStatus.Failed, error.message ?: "error de red")
                     return@launch
@@ -598,7 +656,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val artPath = ArtworkResolver.downloadThumbnail(
                 context = getApplication(),
                 key = track.key,
-                url = audio.thumbnailUrl ?: track.cover.remoteUrl,
+                url = track.cover.remoteUrl ?: audio.thumbnailUrl,
             )
             publish(0f, DownloadStatus.Downloading)
             val dir = File(getApplication<Application>().filesDir, "media").apply { mkdirs() }
@@ -618,15 +676,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             publish(1f, DownloadStatus.Importing)
-            withContext(Dispatchers.IO) {
+            val newKey = withContext(Dispatchers.IO) {
                 engine.importLocal(
                     path = file.absolutePath,
-                    title = audio.title.ifBlank { track.title },
-                    artist = audio.artist.ifBlank { track.artist },
-                    album = audio.album ?: track.album,
-                    durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
+                    title = track.title.ifBlank { audio.title },
+                    artist = track.artist.ifBlank { audio.artist },
+                    album = track.album ?: audio.album,
+                    durationMs = if (track.durationMs > 0L) track.durationMs else audio.durationMs,
                     artPath = artPath,
                 )
+            }
+            if (FavoriteStore.isFavorite(track.key)) {
+                withContext(Dispatchers.IO) {
+                    runCatching { engine.toggleFavorite(newKey) }
+                }
+                FavoriteStore.remove(track.key)
             }
             refreshFromRepo()
             _state.update { current ->
@@ -916,11 +980,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun enqueue(track: Track) {
         ActionLog.log("queue.add", "key" to track.key, "title" to track.title)
-        if (track.remoteUrl != null && track.localPath == null) {
+        if (track.isRemote && track.localPath == null) {
             viewModelScope.launch {
                 _messages.emit("Resolviendo «${track.title}»…")
-                val audio = runCatching { RemoteResolver.resolveUrl(track.remoteUrl!!) }
-                    .getOrNull()
+                val audio = runCatching { resolveRemoteAudio(track) }.getOrNull()
                 if (audio == null) {
                     _messages.emit("No se pudo resolver la pista")
                     return@launch
@@ -928,7 +991,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val resolved = track.copy(
                     streamUrl = audio.url,
                     streamMimeType = audio.mimeType,
-                    durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
+                    durationMs = if (track.durationMs > 0L) track.durationMs else audio.durationMs,
                 )
                 val playbackTrack = resolved.toPlaybackTrack()
                 if (playbackTrack == null || !playback.addToQueue(playbackTrack)) {
@@ -965,16 +1028,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        if (track.remoteUrl != null && track.localPath == null) {
+        if (track.isRemote && track.localPath == null) {
             viewModelScope.launch {
-                val audio = runCatching { RemoteResolver.resolveUrl(track.remoteUrl!!) }
-                    .getOrNull() ?: return@launch
+                val audio = runCatching { resolveRemoteAudio(track) }.getOrNull() ?: return@launch
                 val resolved = track.copy(
                     streamUrl = audio.url,
                     streamMimeType = audio.mimeType,
-                    album = audio.album ?: track.album,
-                    durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
-                    cover = coverFor(audio.title, null, audio.thumbnailUrl ?: track.cover.remoteUrl),
+                    album = track.album ?: audio.album,
+                    durationMs = if (track.durationMs > 0L) track.durationMs else audio.durationMs,
+                    cover = track.cover.remoteUrl?.let { track.cover }
+                        ?: coverFor(audio.title, null, audio.thumbnailUrl),
                 )
                 val playbackTrack = resolved.toPlaybackTrack() ?: return@launch
                 _state.update {
@@ -1182,6 +1245,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     home = loaded.home,
                     search = loaded.search.copy(
                         remoteResults = state.search.remoteResults,
+                        remoteAlbums = state.search.remoteAlbums,
+                        remoteArtists = state.search.remoteArtists,
                         remoteLoading = state.search.remoteLoading,
                         remoteError = state.search.remoteError,
                         recentQueries = state.search.recentQueries,

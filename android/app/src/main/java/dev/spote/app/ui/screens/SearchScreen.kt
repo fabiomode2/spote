@@ -32,6 +32,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -70,6 +71,12 @@ fun SearchScreen(
     val colors = LocalSpoteColors.current
     val focusManager = LocalFocusManager.current
     val hasQuery = state.query.isNotBlank()
+    val allAlbums = remember(state.albums, state.remoteAlbums) {
+        (state.albums + state.remoteAlbums).distinctBy { it.id }
+    }
+    val allArtists = remember(state.artists, state.remoteArtists) {
+        (state.artists + state.remoteArtists).distinctBy { it.lowercase() }
+    }
 
     AppBackground {
         Column(modifier = modifier.fillMaxSize()) {
@@ -207,7 +214,7 @@ fun SearchScreen(
                             EmptyState(
                                 icon = Icons.Rounded.Search,
                                 title = "Busca en todas partes",
-                                text = "Tu biblioteca y YouTube, en el mismo sitio. Escribe un título o artista.",
+                                text = "Tu biblioteca y el catálogo, en el mismo sitio. Escribe un título o artista.",
                             )
                         }
                     }
@@ -239,7 +246,7 @@ fun SearchScreen(
                                     color = colors.accent,
                                 )
                                 Text(
-                                    text = "Buscando en YouTube…",
+                                    text = "Buscando en el catálogo…",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -248,7 +255,7 @@ fun SearchScreen(
                     }
                     if (state.remoteResults.isNotEmpty()) {
                         item(key = "remote-title") {
-                            SectionHeader(title = "En streaming")
+                            SectionHeader(title = "Canciones")
                         }
                         items(state.remoteResults, key = { "remote-${it.key}" }) { track ->
                             TrackRow(
@@ -268,7 +275,7 @@ fun SearchScreen(
                             )
                         }
                     }
-                    if (state.albums.isNotEmpty()) {
+                    if (allAlbums.isNotEmpty()) {
                         item(key = "albums-title") {
                             SectionHeader(title = "Álbumes")
                         }
@@ -277,13 +284,13 @@ fun SearchScreen(
                                 contentPadding = PaddingValues(horizontal = 20.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                items(state.albums, key = { it.id }) { album ->
+                                items(allAlbums, key = { it.id }) { album ->
                                     AlbumCard(album = album, onClick = { onOpenAlbum(album) })
                                 }
                             }
                         }
                     }
-                    if (state.artists.isNotEmpty()) {
+                    if (allArtists.isNotEmpty()) {
                         item(key = "artists-title") {
                             SectionHeader(title = "Artistas")
                         }
@@ -292,9 +299,10 @@ fun SearchScreen(
                                 contentPadding = PaddingValues(horizontal = 20.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                items(state.artists, key = { it }) { artist ->
-                                    val cover = state.albums.firstOrNull { it.artist == artist }?.cover
+                                items(allArtists, key = { it }) { artist ->
+                                    val cover = allAlbums.firstOrNull { it.artist == artist }?.cover
                                         ?: state.results.firstOrNull { it.artist == artist }?.cover
+                                        ?: state.remoteResults.firstOrNull { it.artist == artist }?.cover
                                         ?: dev.spote.app.model.Cover(
                                             start = Color(0xFF3A3A42),
                                             end = Color(0xFF15151A),
@@ -309,8 +317,8 @@ fun SearchScreen(
                     }
                     if (
                         state.results.isEmpty() &&
-                        state.albums.isEmpty() &&
-                        state.artists.isEmpty() &&
+                        allAlbums.isEmpty() &&
+                        allArtists.isEmpty() &&
                         state.remoteResults.isEmpty() &&
                         !state.remoteLoading
                     ) {
