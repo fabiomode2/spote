@@ -276,7 +276,16 @@ fn run_import(args: &Args) -> Result<()> {
             .find(|p| p.name == catalog.name)
         {
             Some(existing) => existing.id,
-            None => lib.create_playlist(&catalog.name)?,
+            None => {
+                // Marca los álbumes importados para que la navegación de
+                // biblioteca no los confunda con listas de usuario.
+                let description = if catalog.kind == "album" {
+                    "álbum importado"
+                } else {
+                    ""
+                };
+                lib.create_playlist_full(&catalog.name, description, None, None)?
+            }
         };
         for track in &refs {
             lib.upsert_track(track)?;
