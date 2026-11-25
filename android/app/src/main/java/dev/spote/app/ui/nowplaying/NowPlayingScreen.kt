@@ -63,6 +63,7 @@ import dev.spote.app.ui.components.CircleIconButton
 import dev.spote.app.ui.components.CoverArt
 import dev.spote.app.ui.components.LabelledAction
 import dev.spote.app.ui.components.LikeButton
+import dev.spote.app.ui.components.LocalAlbumNavigation
 import dev.spote.app.ui.components.LocalArtistNavigation
 import dev.spote.app.ui.components.PlayButton
 import dev.spote.app.ui.theme.LocalSpoteColors
@@ -88,6 +89,7 @@ fun NowPlayingScreen(
     val track = player.track ?: return
     val colors = LocalSpoteColors.current
     val openArtist = LocalArtistNavigation.current
+    val openAlbum = LocalAlbumNavigation.current
     var showLyrics by remember { mutableStateOf(false) }
     val activeIndex = remember(player.positionMs, player.lyrics, player.lyricsSynced) {
         if (!player.lyricsSynced) -1
@@ -207,9 +209,18 @@ fun NowPlayingScreen(
                                         Text(
                                             text = "· $album",
                                             style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            color = if (openAlbum != null) {
+                                                colors.accent
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
+                                            modifier = if (openAlbum != null) {
+                                                Modifier.clickable { openAlbum(track) }
+                                            } else {
+                                                Modifier
+                                            },
                                         )
                                     }
                                 }
@@ -574,7 +585,11 @@ private fun LyricsOverlay(
                     }
                 }
                 Text(
-                    text = "Toca una línea para saltar",
+                    text = if (player.lyricsSynced) {
+                        "Toca una línea para saltar"
+                    } else {
+                        "Letra sin tiempos"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier

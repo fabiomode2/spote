@@ -49,6 +49,9 @@ import dev.spote.app.ui.theme.LocalSpoteColors
 /** Navegación global al perfil de un artista, disponible desde cualquier fila. */
 val LocalArtistNavigation = staticCompositionLocalOf<((String) -> Unit)?> { null }
 
+/** Navegación global al álbum de una pista, si el catálogo lo conoce. */
+val LocalAlbumNavigation = staticCompositionLocalOf<((dev.spote.app.model.Track) -> Unit)?> { null }
+
 @Composable
 fun AppBackground(
     accentStart: Color = LocalSpoteColors.current.coverStart,

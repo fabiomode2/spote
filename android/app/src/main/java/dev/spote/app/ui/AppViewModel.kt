@@ -328,6 +328,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .distinctBy { it.id }
     }
 
+    fun albumFor(track: Track): Album? {
+        val title = track.album?.trim().orEmpty()
+        if (title.isEmpty()) return null
+        val key = normalizeName(track.artist)
+        return (albumCache.values + _state.value.library.albums + _state.value.home.albums +
+            _state.value.search.albums + _state.value.search.remoteAlbums)
+            .firstOrNull {
+                normalizeName(it.artist) == key && it.title.equals(title, ignoreCase = true)
+            }
+    }
+
     fun cachedArtistTracks(name: String): List<Track> =
         artistTracksCache[normalizeName(name)].orEmpty()
 
@@ -1270,6 +1281,8 @@ private fun AppUiState.mapTrack(key: String, transform: (Track) -> Track): AppUi
         search = search.copy(
             results = search.results.mapTracks(),
             albums = search.albums.mapAlbums(),
+            remoteResults = search.remoteResults.mapTracks(),
+            remoteAlbums = search.remoteAlbums.mapAlbums(),
         ),
         library = library.copy(
             tracks = library.tracks.mapTracks(),

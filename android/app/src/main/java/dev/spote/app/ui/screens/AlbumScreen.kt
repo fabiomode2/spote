@@ -99,7 +99,13 @@ fun AlbumScreen(
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "${album.year}  ·  ${album.tracks.size} canciones  ·  ${album.durationMs.asAlbumDuration()}",
+                        text = buildString {
+                            if (album.year > 0) append("${album.year}  ·  ")
+                            append("${album.tracks.size} canciones")
+                            if (album.durationMs > 0L) {
+                                append("  ·  ${album.durationMs.asAlbumDuration()}")
+                            }
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,

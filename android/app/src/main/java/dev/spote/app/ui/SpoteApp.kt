@@ -183,6 +183,12 @@ fun SpoteApp(
             appViewModel.cacheArtist(artist)
             navController.navigate("artist/${Uri.encode(artist)}")
         },
+        dev.spote.app.ui.components.LocalAlbumNavigation provides { track ->
+            appViewModel.albumFor(track)?.let { album ->
+                appViewModel.cacheAlbum(album)
+                navController.navigate("album/${Uri.encode(album.id)}")
+            }
+        },
     ) {
     Scaffold(
         containerColor = colors.background,
