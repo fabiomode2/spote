@@ -88,6 +88,8 @@ fun SettingsScreen(
     avatarPath: String? = null,
     onProfileNameChange: (String) -> Unit = {},
     onAvatarSelected: (Uri) -> Unit = {},
+    onDedupe: () -> Unit = {},
+    onRefreshArtwork: () -> Unit = {},
     socialLoggedIn: Boolean = false,
     socialBusy: Boolean = false,
     socialConnecting: Boolean = false,
@@ -108,6 +110,7 @@ fun SettingsScreen(
     var showStylePicker by remember { mutableStateOf(false) }
     var showSocialDialog by remember { mutableStateOf(false) }
     var showProfileDialog by remember { mutableStateOf(false) }
+    var showDedupeDialog by remember { mutableStateOf(false) }
     var draftName by remember { mutableStateOf(profileName) }
     var qrLink by remember { mutableStateOf<SetupLink?>(null) }
     val scanQr = rememberQrScanner(
@@ -221,6 +224,23 @@ fun SettingsScreen(
             }
 
 
+            item(key = "library-title") { SettingsGroup("BIBLIOTECA") }
+            item(key = "dedupe") {
+                SettingsRow(
+                    title = "Fusionar duplicados",
+                    subtitle = "Mismo título, artista y duración · con copia de seguridad",
+                    icon = Icons.Rounded.DeleteSweep,
+                    onClick = { showDedupeDialog = true },
+                )
+            }
+            item(key = "artwork") {
+                SettingsRow(
+                    title = "Actualizar portadas",
+                    subtitle = "Busca arte que falte en background",
+                    icon = Icons.Rounded.Palette,
+                    onClick = onRefreshArtwork,
+                )
+            }
             item(key = "storage-title") { SettingsGroup("ALMACENAMIENTO") }
             item(key = "downloads") {
                 SettingsRow(
@@ -435,6 +455,31 @@ fun SettingsScreen(
                             Toast.makeText(context, "Enlace copiado", Toast.LENGTH_SHORT).show()
                         },
                     ) { Text("Copiar enlace") }
+                },
+                containerColor = MaterialTheme.colorScheme.surface,
+            )
+        }
+
+        if (showDedupeDialog) {
+            AlertDialog(
+                onDismissRequest = { showDedupeDialog = false },
+                title = { Text("Fusionar duplicados") },
+                text = {
+                    Text(
+                        "Se fusionarán las pistas con el mismo título, artista y duración similar. " +
+                            "Antes se guarda una copia de la base de datos en el almacenamiento privado.",
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showDedupeDialog = false
+                            onDedupe()
+                        },
+                    ) { Text("Fusionar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDedupeDialog = false }) { Text("Cancelar") }
                 },
                 containerColor = MaterialTheme.colorScheme.surface,
             )

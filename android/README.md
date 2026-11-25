@@ -11,7 +11,7 @@ catálogo, letras, paleta y salas.
 | Biblioteca local SQLite/FTS5 (`crates/core` vía UniFFI) | ✅ |
 | Importar audio del teléfono (SAF + `MediaMetadataRetriever`) | ✅ |
 | Reproducción Media3 + `MediaSessionService` + notificación | ✅ |
-| Letras LRCLIB con emparejamiento por título/artista/duración | ✅ |
+| Letras: LRCLIB y respaldo de texto Genius, integradas bajo los controles | ✅ |
 | Buscar en YouTube y SoundCloud on-device (NewPipeExtractor) | ✅ |
 | Resolver stream al reproducir (URLs caducan → se resuelven al momento) | ✅ |
 | Reproducir HLS de SoundCloud con Media3 | ✅ |
@@ -25,7 +25,9 @@ catálogo, letras, paleta y salas.
 | Tema cover-driven, Midnight y Nocturno editorial | ✅ |
 | Estilo TUI conmutable: apagado, sutil (mono) o medio (mono + scanlines + espectro) | ✅ |
 | Búsqueda con historial persistente, caché y limpieza | ✅ |
-| Perfiles de artista con álbumes, populares y todas las canciones | ✅ |
+| Perfiles de artista con álbumes, populares y todas las canciones; el autor de cualquier fila es clicable | ✅ |
+| Portadas: arte embebido, `art_url` del core y backfill desde iTunes | ✅ |
+| Fusión de duplicados con copia de seguridad previa | ✅ |
 | Registro local de acciones exportable desde Ajustes | ✅ |
 | Actualización in-app desde GitHub Releases | ✅ |
 
@@ -126,6 +128,15 @@ spote://setup?server=...&key=...&invite=...&name=...
 El QR contiene la clave de cliente y la invitación: trátalo como una
 credencial.
 
+## Portadas y metadatos
+
+Al cargar la biblioteca, las pistas sin `art_path`/`art_url` se rellenan en
+background desde la iTunes Search API: se guarda el JPEG en
+`filesDir/artwork/`, se actualiza `art_url` en el SQLite del core y, si falta,
+se completa el álbum. Las descargas nuevas guardan la miniatura del stream
+antes de importar. También se respeta el `art_url` que ya traiga la base de
+datos del desktop, así que las bibliotecas antiguas no se quedan sin portada.
+
 ## Registro de acciones
 
 `ActionLog` escribe JSONL en `filesDir/logs/` (máximo 2 MB por archivo, 7
@@ -178,6 +189,7 @@ sistema. Android exige confirmación del usuario: no hay instalación silenciosa
 - Descargar la miniatura remota como carátula local al importar.
 - Importar playlists de Spotify y reordenar canciones dentro de una playlist.
 - ASR local para letras (requiere runtime whisper.cpp y un modelo en el APK).
+- Alinear en el tiempo la letra plana de Genius (ahora se muestra sin tiempos).
 - `MediaProjection` para grabar el monitor.
 - Resolver de golpe toda una cola remota en vez de pista a pista.
 - Reordenar canciones dentro de una playlist (añadir/quitar ya funciona).

@@ -683,13 +683,19 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_all_tracks(
     ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_backup_library(
+    ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_create_playlist(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_delete_playlist(
     ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_duplicate_count(
+    ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_home(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_import_local(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_merge_duplicates(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_palette(
     ): Int
@@ -703,9 +709,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_search(
     ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_set_track_art(
+    ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_stats(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_toggle_favorite(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_tracks_without_art(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_update_track_metadata(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_upsert_demo(
     ): Int
@@ -745,14 +757,20 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_spote_android_fn_method_spoteengine_all_tracks(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_backup_library(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_spote_android_fn_method_spoteengine_create_playlist(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_spote_android_fn_method_spoteengine_delete_playlist(`ptr`: Long,`playlistId`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_spote_android_fn_method_spoteengine_duplicate_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
     external fun uniffi_spote_android_fn_method_spoteengine_home(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_spote_android_fn_method_spoteengine_import_local(`ptr`: Long,`path`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_merge_duplicates(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_spote_android_fn_method_spoteengine_palette(`ptr`: Long,`imagePath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_spote_android_fn_method_spoteengine_playlist_tracks(`ptr`: Long,`playlistId`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -765,10 +783,16 @@ internal object UniffiLib {
     ): Unit
     external fun uniffi_spote_android_fn_method_spoteengine_search(`ptr`: Long,`query`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_set_track_art(`ptr`: Long,`key`: RustBuffer.ByValue,`artPath`: RustBuffer.ByValue,`artUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_spote_android_fn_method_spoteengine_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_spote_android_fn_method_spoteengine_toggle_favorite(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_spote_android_fn_method_spoteengine_tracks_without_art(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_update_track_metadata(`ptr`: Long,`key`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_spote_android_fn_method_spoteengine_upsert_demo(`ptr`: Long,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_spote_android_fn_method_spoteengine_version(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -901,16 +925,25 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_all_tracks() and 0xFFFF) != 16402) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_backup_library() and 0xFFFF) != 29507) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_create_playlist() and 0xFFFF) != 33679) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_delete_playlist() and 0xFFFF) != 40459) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_duplicate_count() and 0xFFFF) != 19228) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_home() and 0xFFFF) != 25495) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_import_local() and 0xFFFF) != 58879) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_merge_duplicates() and 0xFFFF) != 31396) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_palette() and 0xFFFF) != 12130) {
@@ -931,10 +964,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_search() and 0xFFFF) != 16527) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_set_track_art() and 0xFFFF) != 21668) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_stats() and 0xFFFF) != 9912) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_toggle_favorite() and 0xFFFF) != 47964) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_tracks_without_art() and 0xFFFF) != 22786) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_update_track_metadata() and 0xFFFF) != 9791) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_upsert_demo() and 0xFFFF) != 23883) {
@@ -1357,11 +1399,21 @@ public interface SpoteEngineInterface {
     fun `allTracks`(`limit`: kotlin.UInt): List<TrackDto>
     
     /**
+     * Copia de seguridad consistente antes de operaciones destructivas.
+     */
+    fun `backupLibrary`(`path`: kotlin.String)
+    
+    /**
      * Crea una playlist vacía y devuelve su id.
      */
     fun `createPlaylist`(`name`: kotlin.String): kotlin.Long
     
     fun `deletePlaylist`(`playlistId`: kotlin.Long)
+    
+    /**
+     * Número de parejas de canciones duplicadas (mismo título/artista/duración).
+     */
+    fun `duplicateCount`(): kotlin.Long
     
     fun `home`(): kotlin.String
     
@@ -1370,6 +1422,11 @@ public interface SpoteEngineInterface {
      * Devuelve la clave canónica; la UI recarga la biblioteca después.
      */
     fun `importLocal`(`path`: kotlin.String, `title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artPath`: kotlin.String?): kotlin.String
+    
+    /**
+     * Fusiona duplicados conservando la copia con audio y moviendo listas/fuentes.
+     */
+    fun `mergeDuplicates`(): kotlin.UInt
     
     /**
      * Extrae la paleta de una portada local. La UI de Compose la usa para
@@ -1387,9 +1444,24 @@ public interface SpoteEngineInterface {
     
     fun `search`(`query`: kotlin.String, `limit`: kotlin.UInt): List<TrackDto>
     
+    /**
+     * Asocia una portada local y/o URL a una pista existente.
+     */
+    fun `setTrackArt`(`key`: kotlin.String, `artPath`: kotlin.String?, `artUrl`: kotlin.String?)
+    
     fun `stats`(): LibraryStatsDto
     
     fun `toggleFavorite`(`key`: kotlin.String): kotlin.Boolean
+    
+    /**
+     * Pistas sin portada para el backfill de metadatos.
+     */
+    fun `tracksWithoutArt`(`limit`: kotlin.UInt): List<TrackDto>
+    
+    /**
+     * Completa metadatos sin pisar valores mejores con vacíos.
+     */
+    fun `updateTrackMetadata`(`key`: kotlin.String, `artist`: kotlin.String, `title`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artUrl`: kotlin.String?)
     
     /**
      * Inserta una pista de prueba. Sirve para el smoke test del puente antes
@@ -1562,6 +1634,23 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
 
     
     /**
+     * Copia de seguridad consistente antes de operaciones destructivas.
+     */
+    @Throws(SpoteException::class)override fun `backupLibrary`(`path`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_backup_library(
+        it,
+        
+        FfiConverterString.lower(`path`),_status)
+}
+    }
+    
+    
+
+    
+    /**
      * Crea una playlist vacía y devuelve su id.
      */
     @Throws(SpoteException::class)override fun `createPlaylist`(`name`: kotlin.String): kotlin.Long {
@@ -1590,6 +1679,23 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
 }
     }
     
+    
+
+    
+    /**
+     * Número de parejas de canciones duplicadas (mismo título/artista/duración).
+     */
+    @Throws(SpoteException::class)override fun `duplicateCount`(): kotlin.Long {
+            return FfiConverterLong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_duplicate_count(
+        it,
+        _status)
+}
+    }
+    )
+    }
     
 
     override fun `home`(): kotlin.String {
@@ -1623,6 +1729,23 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
         FfiConverterOptionalString.lower(`album`),
         FfiConverterULong.lower(`durationMs`),
         FfiConverterOptionalString.lower(`artPath`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Fusiona duplicados conservando la copia con audio y moviendo listas/fuentes.
+     */
+    @Throws(SpoteException::class)override fun `mergeDuplicates`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_merge_duplicates(
+        it,
+        _status)
 }
     }
     )
@@ -1724,6 +1847,25 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     
 
     
+    /**
+     * Asocia una portada local y/o URL a una pista existente.
+     */
+    @Throws(SpoteException::class)override fun `setTrackArt`(`key`: kotlin.String, `artPath`: kotlin.String?, `artUrl`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_set_track_art(
+        it,
+        
+        FfiConverterString.lower(`key`),
+        FfiConverterOptionalString.lower(`artPath`),
+        FfiConverterOptionalString.lower(`artUrl`),_status)
+}
+    }
+    
+    
+
+    
     @Throws(SpoteException::class)override fun `stats`(): LibraryStatsDto {
             return FfiConverterTypeLibraryStatsDto.lift(
     callWithHandle {
@@ -1750,6 +1892,46 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
+    
+
+    
+    /**
+     * Pistas sin portada para el backfill de metadatos.
+     */
+    @Throws(SpoteException::class)override fun `tracksWithoutArt`(`limit`: kotlin.UInt): List<TrackDto> {
+            return FfiConverterSequenceTypeTrackDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_tracks_without_art(
+        it,
+        
+        FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Completa metadatos sin pisar valores mejores con vacíos.
+     */
+    @Throws(SpoteException::class)override fun `updateTrackMetadata`(`key`: kotlin.String, `artist`: kotlin.String, `title`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artUrl`: kotlin.String?)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_update_track_metadata(
+        it,
+        
+        FfiConverterString.lower(`key`),
+        FfiConverterString.lower(`artist`),
+        FfiConverterString.lower(`title`),
+        FfiConverterOptionalString.lower(`album`),
+        FfiConverterULong.lower(`durationMs`),
+        FfiConverterOptionalString.lower(`artUrl`),_status)
+}
+    }
+    
     
 
     
@@ -2065,6 +2247,8 @@ data class TrackDto (
     , 
     var `artPath`: kotlin.String?
     , 
+    var `artUrl`: kotlin.String?
+    , 
     var `path`: kotlin.String?
     , 
     var `addedAt`: kotlin.Long
@@ -2095,6 +2279,7 @@ public object FfiConverterTypeTrackDto: FfiConverterRustBuffer<TrackDto> {
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterLong.read(buf),
         )
     }
@@ -2110,6 +2295,7 @@ public object FfiConverterTypeTrackDto: FfiConverterRustBuffer<TrackDto> {
             FfiConverterBoolean.allocationSize(value.`downloaded`) +
             FfiConverterOptionalString.allocationSize(value.`provider`) +
             FfiConverterOptionalString.allocationSize(value.`artPath`) +
+            FfiConverterOptionalString.allocationSize(value.`artUrl`) +
             FfiConverterOptionalString.allocationSize(value.`path`) +
             FfiConverterLong.allocationSize(value.`addedAt`)
     )
@@ -2125,6 +2311,7 @@ public object FfiConverterTypeTrackDto: FfiConverterRustBuffer<TrackDto> {
             FfiConverterBoolean.write(value.`downloaded`, buf)
             FfiConverterOptionalString.write(value.`provider`, buf)
             FfiConverterOptionalString.write(value.`artPath`, buf)
+            FfiConverterOptionalString.write(value.`artUrl`, buf)
             FfiConverterOptionalString.write(value.`path`, buf)
             FfiConverterLong.write(value.`addedAt`, buf)
     }

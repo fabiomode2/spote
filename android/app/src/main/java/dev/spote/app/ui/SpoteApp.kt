@@ -44,6 +44,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,9 +76,9 @@ import dev.spote.app.model.Tab
 import dev.spote.app.logging.ActionLog
 import dev.spote.app.model.Track
 import dev.spote.app.profile.ProfileStore
+import dev.spote.app.ui.components.LocalArtistNavigation
 import dev.spote.app.ui.components.MiniPlayer
 import dev.spote.app.ui.components.SpoteBottomBar
-import dev.spote.app.ui.nowplaying.LyricsScreen
 import dev.spote.app.ui.nowplaying.NowPlayingScreen
 import dev.spote.app.ui.nowplaying.QueueScreen
 import dev.spote.app.ui.screens.AlbumScreen
@@ -173,11 +174,16 @@ fun SpoteApp(
     }
 
     val topLevelRoutes = setOf("home", "search", "now", "library")
-    val fullscreenRoutes = setOf("now", "lyrics", "queue")
+    val fullscreenRoutes = setOf("now", "queue", "lyrics")
     val noMiniRoutes = fullscreenRoutes + setOf("settings")
     val showMini = route !in noMiniRoutes
     val showBottom = route in topLevelRoutes
 
+    CompositionLocalProvider(
+        LocalArtistNavigation provides { artist ->
+            navController.navigate("artist/${Uri.encode(artist)}")
+        },
+    ) {
     Scaffold(
         containerColor = colors.background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -456,6 +462,8 @@ fun SpoteApp(
                         ActionLog.log("profile.name")
                         ProfileStore.setName(it)
                     },
+                    onDedupe = appViewModel::dedupeLibrary,
+                    onRefreshArtwork = appViewModel::refreshArtwork,
                     onAvatarSelected = { uri ->
                         ActionLog.log("profile.avatar")
                         appScope.launch {
@@ -502,23 +510,19 @@ fun SpoteApp(
                     onRepeat = appViewModel::cycleRepeat,
                     onLike = { state.player.track?.let { appViewModel.toggleFavorite(it.key) } },
                     onDownload = { state.player.track?.let { appViewModel.toggleDownload(it.key) } },
-                    onLyrics = { navController.navigate("lyrics") },
                     onQueue = { navController.navigate("queue") },
+                    onRetryLyrics = appViewModel::retryLyrics,
                 )
             }
-            composable(
-                route = "lyrics",
-                enterTransition = { slideInVertically(initialOffsetY = { it }) },
-                popExitTransition = { slideOutVertically(targetOffsetY = { it }) },
-            ) {
-                LyricsScreen(
-                    player = state.player,
-                    onBack = { navController.popBackStack() },
-                    onSeekTo = {
-                        appViewModel.seekTo(it)
-                        navController.popBackStack()
-                    },
-                )
+            // Compatibilidad con back stacks antiguos que abrían la letra aparte.
+            composable("lyrics") {
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    navController.navigate("now") {
+                        popUpTo("lyrics") { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+                androidx.compose.foundation.layout.Box(Modifier)
             }
             composable(
                 route = "queue",
@@ -536,6 +540,7 @@ fun SpoteApp(
                 )
             }
         }
+    }
     }
 
     menuTrack?.let { track ->

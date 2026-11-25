@@ -1,5 +1,6 @@
 package dev.spote.app.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -30,6 +31,7 @@ import dev.spote.app.ui.components.AlbumTrackRow
 import dev.spote.app.ui.components.AppBackground
 import dev.spote.app.ui.components.CircleIconButton
 import dev.spote.app.ui.components.CoverArt
+import dev.spote.app.ui.components.LocalArtistNavigation
 import dev.spote.app.ui.components.PlayButton
 import dev.spote.app.ui.components.SectionHeader
 import dev.spote.app.ui.components.TopBar
@@ -50,6 +52,7 @@ fun AlbumScreen(
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
+    val openArtist = LocalArtistNavigation.current
     val albumPlaying = player.isPlaying && player.track?.let { current ->
         album.tracks.any { it.key == current.key }
     } == true
@@ -88,6 +91,11 @@ fun AlbumScreen(
                         style = MaterialTheme.typography.titleMedium,
                         color = colors.accent,
                         textAlign = TextAlign.Center,
+                        modifier = if (openArtist != null) {
+                            Modifier.clickable { openArtist(album.artist) }
+                        } else {
+                            Modifier
+                        },
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(

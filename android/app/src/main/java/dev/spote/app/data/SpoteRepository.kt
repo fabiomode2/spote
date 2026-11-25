@@ -21,6 +21,9 @@ interface SpoteRepository {
     fun deletePlaylist(id: String): Boolean = false
     fun addToPlaylist(id: String, key: String): Boolean = false
     fun removeFromPlaylist(id: String, key: String): Boolean = false
+    fun duplicateCount(): Long = 0L
+    fun mergeDuplicates(): Int = 0
+    fun backupLibrary(path: String): Boolean = false
 }
 
 /** Fallback sin datos: si el core no carga, no inventamos una biblioteca. */

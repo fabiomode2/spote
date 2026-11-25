@@ -51,8 +51,10 @@ fun TrackRow(
     modifier: Modifier = Modifier,
     isPlaying: Boolean = false,
     showCover: Boolean = true,
+    showAlbum: Boolean = false,
 ) {
     val colors = LocalSpoteColors.current
+    val openArtist = LocalArtistNavigation.current
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -90,6 +92,7 @@ fun TrackRow(
             Text(
                 text = buildString {
                     append(track.artist)
+                    if (showAlbum) track.album?.takeIf { it.isNotBlank() }?.let { append("  ·  $it") }
                     if (track.explicit) append("  ·  E")
                     track.sourceLabel?.let { append("  ·  $it") }
                 },
@@ -97,6 +100,11 @@ fun TrackRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = if (openArtist != null) {
+                    Modifier.clickable { openArtist(track.artist) }
+                } else {
+                    Modifier
+                },
             )
         }
         if (track.downloaded) {
@@ -133,6 +141,7 @@ fun AlbumTrackRow(
     isPlaying: Boolean = false,
 ) {
     val colors = LocalSpoteColors.current
+    val openArtist = LocalArtistNavigation.current
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -172,6 +181,11 @@ fun AlbumTrackRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = if (openArtist != null) {
+                    Modifier.clickable { openArtist(track.artist) }
+                } else {
+                    Modifier
+                },
             )
         }
         if (track.downloaded) {

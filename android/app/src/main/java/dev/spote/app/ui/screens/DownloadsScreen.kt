@@ -148,6 +148,7 @@ fun DownloadsScreen(
                         track = track,
                         onClick = { onPlayTrack(track) },
                         onMore = { onMore(track) },
+                        showAlbum = true,
                     )
                 }
             }

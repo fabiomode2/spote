@@ -8,6 +8,7 @@ import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.spote.app.BuildConfig
+import dev.spote.app.artwork.ArtworkResolver
 import dev.spote.app.data.MockData
 import dev.spote.app.data.EmptySpoteRepository
 import dev.spote.app.data.MockSpoteRepository
@@ -70,6 +71,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var lyricsKey: String? = null
     private var searchJob: Job? = null
     private var remoteSearchJob: Job? = null
+    private var artworkJob: Job? = null
+    private val artworkAttempts = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val downloadJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     private data class Loaded(
@@ -144,6 +147,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     player = loaded.player,
                 )
             }
+            backfillArtwork()
         }
         viewModelScope.launch {
             playback.state.collect { playbackState ->
@@ -281,6 +285,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun play(track: Track) {
+        ensureArtwork(track)
         ActionLog.log(
             "play.track",
             "key" to track.key,
@@ -356,7 +361,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         lyricsJob?.cancel()
         _state.update { ui ->
             if (ui.player.track?.key == track.key) {
-                ui.copy(player = ui.player.copy(lyrics = emptyList()))
+                ui.copy(
+                    player = ui.player.copy(
+                        lyrics = emptyList(),
+                        lyricsSynced = false,
+                        lyricsSource = null,
+                        lyricsLoading = true,
+                    ),
+                )
             } else {
                 ui
             }
@@ -372,12 +384,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val lines = doc?.lines.orEmpty().map { LyricLine(it.startMs, it.text) }
             _state.update { ui ->
                 if (ui.player.track?.key == track.key) {
-                    ui.copy(player = ui.player.copy(lyrics = lines))
+                    ui.copy(
+                        player = ui.player.copy(
+                            lyrics = lines,
+                            lyricsSynced = doc?.synced == true,
+                            lyricsSource = doc?.source,
+                            lyricsLoading = false,
+                        ),
+                    )
                 } else {
                     ui
                 }
             }
         }
+    }
+
+    fun retryLyrics() {
+        val track = _state.value.player.track ?: return
+        lyricsKey = null
+        requestLyrics(track)
     }
 
     fun togglePlay() {
@@ -466,11 +491,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(key: String) {
-        ActionLog.log("favorite.toggle", "key" to key)
-        _state.update { state -> state.mapTrack(key) { it.copy(favorite = !it.favorite) } }
+        val current = findTrack(key) ?: return
+        val next = !current.favorite
+        ActionLog.log("favorite.toggle", "track" to key, "next" to next)
+        _state.update { state -> state.mapTrack(key) { it.copy(favorite = next) } }
+        knownTracks = knownTracks + (key to current.copy(favorite = next))
         if (bridge != null) {
             viewModelScope.launch(Dispatchers.IO) {
-                runCatching { bridge.toggleFavorite(key) }
+                val result = runCatching { bridge.toggleFavorite(key) }
+                ActionLog.log(
+                    "favorite.result",
+                    "track" to key,
+                    "ok" to result.isSuccess,
+                    "stored" to result.getOrNull(),
+                    "error" to result.exceptionOrNull()?.message,
+                )
                 refreshFromRepo()
             }
         }
@@ -525,6 +560,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 publish(0f, DownloadStatus.Failed, "Solo está en HLS: se puede reproducir, no descargar")
                 return@launch
             }
+            val artPath = ArtworkResolver.downloadThumbnail(
+                context = getApplication(),
+                key = track.key,
+                url = audio.thumbnailUrl ?: track.cover.remoteUrl,
+            )
             publish(0f, DownloadStatus.Downloading)
             val dir = File(getApplication<Application>().filesDir, "media").apply { mkdirs() }
             var lastProgress = -1f
@@ -550,7 +590,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     artist = audio.artist.ifBlank { track.artist },
                     album = audio.album ?: track.album,
                     durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
-                    artPath = null,
+                    artPath = artPath,
                 )
             }
             refreshFromRepo()
@@ -571,11 +611,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 "title" to label,
                 "bytes" to file.length(),
                 "hls" to audio.isHls,
+                "art" to (artPath != null),
             )
             _messages.emit("Descargada «$label»")
         }
         downloadJobs[track.key] = job
         job.invokeOnCompletion { downloadJobs.remove(track.key) }
+    }
+
+    /** Fusiona duplicados del core con copia de seguridad previa. */
+    fun dedupeLibrary() {
+        viewModelScope.launch {
+            val count = withContext(Dispatchers.IO) { repo.duplicateCount() }
+            if (count <= 0L) {
+                _messages.emit("No hay canciones duplicadas")
+                return@launch
+            }
+            val backupDir = File(getApplication<Application>().filesDir, "backups").apply { mkdirs() }
+            val backup = File(backupDir, "spote-before-dedupe-${System.currentTimeMillis()}.db")
+            val backedUp = withContext(Dispatchers.IO) { repo.backupLibrary(backup.absolutePath) }
+            if (!backedUp) {
+                _messages.emit("No se pudo crear la copia de seguridad")
+                return@launch
+            }
+            backupDir.listFiles()
+                ?.filter { it.name.startsWith("spote-before-dedupe-") }
+                ?.sortedByDescending { it.lastModified() }
+                ?.drop(3)
+                ?.forEach { runCatching { it.delete() } }
+            val merged = withContext(Dispatchers.IO) { repo.mergeDuplicates() }
+            ActionLog.log(
+                "library.dedupe",
+                "candidates" to count,
+                "merged" to merged,
+                "backup" to backup.absolutePath,
+            )
+            refreshFromRepo()
+            _messages.emit(
+                if (merged > 0) "Fusionadas $merged canciones duplicadas" else "No se pudo fusionar",
+            )
+        }
     }
 
     fun cancelDownload(key: String) {
@@ -586,6 +661,117 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun dismissDownload(key: String) {
         _state.update { it.copy(downloads = it.downloads - key) }
+    }
+
+    /** Rellena portadas que falten desde iTunes, en background y de una en una. */
+    private fun backfillArtwork(priorityKey: String? = null) {
+        val engine = bridge ?: return
+        if (artworkJob?.isActive == true) return
+        artworkJob = viewModelScope.launch {
+            val missing = withContext(Dispatchers.IO) {
+                runCatching { engine.tracksWithoutArt(80) }.getOrDefault(emptyList())
+            }
+            val ordered = missing.sortedByDescending { it.key == priorityKey }
+            var changed = 0
+            for (item in ordered.take(40)) {
+                if (!artworkAttempts.add(item.key)) continue
+                val art = runCatching {
+                    ArtworkResolver.resolve(
+                        context = getApplication(),
+                        key = item.key,
+                        title = item.title,
+                        artist = item.artist,
+                        album = item.album,
+                        durationMs = item.durationMs,
+                    )
+                }.getOrNull()
+                if (art != null && (art.localPath != null || art.remoteUrl != null)) {
+                    val stored = withContext(Dispatchers.IO) {
+                        runCatching {
+                            engine.setTrackArt(item.key, art.localPath, art.remoteUrl)
+                            engine.updateTrackMetadata(
+                                item.key,
+                                item.artist,
+                                item.title,
+                                art.album,
+                                item.durationMs,
+                                art.remoteUrl,
+                            )
+                        }.isSuccess
+                    }
+                    if (stored) {
+                        changed++
+                        _state.update { current ->
+                            current.mapTrack(item.key) { track ->
+                                track.copy(
+                                    cover = coverFor(track.title, art.localPath, art.remoteUrl),
+                                )
+                            }
+                        }
+                        ActionLog.log(
+                            "artwork.done",
+                            "title" to item.title,
+                            "artist" to item.artist,
+                            "local" to (art.localPath != null),
+                        )
+                    }
+                } else {
+                    ActionLog.log("artwork.miss", "title" to item.title, "artist" to item.artist)
+                }
+                delay(180)
+            }
+            ActionLog.log(
+                "artwork.batch",
+                "missing" to missing.size,
+                "changed" to changed,
+                "attempted" to artworkAttempts.size,
+            )
+            if (changed > 0) refreshFromRepo()
+        }
+    }
+
+    fun refreshArtwork() {
+        artworkAttempts.clear()
+        backfillArtwork(priorityKey = _state.value.player.track?.key)
+    }
+
+    private fun ensureArtwork(track: Track) {
+        if (track.cover.localPath != null || track.cover.remoteUrl != null) return
+        if (bridge == null) return
+        if (!artworkAttempts.add(track.key)) return
+        viewModelScope.launch {
+            val art = runCatching {
+                ArtworkResolver.resolve(
+                    context = getApplication(),
+                    key = track.key,
+                    title = track.title,
+                    artist = track.artist,
+                    album = track.album,
+                    durationMs = track.durationMs,
+                )
+            }.getOrNull() ?: return@launch
+            val stored = withContext(Dispatchers.IO) {
+                runCatching {
+                    bridge.setTrackArt(track.key, art.localPath, art.remoteUrl)
+                    bridge.updateTrackMetadata(
+                        track.key,
+                        track.artist,
+                        track.title,
+                        art.album,
+                        track.durationMs,
+                        art.remoteUrl,
+                    )
+                }.isSuccess
+            }
+            if (!stored) return@launch
+            ActionLog.log("artwork.done", "title" to track.title, "artist" to track.artist)
+            _state.update { current ->
+                current.mapTrack(track.key) { item ->
+                    item.copy(cover = coverFor(item.title, art.localPath, art.remoteUrl))
+                }
+            }
+            refreshFromRepo()
+        }
     }
 
     private fun findTrack(key: String): Track? {
@@ -805,6 +991,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _messages.emit("Importando ${uris.size} archivo(s)…")
             val result = withContext(Dispatchers.IO) { importBlocking(uris) }
             refreshFromRepo()
+            backfillArtwork()
             ActionLog.log("import.done", "ok" to result.first, "failed" to result.second)
             val text = buildString {
                 append("Importadas ${result.first} canciones")
@@ -938,6 +1125,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             },
             queue = if (sameQueue) existing.queue else queue.map(::map),
             lyrics = if (existing.track?.key == mapped?.key) existing.lyrics else emptyList(),
+            lyricsSynced = if (existing.track?.key == mapped?.key) existing.lyricsSynced else false,
+            lyricsSource = if (existing.track?.key == mapped?.key) existing.lyricsSource else null,
+            lyricsLoading = if (existing.track?.key == mapped?.key) existing.lyricsLoading else false,
         )
     }
 

@@ -43,6 +43,34 @@ class RustBridge private constructor(private val engine: SpoteEngine) {
 
     fun toggleFavorite(key: String): Boolean = engine.toggleFavorite(key)
 
+    fun tracksWithoutArt(limit: Int): List<Track> =
+        engine.tracksWithoutArt(limit.toUInt()).map { it.toModel() }
+
+    fun setTrackArt(key: String, artPath: String?, artUrl: String?) =
+        engine.setTrackArt(key, artPath, artUrl)
+
+    fun updateTrackMetadata(
+        key: String,
+        artist: String,
+        title: String,
+        album: String?,
+        durationMs: Long,
+        artUrl: String?,
+    ) = engine.updateTrackMetadata(
+        key,
+        artist,
+        title,
+        album,
+        durationMs.toULong(),
+        artUrl,
+    )
+
+    fun duplicateCount(): Long = engine.duplicateCount()
+
+    fun mergeDuplicates(): Int = engine.mergeDuplicates().toInt()
+
+    fun backupLibrary(path: String) = engine.backupLibrary(path)
+
     fun createPlaylist(name: String): Long = engine.createPlaylist(name)
 
     fun deletePlaylist(id: Long) = engine.deletePlaylist(id)
@@ -88,7 +116,7 @@ fun TrackDto.toModel(): Track = Track(
     artist = artist,
     album = album,
     durationMs = durationMs.toLong(),
-    cover = coverFor(title, artPath),
+    cover = coverFor(title, artPath, artUrl),
     downloaded = downloaded,
     favorite = favorite,
     localPath = path,
@@ -109,7 +137,7 @@ fun AlbumDto.toModel(tracks: List<Track>): Album = Album(
     title = album,
     artist = artist,
     year = 0,
-    cover = coverFor(album, artPath),
+    cover = coverFor(album, artPath, artUrl),
     tracks = tracks,
 )
 
