@@ -430,38 +430,79 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     truncate_chars(&mut title, text_w as usize);
     let title_x = title_right.saturating_sub(title.chars().count() as u16);
     put(buf, title_x, rect.y, &title, color(pal.text), None);
-    let meta = match track.album.as_deref().filter(|album| !album.is_empty()) {
-        Some(album) => format!("{}  ·  {}", track.artist, album),
-        None => track.artist.clone(),
-    };
-    let mut meta = meta;
-    truncate_chars(&mut meta, text_w as usize);
-    let meta_x = title_right.saturating_sub(meta.chars().count() as u16);
-    put(
-        buf,
-        meta_x,
-        rect.y + 1,
-        &meta,
-        color(pal.secondary),
-        None,
-    );
     app.hit.add(rect, Action::Tab(Tab::Now));
-    let artist_w = (track.artist.chars().count() as u16).min(text_w);
+
+    // Artista y álbum van por separado para que cada uno tenga su hitbox y su
+    // resaltado animado. La línea se alinea a la derecha como antes.
+    let mut artist = track.artist.clone();
+    truncate_chars(&mut artist, text_w as usize);
+    let album = track
+        .album
+        .as_deref()
+        .filter(|album| !album.is_empty())
+        .map(str::to_string);
+    let artist_w = artist.chars().count() as u16;
+    let sep = "  ·  ";
+    let sep_w = sep.chars().count() as u16;
+    let mut album = album;
+    if album.as_ref().is_some_and(|name| {
+        artist_w + sep_w + name.chars().count() as u16 > text_w
+    }) {
+        if let Some(name) = album.as_mut() {
+            let room = text_w.saturating_sub(artist_w + sep_w);
+            if room > 2 {
+                truncate_chars(name, room as usize);
+            } else {
+                album = None;
+            }
+        }
+    }
+    let album_w = album
+        .as_ref()
+        .map(|name| name.chars().count() as u16)
+        .unwrap_or(0);
+    let line_w = artist_w + if album_w > 0 { sep_w + album_w } else { 0 };
+    let line_x = title_right.saturating_sub(line_w);
+    let hover_artist = app.hover == Some(Action::OpenArtist(track.artist.clone()));
     if artist_w > 1 {
-        let artist_x = meta_x.min(title_right.saturating_sub(artist_w));
+        link_at(
+            buf,
+            line_x,
+            rect.y + 1,
+            artist_w,
+            &artist,
+            pal,
+            pal.secondary,
+            hover_artist,
+            app.ui_time(),
+        );
         app.hit.add(
-            Rect::new(artist_x, rect.y + 1, artist_w, 1),
+            Rect::new(line_x, rect.y + 1, artist_w, 1),
             Action::OpenArtist(track.artist.clone()),
         );
-        if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
-            let album_x = artist_x + artist_w + 5;
-            let album_w = title_right.saturating_sub(album_x);
-            if album_w > 2 {
-                app.hit.add(
-                    Rect::new(album_x, rect.y + 1, album_w, 1),
-                    Action::OpenAlbum(album.to_string(), track.artist.clone()),
-                );
-            }
+    }
+    if let Some(album) = album {
+        let sep_x = line_x + artist_w;
+        put(buf, sep_x, rect.y + 1, sep, color(pal.dim), None);
+        let album_x = sep_x + sep_w;
+        let hover_album =
+            app.hover == Some(Action::OpenAlbum(album.clone(), track.artist.clone()));
+        let drawn = link_at(
+            buf,
+            album_x,
+            rect.y + 1,
+            album_w,
+            &album,
+            pal,
+            pal.muted,
+            hover_album,
+            app.ui_time(),
+        );
+        if drawn > 1 {
+            app.hit.add(
+                Rect::new(album_x, rect.y + 1, drawn, 1),
+                Action::OpenAlbum(album, track.artist.clone()),
+            );
         }
     }
 }
@@ -730,21 +771,19 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
 
     // Derecha: viz, arte, spotify (separados del resto).
     let mut right = rect.x + rect.width.saturating_sub(2);
+    let art_label = if app.art_mode == ArtMode::Plain {
+        "arte".to_string()
+    } else {
+        format!("arte {}", app.art_mode.label())
+    };
     let mut items: Vec<(String, Action, Rgb)> = vec![
         (
             app.viz.preset_name().to_string(),
             Action::VizNext,
             pal.primary,
         ),
-        (
-            format!("arte {}", app.art_mode.label()),
-            Action::ArtMode,
-            pal.dim,
-        ),
+        (art_label, Action::ArtMode, pal.dim),
     ];
-    if let Some(section) = app.song_section {
-        items.push((section.label().to_string(), Action::VizNext, pal.secondary));
-    }
     if app.follow_spotify {
         items.push(("sistema".into(), Action::ToggleFollow, pal.secondary));
     }
@@ -1103,25 +1142,20 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
                 }
             )
         } else if app.follow_spotify {
-            "modo acompañante del sistema (MPRIS)".to_string()
+            "sistema (MPRIS)".to_string()
         } else {
-            format!(
-                "{} pistas · {} descargadas",
-                app.lib.count().unwrap_or(0),
-                app.lib.ready_count().unwrap_or(0)
-            )
+            // Sin estado que contar, la barra se queda solo con los atajos.
+            // Los contadores de la biblioteca viven en su pestaña y no
+            // necesitan ocupar el pie en todas las vistas.
+            String::new()
         }
     } else if app.follow_spotify {
-        "modo acompañante del sistema (MPRIS)".to_string()
+        "sistema (MPRIS)".to_string()
     } else {
-        format!(
-            "{} pistas · {} descargadas",
-            app.lib.count().unwrap_or(0),
-            app.lib.ready_count().unwrap_or(0)
-        )
+        String::new()
     };
     let width = right_text.chars().count() as u16;
-    if rect.width > width + 4 {
+    if width > 0 && rect.width > width + 4 {
         let right_rect = Rect::new(rect.x + rect.width - width - 2, rect.y, width, 1);
         text_at(
             buf,
@@ -1143,7 +1177,9 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
     // teclas que no existen o que hacen otra cosa.
     let hints = app.hints();
     let mut x = rect.x + 1;
-    for hint in hints {
+    // Cinco atajos como máximo: el pie es una ayuda, no un manual. El resto
+    // sigue disponible en `?`.
+    for hint in hints.into_iter().take(5) {
         let key_width = hint.key.chars().count() as u16 + 2;
         let usable_right = rect.x + rect.width.saturating_sub((width + 4).min(rect.width));
         if x + key_width + hint.label.chars().count() as u16 + 3 > usable_right {

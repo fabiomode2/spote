@@ -17,33 +17,49 @@ impl App {
 
     /// Abre el álbum por nombre desde cualquier nombre clicable de la UI.
     pub(super) fn open_album_by_name(&mut self, album: &str, artist: &str) {
-        // La pestaña de álbumes ya no existe: en «ahora» o biblioteca
-        // `self.albums` puede estar vacío. Se consulta la agrupación actual.
-        let candidates = if self.albums.is_empty() {
-            self.lib.albums().unwrap_or_default()
-        } else {
-            self.albums.clone()
-        };
-        let found = candidates
-            .iter()
-            .find(|row| {
-                row.album.eq_ignore_ascii_case(album)
-                    && (artist.is_empty() || row.artist.eq_ignore_ascii_case(artist))
+        // Se consulta la biblioteca completa: `self.albums` puede estar
+        // filtrado por el buscador de discos y dejar fuera justo el que se
+        // acaba de pulsar.
+        let all = self.lib.albums().unwrap_or_else(|_| self.albums.clone());
+        let wanted_album = spote_core::util::normalize(album);
+        let wanted_artist = spote_core::util::normalize(artist);
+        // El mismo disco aparece a veces con el artista escrito de dos
+        // formas («Biberon» y «Bíberon»): para agrupar se compara sin
+        // acentos ni mayúsculas. Si no se hiciera, abrir la pista descargada
+        // enseñaba solo esa y escondía el resto del álbum.
+        let matching: Vec<AlbumRow> = all
+            .into_iter()
+            .filter(|row| {
+                spote_core::util::normalize(&row.album) == wanted_album
+                    && artists_match(
+                        &wanted_artist,
+                        &spote_core::util::normalize(&row.artist),
+                    )
             })
+            .collect();
+        let primary = matching
+            .iter()
+            .max_by_key(|row| (row.track_count, row.ready_count))
             .cloned();
-        if let Some(row) = found {
-            let tracks = self
-                .lib
-                .album_tracks(&row.album, &row.artist)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|track| track.track)
-                .collect();
+        if let Some(row) = primary {
+            let album_name = row.album.clone();
+            let artist_name = row.artist.clone();
+            let mut rows = Vec::new();
+            for variant in &matching {
+                rows.extend(
+                    self.lib
+                        .album_tracks(&variant.album, &variant.artist)
+                        .unwrap_or_default(),
+                );
+            }
+            rows.sort_by_key(|track| track.id);
+            let rows = dedupe_album_rows(rows);
+            let tracks = rows.into_iter().map(|track| track.track).collect();
             self.album_page = Some(AlbumPage {
                 provider: "local".into(),
-                id: format!("{}:{}", row.artist, row.album),
-                title: row.album,
-                artist: row.artist,
+                id: format!("{artist_name}:{album_name}"),
+                title: album_name,
+                artist: artist_name,
                 cover_url: row.art_url,
                 cover_path: row.art_path,
                 release_date: None,
@@ -54,6 +70,13 @@ impl App {
             self.album_page_status.clear();
             self.detail = Some(Detail::Album);
             self.overlay = Overlay::None;
+            // La biblioteca local solo conoce lo descargado. Se pide la ficha
+            // al catálogo para completar el tracklist: si hay una sola pista
+            // bajada de un disco de diez, el panel no debe enseñar solo esa.
+            // Si no hay red, la lista local se queda como está (sin errores).
+            // Se usa el artista agrupado en la biblioteca, no el del enlace:
+            // el disco local ya está identificado y no hace falta adivinar.
+            self.meta_worker.album_search(row.album.clone(), row.artist.clone());
         } else {
             // No está descargado: se busca la ficha en el catálogo, igual que
             // al pulsar un álbum en los resultados de búsqueda.
@@ -98,6 +121,12 @@ impl App {
     }
 
     pub(super) fn open_album_info(&mut self, info: spote_core::spotify_api::AlbumInfo) {
+        let tracks = info
+            .tracks
+            .iter()
+            .map(super::artist::spotify_track_ref)
+            .map(|track| self.localize_track(track))
+            .collect();
         self.album_page = Some(AlbumPage {
             provider: info.provider,
             id: info.id,
@@ -106,17 +135,68 @@ impl App {
             cover_url: info.cover_url,
             cover_path: None,
             release_date: info.release_date,
-            tracks: info
-                .tracks
-                .iter()
-                .map(super::artist::spotify_track_ref)
-                .collect(),
+            tracks,
             selected: 0,
         });
         self.album_page_loading = false;
         self.album_page_status.clear();
         self.detail = Some(Detail::Album);
         self.overlay = Overlay::None;
+    }
+
+    /// Reemplaza una ficha local por la del catálogo conservando las pistas
+    /// que ya estaban descargadas. El catálogo manda en el orden, la portada y
+    /// los metadatos; lo que exista en disco se reconoce por clave o por
+    /// artista+título para que el ✓ de descargada siga saliendo.
+    pub(super) fn complete_local_album(
+        &self,
+        mut page: AlbumPage,
+        info: spote_core::spotify_api::AlbumInfo,
+    ) -> AlbumPage {
+        let local_tracks = std::mem::take(&mut page.tracks);
+        let remote: Vec<TrackRef> = info
+            .tracks
+            .iter()
+            .map(super::artist::spotify_track_ref)
+            .collect();
+        // El catálogo manda en el orden. Las pistas locales que no aparezcan
+        // en él se añaden al final en vez de desaparecer.
+        let tracks = merge_album_tracks(&remote, &local_tracks);
+        page.provider = info.provider;
+        page.id = info.id;
+        page.title = info.title;
+        page.artist = info.artist;
+        page.cover_url = info.cover_url.or(page.cover_url);
+        page.release_date = info.release_date.or(page.release_date);
+        page.selected = page.selected.min(tracks.len().saturating_sub(1));
+        page.tracks = tracks;
+        page
+    }
+
+    /// Cambia la clave de una pista del catálogo por la de su copia local
+    /// descargada (si existe). Así el tracklist marca ✓ y reproduce el
+    /// fichero de disco en vez de resolver otro stream.
+    fn localize_track(&self, track: TrackRef) -> TrackRef {
+        let local = self
+            .lib
+            .track_by_key(&track.key)
+            .ok()
+            .flatten()
+            .filter(TrackRow::playable)
+            .or_else(|| {
+                self.lib
+                    .find_by_meta(&track.artist, &track.title, track.duration_ms)
+                    .ok()
+                    .flatten()
+                    .filter(TrackRow::playable)
+            });
+        match local {
+            Some(row) => TrackRef {
+                key: row.track.key,
+                ..track
+            },
+            None => track,
+        }
     }
 
     pub(crate) fn request_album_page_art(&mut self, page: &AlbumPage, w: u16, h: u16) {
@@ -412,5 +492,171 @@ impl App {
             art_url: album.art_url.clone(),
             source_hint: None,
         }
+    }
+}
+
+/// El mismo disco puede venir con el artista escrito de dos formas
+/// («Biberon» / «Bíberon») según el proveedor. Se comparan ya normalizados.
+fn artists_match(a: &str, b: &str) -> bool {
+    a.is_empty() || b.is_empty() || a == b || a.contains(b) || b.contains(a)
+}
+
+/// La biblioteca puede tener la misma canción dos veces (una clave ISRC y
+/// otra de Spotify/YouTube). En el tracklist del álbum se enseña una sola,
+/// prefiriendo la copia que tiene fichero local.
+fn dedupe_album_rows(rows: Vec<TrackRow>) -> Vec<TrackRow> {
+    let mut out: Vec<TrackRow> = Vec::new();
+    for row in rows {
+        if let Some(index) = out
+            .iter()
+            .position(|kept| same_song(&kept.track, &row.track))
+        {
+            if row.playable() && !out[index].playable() {
+                out[index] = row;
+            }
+        } else {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Mezcla el tracklist del catálogo con las copias locales. Las pistas que
+/// existen en disco conservan su clave (para que `local_path` acierte) pero
+/// toman los metadatos del catálogo. Lo local que no esté en el remoto se
+/// queda al final para no esconder descargas.
+fn merge_album_tracks(remote: &[TrackRef], local: &[TrackRef]) -> Vec<TrackRef> {
+    let mut used_local: Vec<&str> = Vec::new();
+    let mut out = Vec::with_capacity(remote.len().max(local.len()));
+    for track in remote {
+        let matched = local.iter().find(|candidate| {
+            !used_local.iter().any(|key| *key == candidate.key) && same_song(candidate, track)
+        });
+        match matched {
+            Some(candidate) => {
+                used_local.push(&candidate.key);
+                out.push(TrackRef {
+                    key: candidate.key.clone(),
+                    ..track.clone()
+                });
+            }
+            None => out.push(track.clone()),
+        }
+    }
+    for track in local {
+        // No se añade si ya salió en el catálogo con otra clave (mismo
+        // título/artista/duración): era la copia duplicada de la biblioteca.
+        if !used_local.iter().any(|key| *key == track.key)
+            && !out
+                .iter()
+                .any(|other| other.key == track.key || same_song(other, track))
+        {
+            out.push(track.clone());
+        }
+    }
+    out
+}
+
+/// ¿Dos pistas son la misma canción aunque vengan de proveedores distintos?
+/// El título manda; la duración evita confundir una versión de directo o un
+/// remix, y el artista se compara de forma laxa porque YouTube suele añadir
+/// colaboraciones al nombre.
+fn same_song(a: &TrackRef, b: &TrackRef) -> bool {
+    if a.key == b.key {
+        return true;
+    }
+    let title_a = spote_core::util::normalize(&a.title);
+    let title_b = spote_core::util::normalize(&b.title);
+    if title_a.is_empty() || title_b.is_empty() {
+        return false;
+    }
+    if title_a != title_b && !title_a.contains(&title_b) && !title_b.contains(&title_a) {
+        return false;
+    }
+    if a.duration_ms > 0
+        && b.duration_ms > 0
+        && a.duration_ms.abs_diff(b.duration_ms) > 8_000
+    {
+        return false;
+    }
+    let artist_a = spote_core::util::normalize(&a.artist);
+    let artist_b = spote_core::util::normalize(&b.artist);
+    artist_a.is_empty()
+        || artist_b.is_empty()
+        || artist_a == artist_b
+        || artist_a.contains(&artist_b)
+        || artist_b.contains(&artist_a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(key: &str, title: &str, duration_ms: u64) -> TrackRef {
+        TrackRef {
+            key: key.into(),
+            title: title.into(),
+            artist: "Biberon".into(),
+            album: Some("¡Se cayó la bocina!".into()),
+            duration_ms,
+            art_url: None,
+            source_hint: None,
+        }
+    }
+
+    #[test]
+    fn catalog_album_keeps_the_downloaded_key_for_the_same_song() {
+        let local = vec![track("youtube:abc", "Regular", 139_000)];
+        let remote = vec![
+            track("isrc:uno", "Otra", 120_000),
+            track("isrc:dos", "Regular", 139_500),
+        ];
+        let merged = merge_album_tracks(&remote, &local);
+        assert_eq!(merged.len(), 2, "no debe duplicar la descarga local");
+        assert_eq!(merged[1].key, "youtube:abc");
+        assert_eq!(merged[1].title, "Regular");
+    }
+
+    #[test]
+    fn local_bonus_tracks_survive_after_the_catalog_list() {
+        let local = vec![
+            track("youtube:abc", "Regular", 139_000),
+            track("youtube:directo", "Regular (directo)", 150_000),
+        ];
+        let remote = vec![track("isrc:dos", "Regular", 139_500)];
+        let merged = merge_album_tracks(&remote, &local);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].key, "youtube:abc");
+        assert_eq!(merged[1].key, "youtube:directo");
+    }
+
+    #[test]
+    fn mismatched_duration_is_not_the_same_song() {
+        let local = track("youtube:abc", "Regular", 139_000);
+        let remote = track("isrc:dos", "Regular", 190_000);
+        assert!(!same_song(&local, &remote));
+    }
+
+    #[test]
+    fn accented_artist_is_the_same_album_group() {
+        let mut accented = track("isrc:bk4", "Regular", 115_000);
+        accented.artist = "Bíberon".into();
+        let plain = track("spotify:track:6nn", "Regular", 115_336);
+        assert!(artists_match(
+            &spote_core::util::normalize("Biberon"),
+            &spote_core::util::normalize("Bíberon")
+        ));
+        assert!(same_song(&plain, &accented));
+    }
+
+    #[test]
+    fn duplicate_local_copies_do_not_repeat_after_the_catalog_merge() {
+        let local = vec![
+            track("spotify:track:6nn", "Regular", 115_336),
+            track("isrc:bk4", "Regular", 115_000),
+        ];
+        let remote = vec![track("isrc:remote", "Regular", 115_000)];
+        let merged = merge_album_tracks(&remote, &local);
+        assert_eq!(merged.len(), 1, "la copia local duplicada no se repite");
     }
 }

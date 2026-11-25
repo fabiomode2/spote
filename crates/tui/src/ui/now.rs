@@ -239,54 +239,85 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     y += 1;
 
     // Título + artista/álbum en la misma línea (el título manda; lo demás se
-    // recorta si no cabe).
+    // recorta si no cabe). Artista y álbum se pintan por separado para que
+    // cada uno tenga su hitbox y su resaltado animado.
     let title = track.title.clone();
-    let meta = match &track.album {
-        Some(album) if !album.is_empty() => format!("{}  ·  {}", track.artist, album),
-        _ => track.artist.clone(),
-    };
     let title_width = title.chars().count() as u16;
-    let mut spans = vec![Span::styled(
+    text_at(
+        buf,
+        Rect::new(inner.x, y, inner.width, 1),
         title,
         Style::new()
             .fg(color(mix_oklab(pal.text, pal.primary, 0.22)))
             .add_modifier(Modifier::BOLD),
-    )];
-    let room = inner.width.saturating_sub(title_width + 3);
-    if room > 10 {
-        let mut meta = meta;
-        truncate_chars(&mut meta, room as usize);
-        spans.push(Span::styled(
-            format!("  ·  {meta}"),
-            Style::new()
-                .fg(color(pal.secondary))
-                .add_modifier(Modifier::UNDERLINED),
-        ));
-    }
-    line_at(
-        buf,
-        Rect::new(inner.x, y, inner.width, 1),
-        spans,
         Alignment::Left,
     );
-    // Artista y álbum clicables en la cabecera (como en Spotify).
+    let room = inner.width.saturating_sub(title_width + 3);
     if room > 6 {
         let meta_x = inner.x + title_width + 3;
-        let artist_w = (track.artist.chars().count() as u16).min(room);
+        let mut artist = track.artist.clone();
+        truncate_chars(&mut artist, room as usize);
+        let artist_w = artist.chars().count() as u16;
+        let mut album = track
+            .album
+            .as_deref()
+            .filter(|album| !album.is_empty())
+            .map(str::to_string);
+        let sep = "  ·  ";
+        let sep_w = sep.chars().count() as u16;
+        let album_room = room.saturating_sub(artist_w + sep_w);
+        if album
+            .as_ref()
+            .is_some_and(|name| name.chars().count() as u16 > album_room)
+        {
+            if album_room > 2 {
+                if let Some(name) = album.as_mut() {
+                    truncate_chars(name, album_room as usize);
+                }
+            } else {
+                album = None;
+            }
+        }
         if artist_w > 1 {
+            let hover = app.hover == Some(Action::OpenArtist(track.artist.clone()));
+            link_at(
+                buf,
+                meta_x,
+                y,
+                artist_w,
+                &artist,
+                pal,
+                pal.secondary,
+                hover,
+                app.ui_time(),
+            );
             app.hit.add(
                 Rect::new(meta_x, y, artist_w, 1),
                 Action::OpenArtist(track.artist.clone()),
             );
         }
-        if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
-            let album_x = meta_x + artist_w + 3;
-            let album_w = (album.chars().count() as u16)
-                .min(inner.x.saturating_add(inner.width).saturating_sub(album_x));
-            if album_w > 1 {
+        if let Some(album) = album {
+            let sep_x = meta_x + artist_w;
+            put(buf, sep_x, y, sep, color(pal.dim), None);
+            let album_x = sep_x + sep_w;
+            let album_w = album.chars().count() as u16;
+            let hover =
+                app.hover == Some(Action::OpenAlbum(album.clone(), track.artist.clone()));
+            let drawn = link_at(
+                buf,
+                album_x,
+                y,
+                album_w,
+                &album,
+                pal,
+                pal.muted,
+                hover,
+                app.ui_time(),
+            );
+            if drawn > 1 {
                 app.hit.add(
-                    Rect::new(album_x, y, album_w, 1),
-                    Action::OpenAlbum(album.to_string(), track.artist.clone()),
+                    Rect::new(album_x, y, drawn, 1),
+                    Action::OpenAlbum(album, track.artist.clone()),
                 );
             }
         }

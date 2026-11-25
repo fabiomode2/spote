@@ -148,7 +148,6 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                 artist.push_str("  ·  ↓");
             }
             truncate_chars(&mut artist, text_w as usize);
-            put(buf, text_x, y + 1, &artist, color(pal.secondary), None);
             put(
                 buf,
                 text_x,
@@ -166,8 +165,20 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
             app.hit.add(card, Action::QueueRow(index));
             // El nombre del artista de la tarjeta abre su ficha; la × sigue
             // teniendo prioridad porque se registra después.
-            let artist_w = (track_ref.artist.chars().count() as u16).min(text_w);
+            let artist_w = (artist.chars().count() as u16).min(text_w);
             if artist_w > 0 {
+                let hover = app.hover == Some(Action::OpenArtist(track_ref.artist.clone()));
+                link_at(
+                    buf,
+                    text_x,
+                    y + 1,
+                    artist_w,
+                    &artist,
+                    pal,
+                    pal.secondary,
+                    hover,
+                    app.ui_time(),
+                );
                 app.hit.add(
                     Rect::new(text_x, y + 1, artist_w, 1),
                     Action::OpenArtist(track_ref.artist.clone()),
@@ -271,18 +282,26 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
             let artist_x = row.x + row.width - remove_rect.width - artist_w - 1;
             let mut artist = artist;
             truncate_chars(&mut artist, artist_w.saturating_sub(1) as usize);
-            put(buf, artist_x, y, &artist, color(pal.dim), None);
-            if !artist.is_empty() {
-                app.hit.add(
-                    Rect::new(artist_x, y, artist.chars().count() as u16, 1),
-                    Action::OpenArtist(
-                        if app.room_queue.is_empty() {
-                            app.queue[index].track.artist.clone()
-                        } else {
-                            app.room_queue[index].track.artist.clone()
-                        },
-                    ),
+            let drawn = artist.chars().count() as u16;
+            if drawn > 0 {
+                let action = Action::OpenArtist(if app.room_queue.is_empty() {
+                    app.queue[index].track.artist.clone()
+                } else {
+                    app.room_queue[index].track.artist.clone()
+                });
+                let hover = app.hover == Some(action.clone());
+                link_at(
+                    buf,
+                    artist_x,
+                    y,
+                    drawn,
+                    &artist,
+                    pal,
+                    pal.dim,
+                    hover,
+                    app.ui_time(),
                 );
+                app.hit.add(Rect::new(artist_x, y, drawn, 1), action);
             }
         }
         if pending {

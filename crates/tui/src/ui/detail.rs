@@ -635,18 +635,16 @@ fn draw_artist_albums(
         }
 
         let title = fit(&album.title, card_w);
-        text_at(
+        link_at(
             buf,
-            Rect::new(x, cards_y + cover_h, card_w, 1),
-            title,
-            Style::new()
-                .fg(color(if hover { pal.primary } else { pal.text }))
-                .add_modifier(if hover {
-                    Modifier::BOLD | Modifier::UNDERLINED
-                } else {
-                    Modifier::BOLD
-                }),
-            Alignment::Left,
+            x,
+            cards_y + cover_h,
+            chars_w(&title),
+            &title,
+            pal,
+            if hover { pal.primary } else { pal.text },
+            hover,
+            app.ui_time(),
         );
         let year = album
             .release_year
@@ -1125,26 +1123,28 @@ fn draw_clickable_artist(
     let hover = app.hover == Some(Action::OpenArtist(artist.to_string()));
     let show_arrow = width >= 5;
     let label = fit(artist, if show_arrow { width - 2 } else { width });
-    let label_w = chars_w(&label);
+    let label_w = link_at(
+        buf,
+        x,
+        y,
+        chars_w(&label),
+        &label,
+        pal,
+        pal.secondary,
+        hover,
+        app.ui_time(),
+    );
     if label_w == 0 {
         return;
     }
-    text_at(
-        buf,
-        Rect::new(x, y, label_w, 1),
-        label,
-        Style::new()
-            .fg(color(if hover { pal.text } else { pal.secondary }))
-            .add_modifier(if hover {
-                Modifier::BOLD | Modifier::UNDERLINED
-            } else {
-                Modifier::BOLD
-            }),
-        Alignment::Left,
-    );
     let mut hit_w = label_w;
     if show_arrow {
-        put(buf, x + label_w, y, " ↗", color(pal.primary), None);
+        let arrow_fg = if hover {
+            mix_oklab(pal.primary, pal.text, 0.35)
+        } else {
+            pal.primary
+        };
+        put(buf, x + label_w, y, " ↗", color(arrow_fg), None);
         hit_w += 2;
     }
     app.hit.add(

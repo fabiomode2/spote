@@ -3455,6 +3455,20 @@ impl App {
             || self.downloads.iter().any(DownloadInfo::active)
             || self.search.loading
             || self.album_page_loading
+            // El resaltado de los enlaces solo necesita frames mientras el
+            // ratón está encima; el resto del tiempo vale el ritmo de reposo.
+            || matches!(
+                self.hover,
+                Some(Action::OpenArtist(_))
+                    | Some(Action::OpenAlbum(_, _))
+                    | Some(Action::ArtistAlbum(_))
+            )
+    }
+
+    /// Reloj de la UI para animaciones que no dependen del visualizador.
+    /// `mosaic_time` avanza en cada tick aunque no haya efectos de fondo.
+    pub fn ui_time(&self) -> f32 {
+        self.mosaic_time
     }
 
     /// Ritmo del canvas a pantalla completa (fondo del visualizador, zen).
@@ -4058,22 +4072,48 @@ impl App {
                     artist,
                     result,
                 } => {
-                    let current = self.album_page.as_ref().is_some_and(|page| {
-                        page.provider == "search" && page.title.eq_ignore_ascii_case(&album)
+                    let kind = self.album_page.as_ref().and_then(|page| {
+                        let title = util::normalize(&page.title);
+                        let wanted = util::normalize(&album);
+                        let page_artist = util::normalize(&page.artist);
+                        let wanted_artist = util::normalize(&artist);
+                        let same = !title.is_empty()
+                            && title == wanted
+                            && (artist.is_empty()
+                                || page_artist.contains(&wanted_artist)
+                                || wanted_artist.contains(&page_artist));
+                        match page.provider.as_str() {
+                            "search" if same => Some("search"),
+                            "local" if same => Some("local"),
+                            _ => None,
+                        }
                     });
-                    if current {
+                    if let Some(kind) = kind {
                         self.album_page_loading = false;
                         match result {
                             Ok(info) => {
-                                self.open_album_info(info);
+                                if kind == "local" {
+                                    // La ficha local ya estaba pintada: se
+                                    // completa con el tracklist del catálogo
+                                    // sin parpadeo ni perder la portada.
+                                    if let Some(page) = self.album_page.take() {
+                                        self.album_page =
+                                            Some(self.complete_local_album(page, info));
+                                    }
+                                } else {
+                                    self.open_album_info(info);
+                                }
                             }
-                            Err(err) => {
+                            Err(err) if kind == "search" => {
                                 self.album_page_status = format!("álbum: {err}");
                                 self.toast(
                                     format!("no encontré «{album}» de {artist}: {err}"),
                                     ToastKind::Warn,
                                 );
                             }
+                            // Sin red, el álbum local se queda tal cual: ya
+                            // era una ficha válida y no hace falta un aviso.
+                            Err(_) => {}
                         }
                     }
                 }

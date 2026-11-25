@@ -293,8 +293,19 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         let mut artist = row.track.artist.clone();
         truncate_chars(&mut artist, g.title_w as usize);
         let artist_draw_w = artist.chars().count() as u16;
-        put(buf, g.text_x, y + 1, &artist, color(pal.secondary), None);
         if !artist.is_empty() {
+            let hover = app.hover == Some(Action::OpenArtist(row.track.artist.clone()));
+            link_at(
+                buf,
+                g.text_x,
+                y + 1,
+                g.title_w,
+                &artist,
+                pal,
+                pal.secondary,
+                hover,
+                app.ui_time(),
+            );
             app.hit.add(
                 Rect::new(g.text_x, y + 1, artist_draw_w.min(g.title_w), 1),
                 Action::OpenArtist(row.track.artist.clone()),
@@ -304,15 +315,20 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             if let Some(album) = row.track.album.as_deref().filter(|album| !album.is_empty()) {
                 let mut shown = album.to_string();
                 truncate_chars(&mut shown, g.album_w as usize);
-                put(
+                let album_draw_w = shown.chars().count() as u16;
+                let hover =
+                    app.hover == Some(Action::OpenAlbum(album.to_string(), row.track.artist.clone()));
+                link_at(
                     buf,
                     g.album_x,
                     y,
+                    g.album_w,
                     &shown,
-                    color(if selected { pal.secondary } else { pal.muted }),
-                    None,
+                    pal,
+                    if selected { pal.secondary } else { pal.muted },
+                    hover,
+                    app.ui_time(),
                 );
-                let album_draw_w = shown.chars().count() as u16;
                 if album_draw_w > 0 {
                     app.hit.add(
                         Rect::new(g.album_x, y, album_draw_w.min(g.album_w), 1),
@@ -484,6 +500,9 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
         } else if hover {
             fill(buf, card, pal.surface_alt);
         }
+        // La tarjeta se registra antes que sus enlaces: en el HitMap gana el
+        // último, así el artista/álbum abren su ficha y el resto la fila.
+        app.hit.add(card, Action::SelectRow(index));
         let thumb = Rect::new(inner.x + 1, y, 6, card_h);
         draw_thumb(app, buf, thumb, &row.track, pal);
         let text_x = thumb.x + thumb.width + 2;
@@ -510,12 +529,77 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             None,
         );
         let mut artist = row.track.artist.clone();
-        if let Some(album) = &row.track.album {
-            artist.push_str("  ·  ");
-            artist.push_str(album);
-        }
         truncate_chars(&mut artist, text_w as usize);
-        put(buf, text_x, y + 1, &artist, color(pal.dim), None);
+        let artist_w = artist.chars().count() as u16;
+        let mut album = row
+            .track
+            .album
+            .as_deref()
+            .filter(|album| !album.is_empty())
+            .map(str::to_string);
+        let sep = "  ·  ";
+        let sep_w = sep.chars().count() as u16;
+        let album_room = text_w.saturating_sub(artist_w + sep_w);
+        if album
+            .as_ref()
+            .is_some_and(|name| name.chars().count() as u16 > album_room)
+        {
+            if album_room > 2 {
+                if let Some(name) = album.as_mut() {
+                    truncate_chars(name, album_room as usize);
+                }
+            } else {
+                album = None;
+            }
+        }
+        let album_w = album
+            .as_ref()
+            .map(|name| name.chars().count() as u16)
+            .unwrap_or(0);
+        let meta_x = text_x;
+        let meta_end = text_x + text_w;
+        if artist_w > 0 && meta_x < meta_end {
+            let hover = app.hover == Some(Action::OpenArtist(row.track.artist.clone()));
+            link_at(
+                buf,
+                meta_x,
+                y + 1,
+                text_w,
+                &artist,
+                pal,
+                pal.secondary,
+                hover,
+                app.ui_time(),
+            );
+            app.hit.add(
+                Rect::new(meta_x, y + 1, artist_w.min(text_w), 1),
+                Action::OpenArtist(row.track.artist.clone()),
+            );
+        }
+        if let Some(album) = album {
+            let sep_x = meta_x + artist_w;
+            put(buf, sep_x, y + 1, sep, color(pal.dim), None);
+            let album_x = sep_x + sep_w;
+            let hover =
+                app.hover == Some(Action::OpenAlbum(album.clone(), row.track.artist.clone()));
+            let drawn = link_at(
+                buf,
+                album_x,
+                y + 1,
+                album_w,
+                &album,
+                pal,
+                pal.muted,
+                hover,
+                app.ui_time(),
+            );
+            if drawn > 1 {
+                app.hit.add(
+                    Rect::new(album_x, y + 1, drawn, 1),
+                    Action::OpenAlbum(album, row.track.artist.clone()),
+                );
+            }
+        }
         let mut meta = format!(
             "{}  ·  {}  ·  {}",
             format_ms(row.track.duration_ms),
@@ -537,25 +621,6 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             color(if row.favorite { pal.error } else { pal.dim }),
             None,
         );
-        app.hit.add(card, Action::SelectRow(index));
-        // El artista de la tarjeta gana al clic de fila: abre su ficha.
-        let artist_w = (row.track.artist.chars().count() as u16).min(text_w);
-        if artist_w > 0 {
-            app.hit.add(
-                Rect::new(text_x, y + 1, artist_w, 1),
-                Action::OpenArtist(row.track.artist.clone()),
-            );
-        }
-        if let Some(album) = row.track.album.as_deref().filter(|album| !album.is_empty()) {
-            let album_x = text_x + artist_w + 3;
-            let album_w = (text_x + text_w).saturating_sub(album_x);
-            if album_w > 3 {
-                app.hit.add(
-                    Rect::new(album_x, y + 1, album_w, 1),
-                    Action::OpenAlbum(album.to_string(), row.track.artist.clone()),
-                );
-            }
-        }
         if app.shift_held {
             let x = (inner.x + inner.width).saturating_sub(2);
             let hot = app.hover == Some(Action::LibraryRemove(index));
