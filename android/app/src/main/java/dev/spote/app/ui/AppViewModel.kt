@@ -273,11 +273,46 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(library = it.library.copy(isGrid = !it.library.isGrid)) }
     }
 
+    private val albumCache = mutableMapOf<String, Album>()
+    private val artistTracksCache = mutableMapOf<String, List<Track>>()
+    private val artistAlbumsCache = mutableMapOf<String, List<Album>>()
+
+    fun cacheAlbum(album: Album) {
+        albumCache[album.id] = album
+    }
+
     fun album(id: String): Album? {
+        albumCache[id]?.let { return it }
         val current = _state.value
         return current.library.albums.firstOrNull { it.id == id }
             ?: current.home.albums.firstOrNull { it.id == id }
     }
+
+    fun cacheArtist(name: String) {
+        val current = _state.value
+        val key = name.lowercase(Locale.ROOT)
+        artistTracksCache[key] = (
+            current.library.tracks +
+                current.home.recent +
+                current.search.results +
+                current.search.remoteResults
+            )
+            .filter { it.artist.equals(name, ignoreCase = true) }
+            .distinctBy { it.key }
+        artistAlbumsCache[key] = (
+            current.library.albums +
+                current.home.albums +
+                current.search.albums
+            )
+            .filter { it.artist.equals(name, ignoreCase = true) }
+            .distinctBy { it.id }
+    }
+
+    fun cachedArtistTracks(name: String): List<Track> =
+        artistTracksCache[name.lowercase(Locale.ROOT)].orEmpty()
+
+    fun cachedArtistAlbums(name: String): List<Album> =
+        artistAlbumsCache[name.lowercase(Locale.ROOT)].orEmpty()
 
     fun playlist(id: String): Playlist? {
         val current = _state.value
