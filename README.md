@@ -81,6 +81,10 @@ la propia TUI.
   el audio completo y deja todas las canciones al mismo volumen; se aplica en
   caliente y se puede apagar desde la propia pestaña o desde ajustes. Dentro de
   la pestaña, `←`/`→` cambia de control y `↑`/`↓` ajusta el valor.
+- **Amigos y Tunebat**: el panel de amigos muestra, además de la presencia,
+  los datos de **Tunebat** de la pista sonando: BPM, tonalidad, Camelot,
+  energy, danceability, happiness y popularidad. Se consulta solo al cambiar
+  de canción, se cachea en memoria y tiene respaldo compacto en paneles bajos.
 - **Salas**: `spoted` añade presencia, chat y cola compartida. La API exige una
   clave de cliente por persona (`X-Spote-Key`), las sesiones están atadas a esa
   clave y caducan. Ver [`docs/social.md`](docs/social.md).
@@ -88,7 +92,8 @@ la propia TUI.
   `spoted` sincroniza favoritas, escuchas y playlists por revisiones, sin subir
   audio ni rutas locales.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
-  `config.toml`.
+  `config.toml`. En **ajustes**, `/` abre un buscador inline por nombre,
+  sección o ayuda, igual que en discos y biblioteca.
 
 Los vídeos con verificación de edad necesitan una cuenta de YouTube ya
 verificada. Si configuras `[stream] cookies_from_browser`, spote reintenta el
@@ -103,7 +108,7 @@ YouTube no entrega ningún formato.
 | `space` | play/pausa | `a` | encolar |
 | `n` / `p` | siguiente / anterior | `f` | favorita |
 | `←` `→` | seek ±5 s | `g` | artista |
-| `/` | buscar · filtro en biblioteca | `T` | recortar intro/outro |
+| `/` | buscar · filtro en biblioteca, discos o ajustes | `T` | recortar intro/outro |
 | `u` | bucle de la pista | `F` | portada a pantalla completa |
 | `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |

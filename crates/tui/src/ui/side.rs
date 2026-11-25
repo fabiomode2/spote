@@ -331,6 +331,15 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         rect.width.saturating_sub(4),
         rect.height.saturating_sub(3),
     );
+    // Geometría compartida: la lista de amigos no puede pisar ni el bloque
+    // de Tunebat ni el pie.
+    let tunebat_extra = rect.height >= 11;
+    let tunebat_data_lines = if tunebat_extra { 3 } else { 2 };
+    let tunebat_base = (rect.height >= 8)
+        .then(|| rect.y + rect.height - (tunebat_data_lines + 3));
+    let list_bottom = tunebat_base
+        .map(|base| base.saturating_sub(1))
+        .unwrap_or_else(|| rect.y + rect.height - 3);
     let mut y = inner.y;
     if app.social.is_none() {
         text_at(
@@ -341,13 +350,15 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
             Alignment::Left,
         );
         y += 1;
-        text_at(
-            buf,
-            Rect::new(inner.x, y, inner.width, 1),
-            "configura [server] para ver amigos",
-            Style::new().fg(color(pal.dim)),
-            Alignment::Left,
-        );
+        if rect.height >= 12 {
+            text_at(
+                buf,
+                Rect::new(inner.x, y, inner.width, 1),
+                "configura [server] para ver amigos",
+                Style::new().fg(color(pal.dim)),
+                Alignment::Left,
+            );
+        }
     } else {
         let online = app.presence.iter().filter(|p| p.online).count();
         text_at(
@@ -360,9 +371,9 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         y += 1;
         let mut friends: Vec<_> = app.presence.iter().collect();
         friends.sort_by_key(|p| (!p.online, p.user.name.to_lowercase()));
-        let rows = inner.height.saturating_sub(2) as usize;
-        for presence in friends.into_iter().take(rows) {
-            if y + 1 >= rect.y + rect.height {
+        for presence in friends {
+            let needed = if presence.now_playing.is_some() { 2 } else { 1 };
+            if y + needed > list_bottom {
                 break;
             }
             let dot = if presence.online { "●" } else { "○" };
@@ -393,69 +404,73 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         }
     }
 
-    // Curva de "feeling" de la canción completa: se ve dónde vienen los drops
-    // y los tramos tranquilos, y la marca sigue la posición actual.
-    if let Some(map) = &app.song_map {
-        if map.duration_ms > 0 && rect.height > 10 {
-            let y = rect.y + rect.height - 5;
-            let w = inner.width.max(4);
-            for x in 0..w {
-                let t = x as f32 / (w.saturating_sub(1)).max(1) as f32;
-                let ms = (map.duration_ms as f32 * t) as u64;
-                let value = map.energy_at(ms);
-                let glyph = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-                    [(value * 7.9).clamp(0.0, 7.0) as usize];
-                put(
-                    buf,
-                    inner.x + x,
-                    y,
-                    glyph,
-                    color(mix_oklab(pal.dim, pal.primary, value)),
-                    None,
-                );
-            }
-            let ratio = if app.now.duration_ms > 0 {
-                app.now.position_ms as f32 / app.now.duration_ms as f32
-            } else {
-                0.0
-            };
-            let marker = inner.x + (w as f32 * ratio.clamp(0.0, 1.0)) as u16;
-            put(
-                buf,
-                marker.min(inner.x + w - 1),
-                y,
-                "│",
-                color(pal.text),
-                None,
+    // Tunebat: BPM, tonalidad y "feeling" de la pista actual. Sustituye a la
+    // curva de estribillos/drops. En paneles bajos se recorta a dos líneas de
+    // datos para que quepa sin comerse la lista de amigos.
+    if let Some(base) = tunebat_base {
+        let extra = tunebat_extra;
+        let mut y = base;
+        put(buf, inner.x, y, "TUNEBAT", color(pal.secondary), None);
+        y += 1;
+        if app.now.track.is_none() {
+            put(buf, inner.x, y, "sin reproducción", color(pal.dim), None);
+        } else if app.tunebat_loading {
+            put(buf, inner.x, y, "buscando…", color(pal.dim), None);
+            y += 1;
+            put(buf, inner.x, y, "en Tunebat", color(pal.dim), None);
+        } else if let Some(info) = &app.tunebat {
+            let mut bpm = info.bpm_line();
+            truncate_chars(&mut bpm, inner.width as usize);
+            put(buf, inner.x, y, &bpm, color(pal.text), None);
+            y += 1;
+            let mut feeling = format!(
+                "energy {:.0}% · dance {:.0}%",
+                info.energy * 100.0,
+                info.danceability * 100.0
             );
-            if let Some(section) = app.song_section {
-                let label = section.label().to_string();
-                let mut label = label;
-                truncate_chars(&mut label, inner.width as usize);
-                put(
-                    buf,
-                    inner.x,
-                    y.saturating_sub(1),
-                    &label,
-                    color(pal.secondary),
-                    None,
+            truncate_chars(&mut feeling, inner.width as usize);
+            put(buf, inner.x, y, &feeling, color(pal.muted), None);
+            if extra {
+                y += 1;
+                let mut pop = format!(
+                    "pop {} · happy {:.0}%",
+                    info.popularity,
+                    info.happiness * 100.0
                 );
+                truncate_chars(&mut pop, inner.width as usize);
+                put(buf, inner.x, y, &pop, color(pal.muted), None);
             }
+        } else {
+            put(buf, inner.x, y, "sin datos", color(pal.dim), None);
+            y += 1;
+            put(buf, inner.x, y, "en Tunebat", color(pal.dim), None);
         }
     }
 
-    // Pie: una o dos líneas de estado técnico, no un bloque entero.
+    // Pie: una o dos líneas de estado técnico, no un bloque entero. En
+    // paneles bajos el pie hace de resumen de Tunebat para que el dato siga
+    // visible sin quitarle la última fila a los amigos.
     let bpm = if app.show_bpm && app.audio.bpm > 0.0 {
         format!(" · {:.0} bpm", app.audio.bpm)
     } else {
         String::new()
     };
-    let footer = format!(
-        "{} · {}/{}{bpm}",
-        app.viz.preset_name(),
-        app.lib.ready_count().unwrap_or(0),
-        app.lib.count().unwrap_or(0)
-    );
+    let footer = if rect.height < 8 && app.now.track.is_some() {
+        if let Some(info) = &app.tunebat {
+            format!("TUNEBAT · {}", info.bpm_line())
+        } else if app.tunebat_loading {
+            "TUNEBAT · buscando…".to_string()
+        } else {
+            "TUNEBAT · sin datos".to_string()
+        }
+    } else {
+        format!(
+            "{} · {}/{}{bpm}",
+            app.viz.preset_name(),
+            app.lib.ready_count().unwrap_or(0),
+            app.lib.count().unwrap_or(0)
+        )
+    };
     if rect.height > 5 {
         let mut footer = footer;
         truncate_chars(&mut footer, inner.width as usize);

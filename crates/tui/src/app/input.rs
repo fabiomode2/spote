@@ -150,6 +150,54 @@ impl App {
             self.needs_redraw = true;
             return;
         }
+        // Buscador inline de ajustes: mismo patrón que discos/biblioteca.
+        if self.tab == Tab::Settings && self.settings_search_focus {
+            match key.code {
+                KeyCode::Esc => {
+                    if self.settings_query.is_empty() {
+                        self.settings_search_focus = false;
+                    } else {
+                        self.settings_query.clear();
+                        self.settings_clamp_selection();
+                    }
+                }
+                KeyCode::Enter => self.settings_search_focus = false,
+                KeyCode::Backspace => {
+                    self.settings_query.pop();
+                    self.settings_clamp_selection();
+                }
+                KeyCode::Tab => {
+                    self.settings_search_focus = false;
+                    self.tab = self.tab.next();
+                    self.enter_tab();
+                }
+                KeyCode::BackTab => {
+                    self.settings_search_focus = false;
+                    self.tab = self.tab.prev();
+                    self.enter_tab();
+                }
+                KeyCode::Up => self.settings_move(-1),
+                KeyCode::Down => self.settings_move(1),
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.settings_query.clear();
+                    self.settings_clamp_selection();
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.persist_volume();
+                    self.should_quit = true;
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.settings_query.push(c);
+                    self.settings_clamp_selection();
+                }
+                _ => {}
+            }
+            self.needs_redraw = true;
+            return;
+        }
         // En la vista de búsqueda se escribe directamente: no hace falta "/".
         if self.tab == Tab::Search {
             match key.code {
@@ -291,6 +339,8 @@ impl App {
                     self.lib_search_focus = true;
                 } else if self.tab == Tab::Albums {
                     self.album_search_focus = true;
+                } else if self.tab == Tab::Settings {
+                    self.settings_search_focus = true;
                 } else {
                     self.tab = Tab::Search;
                     self.search.results.clear();
@@ -390,7 +440,7 @@ impl App {
             }
             KeyCode::Up => {
                 if self.tab == Tab::Settings {
-                    self.settings_selected = self.settings_selected.saturating_sub(1);
+                    self.settings_move(-1);
                     return;
                 }
                 if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {
@@ -411,8 +461,7 @@ impl App {
             }
             KeyCode::Down => {
                 if self.tab == Tab::Settings {
-                    self.settings_selected =
-                        (self.settings_selected + 1).min(SettingRow::ALL.len() - 1);
+                    self.settings_move(1);
                     return;
                 }
                 if self.tab == Tab::Now && self.center_focus == CenterFocus::Lyrics {

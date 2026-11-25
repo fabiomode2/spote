@@ -5,12 +5,13 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use spote_core::artwork::{decode_image, render_cover, ArtMode, CoverArt, Palette};
 use spote_core::config;
 use spote_core::lyrics::{LyricsCandidate, LyricsDoc, LyricsService};
 use spote_core::spotify_api;
+use spote_core::tunebat::{self, TunebatInfo};
 use spote_core::util;
 use spote_protocol::TrackRef;
 
@@ -866,6 +867,99 @@ impl MetaWorker {
     }
 
     pub fn try_recv(&self) -> Option<MetaEvent> {
+        self.events.try_recv().ok()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tunebat: BPM, tonalidad y "feeling" de la pista sonando
+// ---------------------------------------------------------------------------
+
+pub struct TunebatJob {
+    key: String,
+    title: String,
+    artist: String,
+    album: Option<String>,
+    duration_ms: u64,
+}
+
+pub enum TunebatEvent {
+    Info {
+        key: String,
+        result: Result<Option<TunebatInfo>, String>,
+    },
+}
+
+pub struct TunebatWorker {
+    /// Solo interesa el último track pedido. Si el usuario salta diez
+    /// canciones mientras una consulta está en vuelo, las intermedias se
+    /// descartan en vez de encolarse detrás de la lenta.
+    slot: Arc<(Mutex<Option<TunebatJob>>, Condvar)>,
+    events: Receiver<TunebatEvent>,
+}
+
+impl TunebatWorker {
+    pub fn start() -> Self {
+        let slot: Arc<(Mutex<Option<TunebatJob>>, Condvar)> =
+            Arc::new((Mutex::new(None), Condvar::new()));
+        let worker_slot = Arc::clone(&slot);
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("spote-tunebat".into())
+            .spawn(move || loop {
+                let job = {
+                    let (lock, cvar) = &*worker_slot;
+                    let mut guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+                    while guard.is_none() {
+                        guard = cvar.wait(guard).unwrap_or_else(|err| err.into_inner());
+                    }
+                    guard.take().expect("hay trabajo")
+                };
+                let result = tunebat::lookup(
+                    &job.title,
+                    &job.artist,
+                    job.album.as_deref(),
+                    job.duration_ms,
+                )
+                .map_err(|err| err.to_string());
+                if event_tx
+                    .send(TunebatEvent::Info {
+                        key: job.key,
+                        result,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            })
+            .ok();
+        Self {
+            slot,
+            events: event_rx,
+        }
+    }
+
+    pub fn lookup(
+        &self,
+        key: String,
+        title: String,
+        artist: String,
+        album: Option<String>,
+        duration_ms: u64,
+    ) {
+        let (lock, cvar) = &*self.slot;
+        let mut slot = lock.lock().unwrap_or_else(|err| err.into_inner());
+        *slot = Some(TunebatJob {
+            key,
+            title,
+            artist,
+            album,
+            duration_ms,
+        });
+        cvar.notify_one();
+    }
+
+    pub fn try_recv(&self) -> Option<TunebatEvent> {
         self.events.try_recv().ok()
     }
 }

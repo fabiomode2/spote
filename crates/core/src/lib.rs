@@ -23,6 +23,7 @@ pub mod spotify;
 pub mod stream;
 pub mod spotify_api;
 pub mod system_media;
+pub mod tunebat;
 pub mod util;
 
 pub use spote_protocol as protocol;

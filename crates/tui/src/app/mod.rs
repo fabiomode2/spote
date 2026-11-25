@@ -24,7 +24,7 @@ use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackR
 
 use crate::fetch::{
     ArtKind, ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker,
-    SearchWorker, SongMapEvent, SongMapWorker,
+    SearchWorker, SongMapEvent, SongMapWorker, TunebatEvent, TunebatWorker,
 };
 use crate::social::{Social, SocialCmd, SocialEvent};
 use crate::system_media::{SystemCommand, SystemMediaWorker};
@@ -248,6 +248,7 @@ pub enum Action {
     LibraryFilter(LibFilter),
     LibrarySearch,
     AlbumSearch,
+    SettingsSearch,
     PlaylistOpen(i64),
     SettingsRow(usize),
     SettingsAdjust(usize, i32),
@@ -950,6 +951,12 @@ pub struct App {
     pub map_worker: SongMapWorker,
     pub song_map: Option<SongMap>,
     pub song_map_key: String,
+    pub tunebat_worker: TunebatWorker,
+    pub tunebat: Option<spote_core::tunebat::TunebatInfo>,
+    pub tunebat_key: String,
+    pub tunebat_loading: bool,
+    /// Último resultado por pista; incluye los «sin datos» para no repetir.
+    pub tunebat_cache: std::collections::HashMap<String, Option<spote_core::tunebat::TunebatInfo>>,
     /// Ganancia de nivelación medida para la pista actual. `None` = aún sin
     /// medir (o stream): se usa el nivelador en directo como respaldo.
     pub track_gain_db: Option<f32>,
@@ -1153,6 +1160,9 @@ pub struct App {
     pub bar_width_pct: u8,
     pub button_pad: u8,
     pub settings_selected: usize,
+    /// Filtro inline de ajustes (mismo patrón que discos y biblioteca).
+    pub settings_query: String,
+    pub settings_search_focus: bool,
     pub show_bpm: bool,
     pub viz: Viz,
     pub fps: FpsMeter,
@@ -1243,6 +1253,11 @@ impl App {
             map_worker: SongMapWorker::start(),
             song_map: None,
             song_map_key: String::new(),
+            tunebat_worker: TunebatWorker::start(),
+            tunebat: None,
+            tunebat_key: String::new(),
+            tunebat_loading: false,
+            tunebat_cache: std::collections::HashMap::new(),
             track_gain_db: None,
             song_intensity: 0.0,
             song_section: None,
@@ -1396,6 +1411,8 @@ impl App {
             bar_width_pct: cfg.ui.bar_width_pct.clamp(55, 100),
             button_pad: cfg.ui.button_pad.clamp(1, 4),
             settings_selected: 0,
+            settings_query: String::new(),
+            settings_search_focus: false,
             show_bpm: cfg.ui.show_bpm,
             viz,
             fps: FpsMeter::new(),
@@ -3423,6 +3440,7 @@ impl App {
         self.poll_art();
         self.poll_meta();
         self.poll_song_map();
+        self.poll_tunebat();
         self.poll_lyrics();
         self.poll_lyrics_search();
         self.poll_spotify(dt);
@@ -4018,6 +4036,44 @@ impl App {
             self.song_intensity = map.intensity_at(self.now.position_ms);
             self.song_section = map.section_at(self.now.position_ms).map(|s| s.kind);
         }
+    }
+
+    /// Mantiene los datos de Tunebat de la pista actual. Solo hay una
+    /// petición por pista y las respuestas de una pista anterior se ignoran.
+    fn poll_tunebat(&mut self) {
+        while let Some(event) = self.tunebat_worker.try_recv() {
+            let TunebatEvent::Info { key, result } = event;
+            let info = result.ok().flatten();
+            self.tunebat_cache.insert(key.clone(), info.clone());
+            if self.now.track.as_ref().map(|track| &track.key) == Some(&key) {
+                self.tunebat = info;
+                self.tunebat_loading = false;
+            }
+        }
+        let Some(track) = self.now.track.clone() else {
+            self.tunebat = None;
+            self.tunebat_loading = false;
+            self.tunebat_key.clear();
+            return;
+        };
+        if self.tunebat_key == track.key {
+            return;
+        }
+        self.tunebat_key = track.key.clone();
+        if let Some(cached) = self.tunebat_cache.get(&track.key) {
+            self.tunebat = cached.clone();
+            self.tunebat_loading = false;
+            return;
+        }
+        self.tunebat = None;
+        self.tunebat_loading = true;
+        self.tunebat_worker.lookup(
+            track.key,
+            track.title,
+            track.artist,
+            track.album,
+            track.duration_ms,
+        );
     }
 
     fn poll_meta(&mut self) {
