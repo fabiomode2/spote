@@ -48,6 +48,8 @@ class PlaybackConnection(context: Context) {
     private var scope: CoroutineScope? = null
     private var pollJob: Job? = null
     private var pendingQueue: PendingQueue? = null
+    private var cachedQueue: List<PlaybackTrack> = emptyList()
+    private var cachedQueueDirty = true
 
     /** Incremented on release/reset so stale connection callbacks cannot publish state. */
     private var generation = 0
@@ -73,8 +75,15 @@ class PlaybackConnection(context: Context) {
 
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
+            if (events.contains(Player.EVENT_TIMELINE_CHANGED)) {
+                cachedQueueDirty = true
+            }
             refresh()
             syncPolling()
+        }
+
+        override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+            cachedQueueDirty = true
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -177,6 +186,7 @@ class PlaybackConnection(context: Context) {
         player.setMediaItems(mediaItems, index, startPositionMs.coerceAtLeast(0L))
         player.prepare()
         player.playWhenReady = autoPlay
+        cachedQueueDirty = true
         refresh()
         syncPolling()
     }
@@ -209,6 +219,7 @@ class PlaybackConnection(context: Context) {
         val target = to.coerceIn(0, player.mediaItemCount - 1)
         if (from == target) return false
         player.moveMediaItem(from, target)
+        cachedQueueDirty = true
         refresh()
         return true
     }
@@ -218,6 +229,7 @@ class PlaybackConnection(context: Context) {
         if (index !in 0 until player.mediaItemCount) return false
         player.removeMediaItem(index)
         if (player.mediaItemCount == 0) player.stop()
+        cachedQueueDirty = true
         refresh()
         syncPolling()
         return true
@@ -228,6 +240,7 @@ class PlaybackConnection(context: Context) {
         val player = controller ?: return false
         if (!player.isConnected) return false
         player.addMediaItem(toMediaItem(track))
+        cachedQueueDirty = true
         refresh()
         return true
     }
@@ -340,8 +353,13 @@ class PlaybackConnection(context: Context) {
             }
 
             _connected.value = true
-            val queue = (0 until player.mediaItemCount).map { toTrack(player.getMediaItemAt(it)) }
-            val current = player.currentMediaItem?.let(::toTrack)
+            if (cachedQueueDirty || cachedQueue.size != player.mediaItemCount) {
+                cachedQueue = (0 until player.mediaItemCount).map { toTrack(player.getMediaItemAt(it)) }
+                cachedQueueDirty = false
+            }
+            val queue = cachedQueue
+            val current = cachedQueue.getOrNull(player.currentMediaItemIndex)
+                ?: player.currentMediaItem?.let(::toTrack)
             val playerDuration = player.duration
             val duration = if (playerDuration > 0L) {
                 playerDuration

@@ -182,6 +182,33 @@ class SpoteSocialClient(
         }
     }
 
+    /**
+     * `PUT /api/v1/me/avatar` con `{"avatar":"data:image/jpeg;base64,..."}`.
+     * `null` borra el avatar. El servidor difunde la presencia actualizada.
+     */
+    suspend fun updateAvatar(avatar: String?): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val base = normalizeServerUrl(config.serverUrl)
+            require(base.isNotEmpty()) { "server URL is not configured" }
+            require(config.token.isNotEmpty()) { "not logged in" }
+            val body = JSONObject().apply {
+                put("avatar", avatar ?: JSONObject.NULL)
+            }.toString()
+            val request = Request.Builder()
+                .url("$base$API_PREFIX/me/avatar")
+                .header(HEADER_CLIENT_KEY, config.clientKey)
+                .header(HEADER_AUTHORIZATION, "Bearer ${config.token}")
+                .header(HEADER_ACCEPT, ACCEPT_JSON)
+                .put(body.toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw httpError(response.code, response.body?.string().orEmpty())
+                }
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // WebSocket
     // -----------------------------------------------------------------------

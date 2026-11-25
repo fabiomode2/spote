@@ -120,6 +120,8 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.security.crypto)
     implementation(libs.newpipe)
+    implementation(libs.zxing.core)
+    implementation(libs.zxing.android.embedded)
     implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
     coreLibraryDesugaring(libs.desugar)

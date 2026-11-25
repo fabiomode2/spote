@@ -161,12 +161,31 @@ private val SpoteShapes = Shapes(
 @Composable
 fun SpoteTheme(
     mode: SpoteThemeMode = SpoteThemeMode.Midnight,
+    uiStyle: SpoteUiStyle = SpoteUiStyle.Medium,
     content: @Composable () -> Unit,
 ) {
     val colors = mode.colors()
-    val typography = when (mode) {
+    val baseTypography = when (mode) {
         SpoteThemeMode.Midnight -> MidnightTypography
         SpoteThemeMode.Nocturne -> NocturneTypography
+    }
+    val typography = if (uiStyle == SpoteUiStyle.Off) {
+        baseTypography
+    } else {
+        val mono = FontFamily.Monospace
+        baseTypography.copy(
+            displayLarge = baseTypography.displayLarge.copy(fontFamily = mono),
+            displayMedium = baseTypography.displayMedium.copy(fontFamily = mono),
+            headlineLarge = baseTypography.headlineLarge.copy(fontFamily = mono),
+            headlineMedium = baseTypography.headlineMedium.copy(fontFamily = mono),
+            headlineSmall = baseTypography.headlineSmall.copy(fontFamily = mono),
+            titleLarge = baseTypography.titleLarge.copy(fontFamily = mono),
+            titleMedium = baseTypography.titleMedium.copy(fontFamily = mono),
+            titleSmall = baseTypography.titleSmall.copy(fontFamily = mono),
+            labelLarge = baseTypography.labelLarge.copy(fontFamily = mono),
+            labelMedium = baseTypography.labelMedium.copy(fontFamily = mono),
+            labelSmall = baseTypography.labelSmall.copy(fontFamily = mono),
+        )
     }
     val scheme = darkColorScheme(
         primary = colors.accent,
@@ -188,7 +207,10 @@ fun SpoteTheme(
         error = colors.danger,
     )
 
-    CompositionLocalProvider(LocalSpoteColors provides colors) {
+    CompositionLocalProvider(
+        LocalSpoteColors provides colors,
+        LocalSpoteUiStyle provides uiStyle,
+    ) {
         MaterialTheme(
             colorScheme = scheme,
             typography = typography,

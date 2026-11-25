@@ -61,6 +61,10 @@ fun SearchScreen(
     onPlayTrack: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onMore: (Track) -> Unit,
+    onOpenArtist: (String) -> Unit = { onQueryChange(it) },
+    onClearSearch: () -> Unit = { onQueryChange("") },
+    onClearHistory: () -> Unit = {},
+    onSearchCommit: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
@@ -91,7 +95,12 @@ fun SearchScreen(
                     ),
                     cursorBrush = SolidColor(colors.accent),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
+                    keyboardActions = KeyboardActions(
+                        onSearch = {
+                            onSearchCommit(state.query)
+                            focusManager.clearFocus()
+                        },
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp),
@@ -127,7 +136,7 @@ fun SearchScreen(
                                 CircleIconButton(
                                     icon = Icons.Rounded.Close,
                                     contentDescription = "Limpiar",
-                                    onClick = { onQueryChange("") },
+                                    onClick = onClearSearch,
                                     size = 28.dp,
                                     iconSize = 18.dp,
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -145,7 +154,11 @@ fun SearchScreen(
                 if (!hasQuery) {
                     if (state.recentQueries.isNotEmpty()) {
                         item(key = "recent-title") {
-                            SectionHeader(title = "Búsquedas recientes")
+                            SectionHeader(
+                                title = "Búsquedas recientes",
+                                actionLabel = "Limpiar",
+                                onAction = onClearHistory,
+                            )
                         }
                         item(key = "recent") {
                             Row(
@@ -288,7 +301,7 @@ fun SearchScreen(
                                             label = artist.take(1).uppercase(),
                                         )
                                     ArtistCircle(name = artist, cover = cover, onClick = {
-                                        onQueryChange(artist)
+                                        onOpenArtist(artist)
                                     })
                                 }
                             }

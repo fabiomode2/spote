@@ -4,6 +4,7 @@ mod app;
 mod fetch;
 mod hires;
 mod mini;
+mod setup;
 mod social;
 mod spotify_jobs;
 mod system_media;
@@ -57,6 +58,10 @@ struct Args {
     discord_id: Option<String>,
     save_discord: bool,
     yes: bool,
+    setup_server: Option<String>,
+    setup_key: Option<String>,
+    setup_invite: Option<String>,
+    setup_name: Option<String>,
 }
 
 impl Args {
@@ -79,6 +84,10 @@ impl Args {
                 "--art" => args.art = iter.next(),
                 "--viz" => args.viz = iter.next(),
                 "--fps" => args.fps = iter.next().and_then(|value| value.parse().ok()),
+                "--server" => args.setup_server = iter.next(),
+                "--key" => args.setup_key = iter.next(),
+                "--invite" => args.setup_invite = iter.next(),
+                "--name" => args.setup_name = iter.next(),
                 "--version" | "-V" => args.command = Some("version".into()),
                 "--help" | "-h" => args.command = Some("help".into()),
                 other if other.starts_with('-') => {
@@ -112,6 +121,7 @@ fn run() -> Result<()> {
         Some("record") => return run_record(&args),
         Some("harvest") => return run_harvest(&args),
         Some("discord") => return run_discord(&args),
+        Some("setup") => return run_setup(&args),
         Some("mini") => return run_mini(),
         Some("dedupe") => return run_dedupe(&args),
         Some("doctor") => return run_doctor(),
@@ -151,6 +161,103 @@ fn run_mini() -> Result<()> {
     Ok(())
 }
 
+/// `spote setup`: sin argumentos imprime el enlace y el QR de la config actual;
+/// con un enlace o flags valida y guarda los datos sociales.
+fn run_setup(args: &Args) -> Result<()> {
+    if let Some(raw) = args.rest.first() {
+        if args.rest.len() > 1 {
+            anyhow::bail!("uso: spote setup \"<enlace>\"");
+        }
+        if has_setup_flags(args) {
+            anyhow::bail!("usa un enlace o los flags --server/--key/--invite, no ambos");
+        }
+        let link = setup::SetupLink::parse(raw)?;
+        apply_setup(&link)?;
+        return Ok(());
+    }
+
+    if has_setup_flags(args) {
+        let config = Config::load();
+        let link = setup::SetupLink::from_config(
+            &config,
+            args.setup_server.as_deref(),
+            args.setup_key.as_deref(),
+            args.setup_invite.as_deref(),
+            args.setup_name.as_deref(),
+        )
+        .context("datos sociales incompletos o inválidos")?;
+        apply_setup(&link)?;
+        return Ok(());
+    }
+
+    let config = Config::load();
+    let link =
+        setup::SetupLink::from_config(&config, None, None, None, None).with_context(|| {
+            format!(
+                "faltan datos sociales en {} (pasa --server/--key/--invite o edita [server])",
+                config::config_path().display()
+            )
+        })?;
+    println!("enlace de configuración social:");
+    setup::print_link(&link)?;
+    Ok(())
+}
+
+fn has_setup_flags(args: &Args) -> bool {
+    args.setup_server.is_some()
+        || args.setup_key.is_some()
+        || args.setup_invite.is_some()
+        || args.setup_name.is_some()
+}
+
+fn apply_setup(link: &setup::SetupLink) -> Result<()> {
+    let mut config = Config::load();
+    let credentials_changed = config.server.url.trim_end_matches('/') != link.server
+        || config.server.client_key != link.key;
+    let had_session = !config.server.token.is_empty();
+    config.server.url = link.server.clone();
+    config.server.client_key = link.key.clone();
+    config.server.invite = link.invite.clone();
+    if let Some(name) = &link.name {
+        config.server.name = name.clone();
+    }
+    if credentials_changed {
+        // El token está atado al servidor y a la clave: si cambian, la sesión
+        // anterior ya no sirve y el próximo login la renueva.
+        config.server.token.clear();
+    }
+    config
+        .save()
+        .with_context(|| format!("no pude guardar {}", config::config_path().display()))?;
+
+    println!(
+        "configuración social guardada en {}",
+        config::config_path().display()
+    );
+    println!("  servidor   {}", link.server);
+    println!(
+        "  nombre     {}",
+        link.name.as_deref().unwrap_or("(se usará el del host)")
+    );
+    println!("  clave      {}", mask_secret(&link.key));
+    println!("  invitación {}", mask_secret(&link.invite));
+    if credentials_changed && had_session {
+        println!("  sesión anterior invalidada (cambió el servidor o la clave)");
+    }
+    Ok(())
+}
+
+/// Nunca imprime el secreto completo en una confirmación.
+fn mask_secret(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 8 {
+        return "…".to_string();
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
+}
+
 fn print_help() {
     println!(
         "spote {} — reproductor de música con TUI
@@ -166,6 +273,10 @@ USO:
          [--step ms]               cliente saltando por la pista (2-4× más rápido)
   spote discord --id <app-id>      prueba el Rich Presence y guarda el ID
          [--save] [--seconds N]
+  spote setup                      imprime el enlace social y su QR
+  spote setup \"<enlace>\"           aplica un enlace spote://setup
+  spote setup --server URL --key K --invite I [--name N]
+                                   guarda la configuración social
   spote mini                       abre el mini reproductor de escritorio
   spote dedupe [--dry-run] [--yes] fusiona pistas duplicadas (con backup)
   spote doctor                     comprueba dependencias y rutas

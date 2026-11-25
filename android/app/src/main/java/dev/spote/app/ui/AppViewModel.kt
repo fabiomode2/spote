@@ -12,17 +12,22 @@ import dev.spote.app.data.MockData
 import dev.spote.app.data.EmptySpoteRepository
 import dev.spote.app.data.MockSpoteRepository
 import dev.spote.app.data.RustSpoteRepository
+import dev.spote.app.data.SearchHistory
 import dev.spote.app.data.SpoteRepository
+import dev.spote.app.logging.ActionLog
 import dev.spote.app.lyrics.LyricsRepository
 import dev.spote.app.model.Album
 import dev.spote.app.model.AppUiState
 import dev.spote.app.model.DownloadStatus
 import dev.spote.app.model.DownloadUi
+import dev.spote.app.model.HomeState
 import dev.spote.app.model.LibraryFilter
+import dev.spote.app.model.LibraryState
 import dev.spote.app.model.LyricLine
 import dev.spote.app.model.Playlist
 import dev.spote.app.model.PlayerState
 import dev.spote.app.model.RepeatMode
+import dev.spote.app.model.SearchState
 import dev.spote.app.model.Tab
 import dev.spote.app.model.Track
 import dev.spote.app.playback.PlaybackConnection
@@ -35,6 +40,7 @@ import dev.spote.app.rust.RustBridge
 import dev.spote.app.rust.coverFor
 import java.io.File
 import java.net.URI
+import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -62,17 +68,83 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val lyrics = LyricsRepository(application)
     private var lyricsJob: Job? = null
     private var lyricsKey: String? = null
+    private var searchJob: Job? = null
     private var remoteSearchJob: Job? = null
     private val downloadJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
-    private val _state = MutableStateFlow(initialState())
+    private data class Loaded(
+        val home: HomeState,
+        val search: SearchState,
+        val library: LibraryState,
+        val player: PlayerState,
+    )
+
+    private val remoteCache = object : LinkedHashMap<String, List<Track>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<Track>>): Boolean =
+            size > 40
+    }
+
+    private var knownLibraryRef: List<Track>? = null
+    private var knownRecentRef: List<Track>? = null
+    private var knownQueueRef: List<Track>? = null
+    private var knownTracks: Map<String, Track> = emptyMap()
+
+    private val _state = MutableStateFlow(
+        AppUiState(
+            home = HomeState(
+                greeting = "Hola",
+                chips = listOf("Todo", "Descargas", "Salas"),
+                recent = emptyList(),
+                rooms = emptyList(),
+                playlists = emptyList(),
+                albums = emptyList(),
+            ),
+            search = SearchState(),
+            library = LibraryState(storageLabel = "Local"),
+            player = PlayerState(),
+        ),
+    )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val messages: SharedFlow<String> = _messages.asSharedFlow()
 
     init {
+        SearchHistory.init(application)
+        viewModelScope.launch {
+            SearchHistory.queries.collect { recent ->
+                _state.update { it.copy(search = it.search.copy(recentQueries = recent)) }
+            }
+        }
         playback.connect(viewModelScope)
+        viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            val loaded = withContext(Dispatchers.IO) {
+                val home = repo.home()
+                Loaded(
+                    home = home,
+                    search = repo.search(""),
+                    library = repo.library(),
+                    player = home.recent.firstOrNull()?.let(repo::playerFor) ?: PlayerState(),
+                )
+            }
+            ActionLog.log(
+                "library.load",
+                "ms" to (System.currentTimeMillis() - startedAt),
+                "tracks" to loaded.library.tracks.size,
+                "albums" to loaded.library.albums.size,
+                "playlists" to loaded.library.playlists.size,
+                "mock" to BuildConfig.USE_MOCK_DATA,
+            )
+            _state.update {
+                it.copy(
+                    home = loaded.home,
+                    search = loaded.search.copy(recentQueries = it.search.recentQueries),
+                    library = loaded.library,
+                    player = loaded.player,
+                )
+            }
+        }
         viewModelScope.launch {
             playback.state.collect { playbackState ->
                 if (playbackState.current != null) {
@@ -88,48 +160,91 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 
-    private fun initialState(): AppUiState {
-        val home = repo.home()
-        val first = home.recent.firstOrNull()
-        return AppUiState(
-            home = home,
-            search = repo.search(""),
-            library = repo.library(),
-            player = first?.let(repo::playerFor) ?: PlayerState(),
-        )
-    }
-
     fun setTab(tab: Tab) {
         _state.update { it.copy(tab = tab) }
     }
 
     fun setQuery(query: String) {
+        searchJob?.cancel()
         remoteSearchJob?.cancel()
         val trimmed = query.trim()
         _state.update {
             it.copy(
-                search = repo.search(query).copy(
+                search = it.search.copy(
+                    query = query,
                     remoteLoading = trimmed.length >= 2,
                     remoteError = null,
                 ),
             )
         }
+        searchJob = viewModelScope.launch {
+            delay(60)
+            val local = withContext(Dispatchers.IO) { repo.search(query) }
+            _state.update { current ->
+                if (current.search.query != query) return@update current
+                current.copy(
+                    search = local.copy(
+                        remoteResults = current.search.remoteResults,
+                        remoteLoading = current.search.remoteLoading,
+                        remoteError = null,
+                        recentQueries = current.search.recentQueries,
+                    ),
+                )
+            }
+        }
         if (trimmed.length < 2) return
+
+        val normalized = trimmed.lowercase(Locale.ROOT)
+        remoteCache[normalized]?.let { cached ->
+            _state.update {
+                it.copy(search = it.search.copy(remoteResults = cached, remoteLoading = false))
+            }
+            return
+        }
+
         remoteSearchJob = viewModelScope.launch {
-            delay(450)
+            delay(350)
             if (_state.value.search.query.trim() != trimmed) return@launch
+            _state.update { it.copy(search = it.search.copy(remoteLoading = true)) }
+            val startedAt = System.currentTimeMillis()
             val result = runCatching { RemoteResolver.search(trimmed, 20) }
+            val tracks = result.getOrNull().orEmpty().map(::remoteToTrack)
+            if (result.isSuccess) remoteCache[normalized] = tracks
+            ActionLog.log(
+                "search.remote",
+                "query" to trimmed,
+                "results" to tracks.size,
+                "ms" to (System.currentTimeMillis() - startedAt),
+                "error" to result.exceptionOrNull()?.message,
+            )
             _state.update { current ->
                 if (current.search.query.trim() != trimmed) return@update current
                 current.copy(
                     search = current.search.copy(
-                        remoteResults = result.getOrNull().orEmpty().map(::remoteToTrack),
+                        remoteResults = tracks,
                         remoteLoading = false,
                         remoteError = result.exceptionOrNull()?.message,
                     ),
                 )
             }
         }
+    }
+
+    fun commitSearch(query: String) {
+        SearchHistory.record(query)
+    }
+
+    fun clearSearch() {
+        searchJob?.cancel()
+        remoteSearchJob?.cancel()
+        remoteCache.clear()
+        _state.update {
+            it.copy(search = SearchState(query = "", recentQueries = it.search.recentQueries))
+        }
+    }
+
+    fun clearSearchHistory() {
+        SearchHistory.clear()
     }
 
     private fun remoteToTrack(remote: RemoteTrack): Track = Track(
@@ -154,11 +269,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(library = it.library.copy(isGrid = !it.library.isGrid)) }
     }
 
-    fun album(id: String): Album? = repo.album(id)
+    fun album(id: String): Album? {
+        val current = _state.value
+        return current.library.albums.firstOrNull { it.id == id }
+            ?: current.home.albums.firstOrNull { it.id == id }
+    }
 
-    fun playlist(id: String): Playlist? = repo.playlist(id)
+    fun playlist(id: String): Playlist? {
+        val current = _state.value
+        return (current.library.playlists + current.home.playlists).firstOrNull { it.id == id }
+    }
 
     fun play(track: Track) {
+        ActionLog.log(
+            "play.track",
+            "key" to track.key,
+            "title" to track.title,
+            "artist" to track.artist,
+            "remote" to (track.remoteUrl != null),
+        )
         if (track.remoteUrl != null && track.localPath == null) {
             playRemote(track)
             return
@@ -337,6 +466,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(key: String) {
+        ActionLog.log("favorite.toggle", "key" to key)
         _state.update { state -> state.mapTrack(key) { it.copy(favorite = !it.favorite) } }
         if (bridge != null) {
             viewModelScope.launch(Dispatchers.IO) {
@@ -383,6 +513,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val job = viewModelScope.launch {
+            ActionLog.log("download.start", "key" to track.key, "title" to track.title)
             _messages.emit("Descargando «${track.title}»…")
             publish(0f, DownloadStatus.Resolving)
             val audio = runCatching { RemoteResolver.resolveUrl(webUrl) }
@@ -434,6 +565,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             val label = audio.title.ifBlank { track.title }
+            ActionLog.log(
+                "download.done",
+                "key" to track.key,
+                "title" to label,
+                "bytes" to file.length(),
+                "hls" to audio.isHls,
+            )
             _messages.emit("Descargada «$label»")
         }
         downloadJobs[track.key] = job
@@ -463,13 +601,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // ------------------------------------------------------------------ listas
 
-    fun playlists(): List<Playlist> = repo.playlists()
+    fun playlists(): List<Playlist> =
+        (_state.value.library.playlists + _state.value.home.playlists).distinctBy { it.id }
 
     fun createPlaylist(name: String, onCreated: (String?) -> Unit = {}) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
             val id = withContext(Dispatchers.IO) { repo.createPlaylist(trimmed) }
+            ActionLog.log("playlist.create", "name" to trimmed, "ok" to (id != null))
             if (id == null) {
                 _messages.emit("Las playlists necesitan la biblioteca local")
             } else {
@@ -524,6 +664,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun moveQueueItem(from: Int, to: Int) {
         val queue = _state.value.player.queue
         if (from !in queue.indices) return
+        ActionLog.log("queue.move", "from" to from, "to" to to)
         val target = to.coerceIn(0, queue.lastIndex)
         if (from == target) return
         val moved = queue.toMutableList().apply { add(target, removeAt(from)) }
@@ -534,6 +675,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun removeQueueItem(index: Int) {
         val queue = _state.value.player.queue
         if (index !in queue.indices) return
+        ActionLog.log("queue.remove", "index" to index)
         val removed = queue[index]
         val remaining = queue.toMutableList().apply { removeAt(index) }
         _state.update { current ->
@@ -552,6 +694,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun enqueue(track: Track) {
+        ActionLog.log("queue.add", "key" to track.key, "title" to track.title)
         if (track.remoteUrl != null && track.localPath == null) {
             viewModelScope.launch {
                 _messages.emit("Resolviendo «${track.title}»…")
@@ -657,10 +800,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun importUris(uris: List<Uri>) {
         if (uris.isEmpty() || bridge == null) return
+        ActionLog.log("import.start", "files" to uris.size)
         viewModelScope.launch {
             _messages.emit("Importando ${uris.size} archivo(s)…")
             val result = withContext(Dispatchers.IO) { importBlocking(uris) }
             refreshFromRepo()
+            ActionLog.log("import.done", "ok" to result.first, "failed" to result.second)
             val text = buildString {
                 append("Importadas ${result.first} canciones")
                 if (result.second > 0) append(" · ${result.second} con error")
@@ -743,9 +888,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun PlaybackUiState.toPlayerState(existing: PlayerState): PlayerState {
-        val known = (state.value.library.tracks + state.value.home.recent + state.value.player.queue)
-            .distinctBy { it.key }
-        fun map(pb: PlaybackTrack): Track = known.firstOrNull { it.key == pb.key } ?: Track(
+        val ui = state.value
+        if (
+            knownLibraryRef !== ui.library.tracks ||
+            knownRecentRef !== ui.home.recent ||
+            knownQueueRef !== ui.player.queue
+        ) {
+            knownLibraryRef = ui.library.tracks
+            knownRecentRef = ui.home.recent
+            knownQueueRef = ui.player.queue
+            knownTracks = (ui.library.tracks + ui.home.recent + ui.player.queue)
+                .associateBy { it.key }
+        }
+        val known = knownTracks
+        fun map(pb: PlaybackTrack): Track = known[pb.key] ?: Track(
             key = pb.key,
             title = pb.title,
             artist = pb.artist,
@@ -756,6 +912,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             localPath = pb.uri.toFilePath(),
         )
         val mapped = current?.let(::map)
+        // La cola cambia muy poco; reutilizarla evita remapear cientos de pistas
+        // en cada tick de posición (500 ms).
+        val sameQueue = existing.queue.size == queue.size &&
+            existing.queue.indices.all { existing.queue[it].key == queue[it].key }
+        if (existing.track?.key != mapped?.key) {
+            ActionLog.log(
+                "playback.track",
+                "key" to mapped?.key,
+                "title" to mapped?.title,
+                "artist" to mapped?.artist,
+                "playing" to isPlaying,
+            )
+        }
         return PlayerState(
             track = mapped,
             isPlaying = isPlaying,
@@ -767,24 +936,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 2 -> RepeatMode.One
                 else -> RepeatMode.Off
             },
-            queue = queue.map(::map),
+            queue = if (sameQueue) existing.queue else queue.map(::map),
             lyrics = if (existing.track?.key == mapped?.key) existing.lyrics else emptyList(),
         )
     }
 
     private fun refreshFromRepo() {
-        _state.update { state ->
-            val previous = state.search
-            val local = repo.search(previous.query)
-            state.copy(
-                home = repo.home(),
-                search = local.copy(
-                    remoteResults = previous.remoteResults,
-                    remoteLoading = previous.remoteLoading,
-                    remoteError = previous.remoteError,
-                ),
-                library = repo.library(),
-            )
+        viewModelScope.launch {
+            val previous = _state.value.search
+            val loaded = withContext(Dispatchers.IO) {
+                Loaded(
+                    home = repo.home(),
+                    search = repo.search(previous.query),
+                    library = repo.library(),
+                    player = PlayerState(),
+                )
+            }
+            _state.update { state ->
+                state.copy(
+                    home = loaded.home,
+                    search = loaded.search.copy(
+                        remoteResults = state.search.remoteResults,
+                        remoteLoading = state.search.remoteLoading,
+                        remoteError = state.search.remoteError,
+                        recentQueries = state.search.recentQueries,
+                    ),
+                    library = loaded.library,
+                )
+            }
         }
     }
 }

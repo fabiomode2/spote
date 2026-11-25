@@ -28,6 +28,7 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { workspace = true, features = ["cors", "limit", "set-header", "trace"] }
 futures-util = "0.3"
 libc = "0.2"
+qrcode = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

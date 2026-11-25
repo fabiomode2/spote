@@ -14,9 +14,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.spote.app.model.Album
 import dev.spote.app.model.HomeState
 import dev.spote.app.model.Playlist
@@ -52,6 +53,8 @@ fun HomeScreen(
     onOpenRoom: (Room) -> Unit,
     onOpenSettings: () -> Unit,
     onImport: () -> Unit = {},
+    userName: String = "",
+    avatarUri: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
@@ -77,23 +80,28 @@ fun HomeScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "spote",
-                                style = MaterialTheme.typography.labelMedium,
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    letterSpacing = (-2).sp,
+                                ),
                                 color = colors.accent,
                             )
                             Text(
-                                text = state.greeting,
+                                text = buildString {
+                                    append(state.greeting)
+                                    val name = userName.trim()
+                                    if (name.isNotEmpty()) append(", $name")
+                                },
                                 style = MaterialTheme.typography.displayMedium,
                                 color = MaterialTheme.colorScheme.onBackground,
                             )
                         }
-                        CircleIconButton(
-                            icon = Icons.Rounded.Settings,
-                            contentDescription = "Ajustes",
-                            onClick = onOpenSettings,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Avatar(
+                            name = userName.ifBlank { "Tú" },
+                            size = 38.dp,
+                            imageUri = avatarUri,
+                            modifier = Modifier.clickable(onClick = onOpenSettings),
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Avatar(name = "Tú", size = 34.dp)
                     }
                     Spacer(Modifier.height(14.dp))
                     FilterChips(

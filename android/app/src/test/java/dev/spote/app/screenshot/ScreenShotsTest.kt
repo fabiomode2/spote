@@ -13,6 +13,7 @@ import dev.spote.app.ui.nowplaying.LyricsScreen
 import dev.spote.app.ui.nowplaying.NowPlayingScreen
 import dev.spote.app.ui.nowplaying.QueueScreen
 import dev.spote.app.ui.screens.AlbumScreen
+import dev.spote.app.ui.screens.ArtistScreen
 import dev.spote.app.ui.screens.DownloadsScreen
 import dev.spote.app.ui.screens.HomeScreen
 import dev.spote.app.ui.screens.LibraryScreen
@@ -288,6 +289,20 @@ class ScreenShotsTest {
             current = SpoteThemeMode.Nocturne,
             onSelect = {},
             onDismiss = {},
+        )
+    }
+
+    @Test
+    fun artist() = shot("19-artist") {
+        ArtistScreen(
+            name = "Tame Impala",
+            tracks = MockData.tracks.filter { it.artist == "Tame Impala" },
+            albums = MockData.home.albums.filter { it.artist == "Tame Impala" },
+            player = MockData.player,
+            onBack = {},
+            onPlayTrack = {},
+            onOpenAlbum = {},
+            onMore = {},
         )
     }
 

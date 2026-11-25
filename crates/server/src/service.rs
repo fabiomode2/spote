@@ -24,6 +24,15 @@ pub const MAX_TRACK_ALBUM_CHARS: usize = 256;
 pub const MAX_TRACK_URL_CHARS: usize = 2_048;
 pub const MAX_SOURCE_ID_CHARS: usize = 256;
 pub const MAX_TRACK_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+/// Avatar como data URL en el JSON (`PUT /me/avatar`). 400 000 caracteres dan
+/// para una foto de perfil razonable sin abrir la puerta a cuerpos enormes.
+pub const MAX_AVATAR_CHARS: usize = 400_000;
+/// Tipos aceptados. Ni SVG (scripts) ni GIF (animación y tamaño).
+const AVATAR_PREFIXES: [&str; 3] = [
+    "data:image/jpeg;base64,",
+    "data:image/png;base64,",
+    "data:image/webp;base64,",
+];
 /// Chat que se manda al entrar en una sala.
 pub const CHAT_HISTORY_LIMIT: u32 = 50;
 
@@ -111,6 +120,93 @@ pub fn add_friend(state: &AppState, user_id: &str, target_id: &str) -> Result<Us
     state.db.add_friend(user_id, target_id)
 }
 
+/// Valida un avatar que llega como data URL. Solo JPEG, PNG o WebP en base64,
+/// con un límite de tamaño y sin caracteres de control.
+pub fn validate_avatar(avatar: &str) -> Result<(), AppError> {
+    if avatar.chars().count() > MAX_AVATAR_CHARS {
+        return Err(AppError::BadRequest("avatar too long".to_string()));
+    }
+    let Some(payload) = AVATAR_PREFIXES
+        .iter()
+        .find_map(|prefix| avatar.strip_prefix(prefix))
+    else {
+        return Err(AppError::BadRequest(
+            "avatar must be a jpeg, png or webp data url".to_string(),
+        ));
+    };
+    if payload.is_empty() {
+        return Err(AppError::BadRequest("avatar is empty".to_string()));
+    }
+    let padding = payload
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    if padding > 2 || payload.len() % 4 != 0 {
+        return Err(AppError::BadRequest(
+            "avatar payload is not valid base64".to_string(),
+        ));
+    }
+    let data = &payload.as_bytes()[..payload.len() - padding];
+    if data.is_empty()
+        || !data
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
+    {
+        return Err(AppError::BadRequest(
+            "avatar payload is not valid base64".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Persiste el avatar, refresca la presencia en memoria y la difunde para que
+/// el resto de clientes lo vea sin reconectar. `None` borra el avatar.
+pub fn set_avatar(state: &AppState, user: &User, avatar: Option<String>) -> Result<User, AppError> {
+    if let Some(value) = avatar.as_deref() {
+        validate_avatar(value)?;
+    }
+    if !state.db.set_avatar(&user.id, avatar.as_deref())? {
+        return Err(AppError::NotFound("user not found".to_string()));
+    }
+
+    let mut updated = user.clone();
+    updated.avatar = avatar;
+    match state.hub.presence_of(&user.id) {
+        Some(mut presence) => {
+            // Solo cambia el usuario; `online`, `last_seen` y `now_playing`
+            // siguen siendo los de la presencia viva.
+            presence.user = updated.clone();
+            state.hub.set_presence(presence);
+        }
+        None => state.hub.ensure_presence(Presence {
+            user: updated.clone(),
+            online: false,
+            last_seen: now_ms(),
+            now_playing: None,
+        }),
+    }
+    state.hub.broadcast_presence(true);
+    tracing::info!(
+        user = %updated.name,
+        has_avatar = updated.avatar.is_some(),
+        "avatar actualizado"
+    );
+    Ok(updated)
+}
+
+/// El WebSocket guarda una copia del usuario en el handshake. El avatar es el
+/// único campo mutable: antes de escribir presencia o chat se toma el de la
+/// presencia viva para que un cliente conectado no revierta un cambio hecho
+/// desde otro dispositivo.
+fn current_user(state: &AppState, user: &User) -> User {
+    let mut current = user.clone();
+    if let Some(presence) = state.hub.presence_of(&current.id) {
+        current.avatar = presence.user.avatar;
+    }
+    current
+}
+
 /// Actualiza presencia (memoria + DB) y difunde. `immediate` salta el throttle.
 pub fn touch_presence(
     state: &AppState,
@@ -122,8 +218,9 @@ pub fn touch_presence(
     if let Some(track) = &now_playing {
         validate_track(track)?;
     }
+    let user = current_user(state, user);
     let presence = Presence {
-        user: user.clone(),
+        user,
         online: true,
         last_seen: now_ms(),
         now_playing,
@@ -562,7 +659,8 @@ pub fn chat_add(
 ) -> Result<ChatMsg, AppError> {
     ensure_member(state, room_id, &user.id)?;
     let text = validate_text("message", text, MAX_CHAT_CHARS)?;
-    let msg = state.db.chat_add(room_id, user, text)?;
+    let author = current_user(state, user);
+    let msg = state.db.chat_add(room_id, &author, text)?;
     state
         .hub
         .broadcast_room(room_id, ServerMsg::Chat { msg: msg.clone() });

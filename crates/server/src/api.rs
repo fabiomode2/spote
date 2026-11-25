@@ -10,7 +10,7 @@ use axum::{
     },
     http::{header, HeaderName, HeaderValue, Method, Request},
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
         .route("/me", get(me))
+        .route("/me/avatar", put(update_avatar))
         .route("/users", get(users))
         .route("/friends/{id}", post(add_friend))
         .route("/sync/snapshot", get(sync_snapshot))
@@ -94,7 +95,7 @@ pub fn router(state: AppState) -> Router {
         api = api.layer(
             CorsLayer::new()
                 .allow_origin(origin)
-                .allow_methods([Method::GET, Method::POST, Method::DELETE])
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
                 .allow_headers([
                     header::AUTHORIZATION,
                     header::CONTENT_TYPE,
@@ -128,6 +129,20 @@ struct QueueAddRequest {
 #[derive(Debug, Deserialize)]
 struct ChatQuery {
     limit: Option<u32>,
+}
+
+/// `{"avatar": "<data URL>"}` o `{"avatar": null}`. El `null` explícito borra
+/// el avatar; un campo ausente o de otro tipo es un 400.
+#[derive(Debug, Deserialize)]
+struct AvatarRequest {
+    avatar: AvatarValue,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AvatarValue {
+    Set(String),
+    Clear,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,6 +198,19 @@ async fn logout(
 
 async fn me(auth: AuthUser) -> Json<User> {
     Json(auth.0)
+}
+
+async fn update_avatar(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    body: Result<Json<AvatarRequest>, JsonRejection>,
+) -> Result<Json<User>, AppError> {
+    let Json(req) = body.map_err(AppError::from)?;
+    let avatar = match req.avatar {
+        AvatarValue::Set(avatar) => Some(avatar),
+        AvatarValue::Clear => None,
+    };
+    Ok(Json(service::set_avatar(&state, &auth.0, avatar)?))
 }
 
 async fn users(

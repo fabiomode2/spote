@@ -101,7 +101,11 @@ fun RoomScreen(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     room.members.take(3).forEach { member ->
-                        Avatar(name = member, size = 26.dp)
+                        Avatar(
+                            name = member,
+                            size = 26.dp,
+                            imageUri = room.memberAvatars[member],
+                        )
                     }
                 }
             }

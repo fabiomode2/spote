@@ -48,6 +48,17 @@ async fn login(app: &axum::Router, name: &str, key: &str) -> LoginResponse {
     serde_json::from_slice(&bytes).expect("json")
 }
 
+fn avatar_request(token: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri("/api/v1/me/avatar")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-spote-key", KEY_A)
+        .body(Body::from(body.to_string()))
+        .expect("request")
+}
+
 #[tokio::test]
 async fn api_is_closed_without_client_key() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -310,6 +321,94 @@ async fn private_rooms_cannot_be_joined_without_an_invite_from_the_host() {
         .await
         .expect("respuesta");
     assert_eq!(joined.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn avatar_can_be_set_read_and_cleared() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = router(test_state(&dir));
+    let login = login(&app, "ana", KEY_A).await;
+    let jpeg = format!("data:image/jpeg;base64,{}", "A".repeat(64));
+
+    let set = app
+        .clone()
+        .oneshot(avatar_request(
+            &login.token,
+            &serde_json::json!({ "avatar": jpeg }).to_string(),
+        ))
+        .await
+        .expect("respuesta");
+    assert_eq!(set.status(), StatusCode::OK);
+    let bytes = to_bytes(set.into_body(), 64 * 1024).await.expect("body");
+    let user: spote_protocol::User = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(user.avatar.as_deref(), Some(jpeg.as_str()));
+
+    let me = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/me")
+                .header("authorization", format!("Bearer {}", login.token))
+                .header("x-spote-key", KEY_A)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("respuesta");
+    assert_eq!(me.status(), StatusCode::OK);
+    let bytes = to_bytes(me.into_body(), 64 * 1024).await.expect("body");
+    let me: spote_protocol::User = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(me.avatar.as_deref(), Some(jpeg.as_str()));
+
+    let invalid = app
+        .clone()
+        .oneshot(avatar_request(
+            &login.token,
+            r#"{"avatar":"data:image/gif;base64,R0lGODlhAQABAAAAACw="}"#,
+        ))
+        .await
+        .expect("respuesta");
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let missing = app
+        .clone()
+        .oneshot(avatar_request(&login.token, "{}"))
+        .await
+        .expect("respuesta");
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_type = app
+        .clone()
+        .oneshot(avatar_request(&login.token, r#"{"avatar":42}"#))
+        .await
+        .expect("respuesta");
+    assert_eq!(wrong_type.status(), StatusCode::BAD_REQUEST);
+
+    let anonymous = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/me/avatar")
+                .header("content-type", "application/json")
+                .header("x-spote-key", KEY_A)
+                .body(Body::from(r#"{"avatar":null}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("respuesta");
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    let cleared = app
+        .oneshot(avatar_request(&login.token, r#"{"avatar":null}"#))
+        .await
+        .expect("respuesta");
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let bytes = to_bytes(cleared.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    let user: spote_protocol::User = serde_json::from_slice(&bytes).expect("json");
+    assert!(user.avatar.is_none());
 }
 
 #[tokio::test]

@@ -62,6 +62,7 @@ data class Room(
     val members: List<String>,
     val live: Boolean,
     val nowPlaying: Track? = null,
+    val memberAvatars: Map<String, String> = emptyMap(),
 )
 
 @Immutable
@@ -151,7 +152,7 @@ data class PlayerState(
     val lyrics: List<LyricLine> = emptyList(),
 )
 
-enum class Tab { Home, Search, Library }
+enum class Tab { Home, Search, Now, Library }
 
 @Immutable
 data class AppUiState(

@@ -4,7 +4,9 @@ import android.app.Application
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.spote.app.logging.ActionLog
 import dev.spote.app.model.ChatMessage
+import dev.spote.app.profile.ProfileStore
 import dev.spote.app.rust.coverFor
 import dev.spote.app.social.ChatMsg
 import dev.spote.app.social.Member
@@ -13,6 +15,8 @@ import dev.spote.app.social.QueueItem
 import dev.spote.app.social.RoomState
 import dev.spote.app.social.SocialConfig
 import dev.spote.app.social.SocialEvent
+import dev.spote.app.setup.SetupLink
+import dev.spote.app.setup.SetupLinkBus
 import dev.spote.app.social.SpoteSocialClient
 import dev.spote.app.social.TrackRef
 import kotlinx.coroutines.Job
@@ -28,6 +32,8 @@ data class SocialUiState(
     val connecting: Boolean = false,
     val userName: String = "",
     val serverUrl: String = "",
+    val clientKey: String = "",
+    val invite: String = "",
     val rooms: List<dev.spote.app.social.Room> = emptyList(),
     val activeRoomId: String? = null,
     val roomState: RoomState? = null,
@@ -65,6 +71,8 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
             loggedIn = config.isLoggedIn,
             userName = config.displayName,
             serverUrl = config.serverUrl,
+            clientKey = config.clientKey,
+            invite = config.invite,
             storageEncrypted = config.storageIsEncrypted,
             connecting = config.isLoggedIn,
         ),
@@ -75,10 +83,44 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
     val notices: StateFlow<String?> = _notices.asStateFlow()
 
     init {
+        ProfileStore.init(application)
+        viewModelScope.launch {
+            SetupLinkBus.current.collect { link ->
+                if (link == null) return@collect
+                applySetupLink(link)
+                SetupLinkBus.clear()
+            }
+        }
         if (config.isLoggedIn) {
             connect()
             refreshRoomsFromRest()
         }
+    }
+
+    /** Un QR/enlace `spote://setup` configura el servidor y entra solo. */
+    private fun applySetupLink(link: SetupLink) {
+        ActionLog.log("setup.link", "server" to link.serverUrl, "name" to link.name)
+        eventsJob?.cancel()
+        eventsJob = null
+        client.disconnect()
+        config.serverUrl = link.serverUrl
+        config.clientKey = link.clientKey
+        config.invite = link.invite
+        val name = link.name?.takeIf { it.isNotBlank() }
+            ?: config.displayName.takeIf { it.isNotBlank() }
+            ?: "Android"
+        config.displayName = name
+        _state.update {
+            it.copy(
+                loggedIn = false,
+                serverUrl = link.serverUrl,
+                clientKey = link.clientKey,
+                invite = link.invite,
+                userName = name,
+            )
+        }
+        _notices.value = "Configuración recibida; conectando…"
+        login(link.serverUrl, link.clientKey, name, link.invite)
     }
 
     override fun onCleared() {
@@ -92,6 +134,13 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
             val result = client.login(serverUrl, clientKey, name, invite)
+            ActionLog.log(
+                "social.login",
+                "server" to serverUrl,
+                "user" to name,
+                "ok" to result.isSuccess,
+                "error" to result.exceptionOrNull()?.message,
+            )
             result.onSuccess { response ->
                 _state.update {
                     it.copy(
@@ -99,12 +148,15 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
                         loggedIn = true,
                         userName = response.user.name,
                         serverUrl = config.serverUrl,
+                        clientKey = config.clientKey,
+                        invite = config.invite,
                         connecting = true,
                         error = null,
                     )
                 }
                 connect()
                 refreshRoomsFromRest()
+                ProfileStore.avatarDataUrl()?.let { dataUrl -> updateAvatar(dataUrl) }
                 _notices.value = "Sesión iniciada como ${response.user.name}"
             }.onFailure { error ->
                 _state.update {
@@ -115,6 +167,7 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun logout() {
+        ActionLog.log("social.logout")
         viewModelScope.launch {
             eventsJob?.cancel()
             eventsJob = null
@@ -123,6 +176,8 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
             _state.value = SocialUiState(
                 storageEncrypted = config.storageIsEncrypted,
                 serverUrl = config.serverUrl,
+                clientKey = config.clientKey,
+                invite = config.invite,
             )
             _notices.value = "Sesión cerrada"
         }
@@ -145,6 +200,7 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
 
     fun join(roomId: String) {
         if (!config.isLoggedIn) return
+        ActionLog.log("social.join", "room" to roomId)
         _state.update {
             it.copy(
                 activeRoomId = roomId,
@@ -174,6 +230,7 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
     fun sendChat(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        ActionLog.log("social.chat", "chars" to trimmed.length)
         if (!client.sendChat(trimmed)) {
             _notices.value = "Sin conexión con la sala"
         }
@@ -190,6 +247,15 @@ class SocialViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun serverNowMs(): Long = client.serverNowMs()
+
+    fun updateAvatar(dataUrl: String?) {
+        if (!config.isLoggedIn) return
+        viewModelScope.launch {
+            client.updateAvatar(dataUrl).onFailure { error ->
+                _notices.value = "No se pudo subir el avatar: ${error.message ?: "error"}"
+            }
+        }
+    }
 
     private fun connect() {
         if (eventsJob != null) return
@@ -301,11 +367,15 @@ fun TrackRef.toUiTrack(): dev.spote.app.model.Track {
 fun dev.spote.app.social.Room.toUiRoom(): dev.spote.app.model.Room {
     val playing = state.track?.toUiTrack()
     val names = members.map { it.user.name }.filter { it.isNotBlank() }
+    val avatars = members.mapNotNull { member ->
+        member.user.avatar?.takeIf { it.isNotBlank() }?.let { member.user.name to it }
+    }.toMap()
     return dev.spote.app.model.Room(
         id = id,
         name = name,
         members = names,
         live = state.playing || members.any { it.ready },
         nowPlaying = playing,
+        memberAvatars = avatars,
     )
 }

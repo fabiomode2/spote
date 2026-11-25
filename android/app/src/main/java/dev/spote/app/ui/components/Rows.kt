@@ -383,7 +383,11 @@ fun RoomCard(room: Room, onClick: () -> Unit, modifier: Modifier = Modifier) {
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     room.members.take(3).forEach { member ->
-                        Avatar(name = member, size = 24.dp)
+                        Avatar(
+                            name = member,
+                            size = 24.dp,
+                            imageUri = room.memberAvatars[member],
+                        )
                     }
                 }
             }

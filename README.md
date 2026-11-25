@@ -189,6 +189,8 @@ cd android && ./gradlew :app:assembleDebug
 
 - `android/README.md` — build, arquitectura, modo mock y limitaciones.
 - `docs/screenshots/android/` — capturas reales de Compose (Roborazzi).
+- `spote setup` — QR/enlace para configurar el móvil desde el desktop;
+  `spoted qr <url> <key> <invite>` hace lo mismo desde el servidor.
 
 ## Más
 

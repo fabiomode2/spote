@@ -21,4 +21,4 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew :app:recordRoborazziDebug
 | ![Sala](13-room.png) | ![Actualización](14-update-card.png) |
 | ![Nocturno home](15-nocturne-home.png) | ![Nocturno now playing](16-nocturne-now-playing.png) |
 | ![Nocturno álbum](17-nocturne-album.png) | ![Selector de tema](18-theme-picker.png) |
-| ![Contact sheet](_contact-sheet.png) | |
+| ![Artista](19-artist.png) | ![Contact sheet](_contact-sheet.png) |

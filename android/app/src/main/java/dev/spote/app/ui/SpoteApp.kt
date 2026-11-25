@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,8 +56,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
@@ -69,13 +72,16 @@ import androidx.navigation.compose.rememberNavController
 import dev.spote.app.model.Album
 import dev.spote.app.model.Playlist
 import dev.spote.app.model.Tab
+import dev.spote.app.logging.ActionLog
 import dev.spote.app.model.Track
+import dev.spote.app.profile.ProfileStore
 import dev.spote.app.ui.components.MiniPlayer
 import dev.spote.app.ui.components.SpoteBottomBar
 import dev.spote.app.ui.nowplaying.LyricsScreen
 import dev.spote.app.ui.nowplaying.NowPlayingScreen
 import dev.spote.app.ui.nowplaying.QueueScreen
 import dev.spote.app.ui.screens.AlbumScreen
+import dev.spote.app.ui.screens.ArtistScreen
 import dev.spote.app.ui.screens.DownloadsScreen
 import dev.spote.app.ui.screens.HomeScreen
 import dev.spote.app.ui.screens.LibraryScreen
@@ -91,6 +97,8 @@ import dev.spote.app.ui.update.UpdateCard
 fun SpoteApp(
     themeMode: SpoteThemeMode = SpoteThemeMode.Midnight,
     onThemeModeChange: (SpoteThemeMode) -> Unit = {},
+    uiStyle: dev.spote.app.ui.theme.SpoteUiStyle = dev.spote.app.ui.theme.SpoteUiStyle.Medium,
+    onUiStyleChange: (dev.spote.app.ui.theme.SpoteUiStyle) -> Unit = {},
 ) {
     val navController = rememberNavController()
     val appViewModel: AppViewModel = viewModel()
@@ -98,7 +106,17 @@ fun SpoteApp(
     val state by appViewModel.state.collectAsStateWithLifecycle()
     val socialState by socialViewModel.state.collectAsStateWithLifecycle()
     val socialNotice by socialViewModel.notices.collectAsStateWithLifecycle()
-    val homeState = state.home.copy(rooms = socialState.rooms.map { it.toUiRoom() })
+    val presenceAvatars = socialState.presences.mapNotNull { presence ->
+        presence.user.avatar?.takeIf { it.isNotBlank() }?.let { presence.user.name to it }
+    }.toMap()
+    val homeState = remember(state.home, socialState.rooms, presenceAvatars) {
+        state.home.copy(
+            rooms = socialState.rooms.map { room ->
+                val ui = room.toUiRoom()
+                ui.copy(memberAvatars = ui.memberAvatars + presenceAvatars)
+            },
+        )
+    }
     var menuTrack by remember { mutableStateOf<Track?>(null) }
     var menuPlaylistId by remember { mutableStateOf<String?>(null) }
     var menuQueueIndex by remember { mutableStateOf<Int?>(null) }
@@ -109,6 +127,10 @@ fun SpoteApp(
     val route = backStackEntry?.destination?.route ?: "home"
     val colors = LocalSpoteColors.current
     val context = LocalContext.current
+    val appScope = rememberCoroutineScope()
+    ProfileStore.init(context)
+    val profileName by ProfileStore.name.collectAsStateWithLifecycle()
+    val avatarPath by ProfileStore.avatar.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -125,6 +147,10 @@ fun SpoteApp(
 
     LaunchedEffect(Unit) {
         appViewModel.messages.collect { message -> snackbarHostState.showSnackbar(message) }
+    }
+
+    LaunchedEffect(route) {
+        ActionLog.log("nav", "route" to route)
     }
 
     LaunchedEffect(socialNotice) {
@@ -146,7 +172,7 @@ fun SpoteApp(
         }
     }
 
-    val topLevelRoutes = setOf("home", "search", "library")
+    val topLevelRoutes = setOf("home", "search", "now", "library")
     val fullscreenRoutes = setOf("now", "lyrics", "queue")
     val noMiniRoutes = fullscreenRoutes + setOf("settings")
     val showMini = route !in noMiniRoutes
@@ -171,6 +197,7 @@ fun SpoteApp(
                         SpoteBottomBar(
                             selected = when (route) {
                                 "search" -> Tab.Search
+                                "now" -> Tab.Now
                                 "library" -> Tab.Library
                                 else -> Tab.Home
                             },
@@ -178,6 +205,7 @@ fun SpoteApp(
                                 val target = when (tab) {
                                     Tab.Home -> "home"
                                     Tab.Search -> "search"
+                                    Tab.Now -> "now"
                                     Tab.Library -> "library"
                                 }
                                 navController.navigate(target) {
@@ -211,15 +239,24 @@ fun SpoteApp(
                     },
                     onOpenSettings = { navController.navigate("settings") },
                     onImport = { importLauncher.launch(arrayOf("audio/*")) },
+                    userName = socialState.userName.ifBlank { profileName },
+                    avatarUri = avatarPath,
                 )
             }
             composable("search") {
                 SearchScreen(
                     state = state.search,
                     onQueryChange = appViewModel::setQuery,
-                    onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                    onPlayTrack = {
+                        appViewModel.commitSearch(state.search.query)
+                        playAndOpen(navController, appViewModel, it)
+                    },
                     onOpenAlbum = { navController.navigate("album/${it.id}") },
+                    onOpenArtist = { navController.navigate("artist/${Uri.encode(it)}") },
                     onMore = { openTrackMenu(it) },
+                    onClearSearch = appViewModel::clearSearch,
+                    onClearHistory = appViewModel::clearSearchHistory,
+                    onSearchCommit = appViewModel::commitSearch,
                 )
             }
             composable("library") {
@@ -234,8 +271,7 @@ fun SpoteApp(
                     onOpenDownloads = { navController.navigate("downloads") },
                     onOpenSearch = { navController.navigate("search") },
                     onOpenArtist = { artist ->
-                        appViewModel.setQuery(artist)
-                        navController.navigate("search")
+                        navController.navigate("artist/${Uri.encode(artist)}")
                     },
                     onCreatePlaylist = { showCreatePlaylist = true },
                     onImport = { importLauncher.launch(arrayOf("audio/*")) },
@@ -276,6 +312,37 @@ fun SpoteApp(
                 }
             }
             composable(
+                route = "artist/{name}",
+                enterTransition = { slideInHorizontally(initialOffsetX = { it }) },
+                exitTransition = { slideOutHorizontally(targetOffsetX = { -it / 4 }) },
+                popEnterTransition = { slideInHorizontally(initialOffsetX = { -it / 4 }) },
+                popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) },
+            ) { entry ->
+                val rawName = entry.arguments?.getString("name").orEmpty()
+                val artistName = Uri.decode(rawName)
+                val tracks = (
+                    state.library.tracks +
+                        state.home.recent +
+                        state.search.results +
+                        state.search.remoteResults
+                    )
+                    .filter { it.artist.equals(artistName, ignoreCase = true) }
+                    .distinctBy { it.key }
+                val albums = (state.library.albums + state.home.albums + state.search.albums)
+                    .filter { it.artist.equals(artistName, ignoreCase = true) }
+                    .distinctBy { it.id }
+                ArtistScreen(
+                    name = artistName,
+                    tracks = tracks,
+                    albums = albums,
+                    player = state.player,
+                    onBack = { navController.popBackStack() },
+                    onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                    onOpenAlbum = { navController.navigate("album/${it.id}") },
+                    onMore = { openTrackMenu(it) },
+                )
+            }
+            composable(
                 route = "playlist/{id}",
                 enterTransition = { slideInHorizontally(initialOffsetX = { it }) },
                 exitTransition = { slideOutHorizontally(targetOffsetX = { -it / 4 }) },
@@ -308,10 +375,16 @@ fun SpoteApp(
                 val baseRoom = socialState.rooms.firstOrNull { it.id == roomId }?.toUiRoom()
                     ?: homeState.rooms.firstOrNull { it.id == roomId }
                 if (baseRoom != null) {
+                    val selfAvatar = socialState.userName
+                        .takeIf { it.isNotBlank() }
+                        ?.let { name -> avatarPath?.let { path -> name to path } }
                     val room = baseRoom.copy(
                         members = socialState.effectiveMembers.ifEmpty { baseRoom.members },
                         nowPlaying = socialState.nowPlaying ?: baseRoom.nowPlaying,
                         live = baseRoom.live || socialState.roomState?.playing == true,
+                        memberAvatars = baseRoom.memberAvatars +
+                            presenceAvatars +
+                            (selfAvatar?.let { mapOf(it) } ?: emptyMap()),
                     )
                     val roomState = socialState.roomState
                     LaunchedEffect(
@@ -373,13 +446,32 @@ fun SpoteApp(
                     onOpenDownloads = { navController.navigate("downloads") },
                     themeMode = themeMode,
                     onThemeModeChange = onThemeModeChange,
+                    uiStyle = uiStyle,
+                    onUiStyleChange = onUiStyleChange,
                     downloadedCount = state.library.downloadedCount,
                     storageLabel = state.library.storageLabel,
+                    profileName = profileName,
+                    avatarPath = avatarPath,
+                    onProfileNameChange = {
+                        ActionLog.log("profile.name")
+                        ProfileStore.setName(it)
+                    },
+                    onAvatarSelected = { uri ->
+                        ActionLog.log("profile.avatar")
+                        appScope.launch {
+                            val path = ProfileStore.importAvatar(context, uri)
+                            if (path != null && socialState.loggedIn) {
+                                socialViewModel.updateAvatar(ProfileStore.avatarDataUrl())
+                            }
+                        }
+                    },
                     socialLoggedIn = socialState.loggedIn,
                     socialBusy = socialState.busy,
                     socialConnecting = socialState.connecting,
                     socialUser = socialState.userName,
                     socialServer = socialState.serverUrl,
+                    socialClientKey = socialState.clientKey,
+                    socialInvite = socialState.invite,
                     socialError = socialState.error,
                     socialStorageEncrypted = socialState.storageEncrypted,
                     onSocialLogin = socialViewModel::login,

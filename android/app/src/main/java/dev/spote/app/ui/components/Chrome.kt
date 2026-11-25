@@ -1,5 +1,8 @@
 package dev.spote.app.ui.components
 
+import android.graphics.BitmapFactory
+import android.util.Base64
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -28,11 +31,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -189,8 +194,21 @@ fun FilterChips(
 }
 
 @Composable
-fun Avatar(name: String, size: Dp = 34.dp, modifier: Modifier = Modifier) {
+fun Avatar(
+    name: String,
+    size: Dp = 34.dp,
+    modifier: Modifier = Modifier,
+    imageUri: String? = null,
+) {
     val colors = LocalSpoteColors.current
+    val dataBitmap = remember(imageUri) {
+        val raw = imageUri?.takeIf { it.startsWith("data:image/") } ?: return@remember null
+        runCatching {
+            val encoded = raw.substringAfter(',')
+            val bytes = Base64.decode(encoded, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+        }.getOrNull()
+    }
     Box(
         modifier = modifier
             .size(size)
@@ -207,6 +225,21 @@ fun Avatar(name: String, size: Dp = 34.dp, modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
             color = colors.accentInk,
         )
+        when {
+            dataBitmap != null -> Image(
+                bitmap = dataBitmap,
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+
+            !imageUri.isNullOrBlank() -> coil3.compose.AsyncImage(
+                model = imageUri,
+                contentDescription = null,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
     }
 }
 

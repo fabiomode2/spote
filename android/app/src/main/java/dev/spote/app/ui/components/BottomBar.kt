@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Search
@@ -58,6 +59,13 @@ fun SpoteBottomBar(selected: Tab, onSelect: (Tab) -> Unit) {
                 label = "Buscar",
                 selected = selected == Tab.Search,
                 onClick = { onSelect(Tab.Search) },
+                modifier = Modifier.weight(1f),
+            )
+            BottomItem(
+                icon = Icons.Rounded.GraphicEq,
+                label = "Sonando",
+                selected = selected == Tab.Now,
+                onClick = { onSelect(Tab.Now) },
                 modifier = Modifier.weight(1f),
             )
             BottomItem(

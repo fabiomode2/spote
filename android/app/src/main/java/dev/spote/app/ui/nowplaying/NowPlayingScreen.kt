@@ -47,6 +47,7 @@ import dev.spote.app.model.RepeatMode
 import dev.spote.app.ui.components.AppBackground
 import dev.spote.app.ui.components.CircleIconButton
 import dev.spote.app.ui.components.CoverArt
+import dev.spote.app.ui.components.SpectrumStrip
 import dev.spote.app.ui.components.LabelledAction
 import dev.spote.app.ui.components.LikeButton
 import dev.spote.app.ui.components.PlayButton
@@ -122,7 +123,15 @@ fun NowPlayingScreen(
                     Spacer(Modifier.size(40.dp))
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
+                SpectrumStrip(
+                    playing = player.isPlaying,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 48.dp)
+                        .height(26.dp),
+                )
+                Spacer(Modifier.height(10.dp))
                 Box(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center,

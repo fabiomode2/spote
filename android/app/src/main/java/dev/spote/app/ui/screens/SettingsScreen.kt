@@ -1,8 +1,15 @@
 package dev.spote.app.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.StatFs
 import android.text.format.Formatter
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -23,22 +30,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.DownloadDone
-import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Storage
-import androidx.compose.material.icons.rounded.VolumeUp
-import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,12 +60,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.spote.app.BuildConfig
+import dev.spote.app.logging.ActionLog
+import dev.spote.app.setup.QrCodeImage
+import dev.spote.app.setup.SetupLink
+import dev.spote.app.setup.SetupLinkBus
+import dev.spote.app.setup.rememberQrScanner
 import dev.spote.app.ui.components.AppBackground
 import dev.spote.app.ui.components.Avatar
 import dev.spote.app.ui.components.SettingsRow
 import dev.spote.app.ui.components.TopBar
 import dev.spote.app.ui.theme.LocalSpoteColors
 import dev.spote.app.ui.theme.SpoteThemeMode
+import dev.spote.app.ui.theme.SpoteUiStyle
 
 @Composable
 fun SettingsScreen(
@@ -71,13 +80,21 @@ fun SettingsScreen(
     updateContent: @Composable () -> Unit,
     themeMode: SpoteThemeMode = SpoteThemeMode.Midnight,
     onThemeModeChange: (SpoteThemeMode) -> Unit = {},
+    uiStyle: SpoteUiStyle = SpoteUiStyle.Medium,
+    onUiStyleChange: (SpoteUiStyle) -> Unit = {},
     downloadedCount: Int = 0,
     storageLabel: String = "—",
+    profileName: String = "",
+    avatarPath: String? = null,
+    onProfileNameChange: (String) -> Unit = {},
+    onAvatarSelected: (Uri) -> Unit = {},
     socialLoggedIn: Boolean = false,
     socialBusy: Boolean = false,
     socialConnecting: Boolean = false,
     socialUser: String = "",
     socialServer: String = "",
+    socialClientKey: String = "",
+    socialInvite: String = "",
     socialError: String? = null,
     socialStorageEncrypted: Boolean = true,
     onSocialLogin: (url: String, key: String, name: String, invite: String) -> Unit = { _, _, _, _ -> },
@@ -87,22 +104,39 @@ fun SettingsScreen(
     val colors = LocalSpoteColors.current
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
-    val prefs = remember {
-        context.getSharedPreferences("spote.settings", Context.MODE_PRIVATE)
-    }
-    var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", true)) }
-    var normalize by remember { mutableStateOf(prefs.getBoolean("normalize", true)) }
-    var effects by remember { mutableStateOf(prefs.getBoolean("effects", true)) }
-    var animatedLyrics by remember { mutableStateOf(prefs.getBoolean("lyrics", true)) }
     var showThemePicker by remember { mutableStateOf(false) }
+    var showStylePicker by remember { mutableStateOf(false) }
     var showSocialDialog by remember { mutableStateOf(false) }
+    var showProfileDialog by remember { mutableStateOf(false) }
+    var draftName by remember { mutableStateOf(profileName) }
+    var qrLink by remember { mutableStateOf<SetupLink?>(null) }
+    val scanQr = rememberQrScanner(
+        onResult = { raw ->
+            if (!SetupLinkBus.publish(raw)) {
+                Toast.makeText(context, "Ese QR no es de Spote", Toast.LENGTH_SHORT).show()
+            }
+        },
+    )
+    fun currentSetupLink(): SetupLink? = if (
+        socialServer.isNotBlank() &&
+        socialClientKey.isNotBlank() &&
+        socialInvite.isNotBlank()
+    ) {
+        SetupLink(
+            serverUrl = socialServer,
+            clientKey = socialClientKey,
+            invite = socialInvite,
+            name = socialUser.takeIf { it.isNotBlank() },
+        )
+    } else {
+        null
+    }
+    val avatarLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let(onAvatarSelected) }
     var cacheSize by remember { mutableLongStateOf(dirSize(context.cacheDir)) }
     val freeSpace = remember {
         runCatching { StatFs(context.filesDir.path).availableBytes }.getOrDefault(0L)
-    }
-
-    fun persist(key: String, value: Boolean) {
-        prefs.edit().putBoolean(key, value).apply()
     }
 
     AppBackground {
@@ -121,10 +155,18 @@ fun SettingsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    Avatar(name = socialUser.ifBlank { "Tú" }, size = 56.dp)
+                    Avatar(
+                        name = socialUser.ifBlank { profileName.ifBlank { "Tú" } },
+                        size = 56.dp,
+                        imageUri = avatarPath,
+                        modifier = Modifier.clip(RoundedCornerShape(50)).clickable {
+                            draftName = profileName
+                            showProfileDialog = true
+                        },
+                    )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = socialUser.ifBlank { "Tú" },
+                            text = socialUser.ifBlank { profileName.ifBlank { "Tú" } },
                             style = MaterialTheme.typography.titleLarge,
                             color = MaterialTheme.colorScheme.onBackground,
                         )
@@ -146,41 +188,6 @@ fun SettingsScreen(
                 }
             }
 
-            item(key = "playback-title") { SettingsGroup("REPRODUCCIÓN") }
-            item(key = "wifi") {
-                SettingsRow(
-                    title = "Descargar solo por WiFi",
-                    subtitle = "Ahorra datos y batería",
-                    icon = Icons.Rounded.Wifi,
-                    trailing = {
-                        Switch(
-                            checked = wifiOnly,
-                            onCheckedChange = {
-                                wifiOnly = it
-                                persist("wifi_only", it)
-                            },
-                            colors = spoteSwitchColors(),
-                        )
-                    },
-                )
-            }
-            item(key = "normalize") {
-                SettingsRow(
-                    title = "Normalizar volumen",
-                    subtitle = "Todas las pistas al mismo nivel",
-                    icon = Icons.Rounded.VolumeUp,
-                    trailing = {
-                        Switch(
-                            checked = normalize,
-                            onCheckedChange = {
-                                normalize = it
-                                persist("normalize", it)
-                            },
-                            colors = spoteSwitchColors(),
-                        )
-                    },
-                )
-            }
             item(key = "appearance-title") { SettingsGroup("APARIENCIA") }
             item(key = "theme") {
                 SettingsRow(
@@ -197,40 +204,22 @@ fun SettingsScreen(
                     },
                 )
             }
-            item(key = "effects") {
+            item(key = "ui-style") {
                 SettingsRow(
-                    title = "Efectos de fondo",
-                    subtitle = "Mosaico y ambiente a 30 fps",
-                    icon = Icons.Rounded.GraphicEq,
+                    title = "Estilo TUI",
+                    subtitle = uiStyle.subtitle,
+                    icon = Icons.Rounded.Code,
+                    onClick = { showStylePicker = true },
                     trailing = {
-                        Switch(
-                            checked = effects,
-                            onCheckedChange = {
-                                effects = it
-                                persist("effects", it)
-                            },
-                            colors = spoteSwitchColors(),
+                        Text(
+                            text = uiStyle.label,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = colors.accent,
                         )
                     },
                 )
             }
-            item(key = "lyrics") {
-                SettingsRow(
-                    title = "Letras animadas",
-                    subtitle = "Karaoke palabra a palabra",
-                    icon = Icons.Rounded.GraphicEq,
-                    trailing = {
-                        Switch(
-                            checked = animatedLyrics,
-                            onCheckedChange = {
-                                animatedLyrics = it
-                                persist("lyrics", it)
-                            },
-                            colors = spoteSwitchColors(),
-                        )
-                    },
-                )
-            }
+
 
             item(key = "storage-title") { SettingsGroup("ALMACENAMIENTO") }
             item(key = "downloads") {
@@ -261,6 +250,24 @@ fun SettingsScreen(
             }
 
             item(key = "social-title") { SettingsGroup("SALAS") }
+            item(key = "social-scan") {
+                SettingsRow(
+                    title = "Escanear QR",
+                    subtitle = "Abre la app con el servidor ya configurado",
+                    icon = Icons.Rounded.Group,
+                    onClick = scanQr,
+                )
+            }
+            if (currentSetupLink() != null) {
+                item(key = "social-qr") {
+                    SettingsRow(
+                        title = "Mostrar QR y enlace",
+                        subtitle = "Para configurar otro móvil o el desktop",
+                        icon = Icons.Rounded.Code,
+                        onClick = { qrLink = currentSetupLink() },
+                    )
+                }
+            }
             if (socialLoggedIn) {
                 item(key = "social-session") {
                     SettingsRow(
@@ -311,6 +318,37 @@ fun SettingsScreen(
             item(key = "updates-title") { SettingsGroup("ACTUALIZACIONES") }
             item(key = "updates") { updateContent() }
 
+            item(key = "logs-title") { SettingsGroup("DIAGNÓSTICO") }
+            item(key = "share-log") {
+                SettingsRow(
+                    title = "Compartir registro",
+                    subtitle = "Acciones, navegación, errores y tiempos",
+                    icon = Icons.Rounded.Info,
+                    onClick = {
+                        ActionLog.log("log.share")
+                        val intent = ActionLog.shareIntent()
+                        if (intent != null) {
+                            context.startActivity(
+                                Intent.createChooser(intent, "Compartir registro de Spote"),
+                            )
+                        } else {
+                            Toast.makeText(context, "Todavía no hay registro", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                )
+            }
+            item(key = "clear-log") {
+                SettingsRow(
+                    title = "Borrar registro",
+                    subtitle = "Elimina los logs locales",
+                    icon = Icons.Rounded.DeleteSweep,
+                    onClick = {
+                        ActionLog.clear()
+                        Toast.makeText(context, "Registro borrado", Toast.LENGTH_SHORT).show()
+                    },
+                )
+            }
+
             item(key = "about-title") { SettingsGroup("ACERCA DE") }
             item(key = "version") {
                 SettingsRow(
@@ -346,6 +384,111 @@ fun SettingsScreen(
                     showThemePicker = false
                 },
                 onDismiss = { showThemePicker = false },
+            )
+        }
+
+        qrLink?.let { link ->
+            val encoded = link.encode()
+            AlertDialog(
+                onDismissRequest = { qrLink = null },
+                title = { Text("Configurar Spote") },
+                text = {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        QrCodeImage(text = encoded, size = 240.dp)
+                        Text(
+                            text = "El QR contiene la clave de cliente y la invitación. Compártelo solo con quien deba entrar.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = encoded,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 3,
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "Spote")
+                                putExtra(Intent.EXTRA_TEXT, encoded)
+                            }
+                            context.startActivity(
+                                Intent.createChooser(share, "Compartir configuración"),
+                            )
+                        },
+                    ) { Text("Compartir") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            clipboard?.setPrimaryClip(
+                                ClipData.newPlainText("Spote", encoded),
+                            )
+                            Toast.makeText(context, "Enlace copiado", Toast.LENGTH_SHORT).show()
+                        },
+                    ) { Text("Copiar enlace") }
+                },
+                containerColor = MaterialTheme.colorScheme.surface,
+            )
+        }
+
+        if (showProfileDialog) {
+            AlertDialog(
+                onDismissRequest = { showProfileDialog = false },
+                title = { Text("Tu perfil") },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Avatar(
+                            name = draftName.ifBlank { "Tú" },
+                            size = 88.dp,
+                            imageUri = avatarPath,
+                        )
+                        TextButton(onClick = { avatarLauncher.launch("image/*") }) {
+                            Text("Cambiar foto")
+                        }
+                        OutlinedTextField(
+                            value = draftName,
+                            onValueChange = { draftName = it.take(32) },
+                            label = { Text("Nombre") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onProfileNameChange(draftName.trim())
+                            showProfileDialog = false
+                        },
+                    ) { Text("Guardar") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showProfileDialog = false }) { Text("Cancelar") }
+                },
+                containerColor = MaterialTheme.colorScheme.surface,
+            )
+        }
+
+        if (showStylePicker) {
+            StylePickerDialog(
+                current = uiStyle,
+                onSelect = { style ->
+                    onUiStyleChange(style)
+                    showStylePicker = false
+                },
+                onDismiss = { showStylePicker = false },
             )
         }
 
@@ -453,6 +596,64 @@ private fun SocialLoginDialog(
 }
 
 @Composable
+private fun StylePickerDialog(
+    current: SpoteUiStyle,
+    onSelect: (SpoteUiStyle) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Estilo TUI", style = MaterialTheme.typography.headlineSmall) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SpoteUiStyle.entries.forEach { style ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { onSelect(style) }
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text(
+                            text = "\$",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            ),
+                            color = LocalSpoteColors.current.accent,
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = style.label,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onBackground,
+                            )
+                            Text(
+                                text = style.subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (style == current) {
+                            Icon(
+                                imageVector = Icons.Rounded.Check,
+                                contentDescription = null,
+                                tint = LocalSpoteColors.current.accent,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Cerrar") }
+        },
+        containerColor = MaterialTheme.colorScheme.surface,
+    )
+}
+
+@Composable
 fun ThemePickerDialog(
     current: SpoteThemeMode,
     onSelect: (SpoteThemeMode) -> Unit,
@@ -552,13 +753,3 @@ private fun SettingsGroup(title: String) {
         modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 4.dp),
     )
 }
-
-@Composable
-private fun spoteSwitchColors() = SwitchDefaults.colors(
-    checkedThumbColor = LocalSpoteColors.current.accentInk,
-    checkedTrackColor = LocalSpoteColors.current.accent,
-    checkedBorderColor = LocalSpoteColors.current.accent,
-    uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-    uncheckedTrackColor = LocalSpoteColors.current.surfaceHigh,
-    uncheckedBorderColor = MaterialTheme.colorScheme.outline,
-)

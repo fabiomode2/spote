@@ -20,7 +20,13 @@ catálogo, letras, paleta y salas.
 | Playlists: crear, borrar, añadir y quitar canciones | ✅ |
 | Cola: elegir pista, mover arriba/abajo y quitar | ✅ |
 | Salas sociales (`spoted`): login, lista, chat, cola y play/pause sincronizado | ✅ |
+| Perfil con nombre, foto local y avatar compartido en salas | ✅ |
+| QR/enlace `spote://setup` para configurar servidor y entrar solo | ✅ |
 | Tema cover-driven, Midnight y Nocturno editorial | ✅ |
+| Estilo TUI conmutable: apagado, sutil (mono) o medio (mono + scanlines + espectro) | ✅ |
+| Búsqueda con historial persistente, caché y limpieza | ✅ |
+| Perfiles de artista con álbumes, populares y todas las canciones | ✅ |
+| Registro local de acciones exportable desde Ajustes | ✅ |
 | Actualización in-app desde GitHub Releases | ✅ |
 
 La app usa la librería real por defecto. Si el `.so` no carga, arranca con una
@@ -101,6 +107,33 @@ offset con pings. Para desarrollo local con `http://` hace falta un
 `network-security-config` de debug: el manifest usa
 `usesCleartextTraffic="false"`.
 
+## Configurar por QR o enlace
+
+El móvil y el desktop comparten el formato:
+
+```text
+spote://setup?server=...&key=...&invite=...&name=...
+```
+
+- **Móvil**: Ajustes → Salas → Mostrar QR y enlace, o Escanear QR. Al abrir un
+  enlace `spote://setup` la app guarda servidor/clave/invitación y hace login
+  automático.
+- **Desktop**: `spote setup` imprime el QR y el enlace de la config actual;
+  `spote setup "<enlace>"` la aplica.
+- **Servidor**: `spoted qr <url> <client-key> <invite> [nombre]` genera el QR y
+  el enlace para repartir.
+
+El QR contiene la clave de cliente y la invitación: trátalo como una
+credencial.
+
+## Registro de acciones
+
+`ActionLog` escribe JSONL en `filesDir/logs/` (máximo 2 MB por archivo, 7
+archivos) con navegación, reproducción, búsquedas, descargas, salas, errores y
+tiempos. Las claves con password/token/secret/key/invite se redactan. En
+**Ajustes → Diagnóstico** se puede compartir o borrar. No sale del dispositivo
+salvo que pulses Compartir.
+
 ## Actualizaciones
 
 La app consulta `https://api.github.com/repos/<spoteRepo>/releases/latest`
@@ -116,6 +149,16 @@ sistema. Android exige confirmación del usuario: no hay instalación silenciosa
   `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
 - Si el usuario no ha dado permiso de instalar apps desconocidas, “Instalar”
   abre los ajustes del sistema; al volver, se pulsa otra vez.
+
+## Rendimiento
+
+- La biblioteca SQLite se lee en `Dispatchers.IO`; la UI arranca con un estado
+  vacío y se rellena sin bloquear el primer frame.
+- Navegar a álbum/artista/playlist usa los objetos ya cargados en memoria, sin
+  consultar SQLite durante la composición.
+- La cola de Media3 se cachea y solo se reconstruye cuando cambia el timeline;
+  el tick de posición no vuelve a mapear cientos de pistas.
+- La búsqueda local va con debounce y la remota se cachea por consulta.
 
 ## Builds
 
@@ -137,3 +180,4 @@ sistema. Android exige confirmación del usuario: no hay instalación silenciosa
 - ASR local para letras (requiere runtime whisper.cpp y un modelo en el APK).
 - `MediaProjection` para grabar el monitor.
 - Resolver de golpe toda una cola remota en vez de pista a pista.
+- Reordenar canciones dentro de una playlist (añadir/quitar ya funciona).
