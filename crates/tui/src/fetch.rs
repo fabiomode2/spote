@@ -915,11 +915,13 @@ impl TunebatWorker {
                     }
                     guard.take().expect("hay trabajo")
                 };
+                let spotify_id = tunebat::spotify_id_from_key(&job.key);
                 let result = tunebat::lookup(
                     &job.title,
                     &job.artist,
                     job.album.as_deref(),
                     job.duration_ms,
+                    spotify_id,
                 )
                 .map_err(|err| err.to_string());
                 if event_tx

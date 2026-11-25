@@ -226,7 +226,15 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     app.hit
         .add(Rect::new(rect.x, rect.y, rect.width, 1), Action::NavMenu);
 
-    let playlists = app.lib.playlists().unwrap_or_default();
+    // Las listas creadas con «guardar disco» son álbumes, no listas de
+    // usuario: se gestionan en la pestaña Discos y no ensucian la navegación.
+    let playlists: Vec<_> = app
+        .lib
+        .playlists()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|playlist| !is_album_playlist(&playlist.description))
+        .collect();
     let block = (Tab::ALL.len() + 3 + playlists.len().min(6) + 3) as u16;
     let offset = if app.vcenter {
         rect.height.saturating_sub(block) / 2
@@ -1071,6 +1079,13 @@ pub(super) fn draw_progress_bar(
             Alignment::Left,
         );
     }
+}
+
+/// `save_album_playlist` marca las listas de disco con «álbum · N pistas».
+/// Esas listas no se pintan en la navegación de biblioteca.
+fn is_album_playlist(description: &str) -> bool {
+    let description = description.trim_start().to_lowercase();
+    description.starts_with("álbum") || description.starts_with("album")
 }
 
 pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {

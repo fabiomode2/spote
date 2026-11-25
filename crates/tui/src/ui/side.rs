@@ -438,6 +438,11 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                     info.happiness * 100.0,
                     info.popularity
                 );
+                if let Some(year) = info.release_date.get(0..4) {
+                    if year.chars().all(|ch| ch.is_ascii_digit()) {
+                        mood.push_str(&format!(" · {year}"));
+                    }
+                }
                 if info.loudness != 0.0 {
                     mood.push_str(&format!(" · {:.1} dB", info.loudness));
                 }
@@ -452,6 +457,10 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                     info.instrumentalness * 100.0,
                     info.liveness * 100.0
                 );
+                if !info.label.is_empty() {
+                    texture.push_str(" · ");
+                    texture.push_str(&info.label);
+                }
                 truncate_chars(&mut texture, inner.width as usize);
                 put(buf, inner.x, y, &texture, color(pal.dim), None);
             }

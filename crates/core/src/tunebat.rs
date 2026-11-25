@@ -14,6 +14,7 @@ use serde::Deserialize;
 use crate::util::normalize;
 
 const SEARCH_URL: &str = "https://api.tunebat.com/api/tracks/search";
+const TRACK_URL: &str = "https://api.tunebat.com/api/tracks";
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0";
 const TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -45,6 +46,10 @@ pub struct TunebatInfo {
     pub duration_ms: u64,
     /// Fecha de lanzamiento ISO (`2001-03-12`) si Tunebat la conoce.
     pub release_date: String,
+    /// Sello discográfico, si la API lo expone.
+    pub label: String,
+    /// Contenido explícito según Spotify.
+    pub explicit: bool,
 }
 
 impl TunebatInfo {
@@ -125,18 +130,45 @@ struct Item {
     release_date: Option<String>,
     #[serde(default, rename = "p")]
     popularity: Option<u32>,
+    #[serde(default, rename = "l")]
+    label: Option<String>,
+    #[serde(default, rename = "ie")]
+    explicit: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrackResponse {
+    data: Option<Item>,
+}
+
+/// `spotify:track:ID` → `ID`. Otras claves (`sha1:`, `isrc:`) no permiten
+/// consultar el endpoint exacto y caen a la búsqueda por texto.
+pub fn spotify_id_from_key(key: &str) -> Option<&str> {
+    key.strip_prefix("spotify:track:")
+        .map(str::trim)
+        .filter(|id| id.len() == 22 && id.chars().all(|ch| ch.is_ascii_alphanumeric()))
 }
 
 /// Busca una pista por título/artista y devuelve sus datos de Tunebat.
 ///
-/// `album` y `duration_ms` son opcionales: si vienen, desempatan versiones
-/// (single, radio edit, recopilatorio) para no enseñar el BPM de otra.
+/// Si la pista tiene un ID de Spotify (`spotify:track:…`), se pide primero
+/// la ficha exacta; así no se confunde con otra versión. El resto cae a la
+/// búsqueda por título limpio + artista.
 pub fn lookup(
     title: &str,
     artist: &str,
     album: Option<&str>,
     duration_ms: u64,
+    spotify_id: Option<&str>,
 ) -> Result<Option<TunebatInfo>> {
+    let client = client()?;
+    if let Some(id) = spotify_id.filter(|id| {
+        id.len() == 22 && id.chars().all(|ch| ch.is_ascii_alphanumeric())
+    }) {
+        if let Some(info) = lookup_by_spotify_id(&client, id)? {
+            return Ok(Some(info));
+        }
+    }
     let title = title.trim();
     if title.is_empty() {
         return Ok(None);
@@ -145,19 +177,64 @@ pub fn lookup(
     let artist = artist.trim();
     let title = search_title(title);
     let term = if artist.is_empty() {
-        title
+        title.clone()
     } else {
         format!("{title} {artist}")
     };
-    let client = reqwest::blocking::Client::builder()
+    let items = search(&client, &term)?;
+    if let Some(info) = best_match(&items, original_title, artist, album, duration_ms) {
+        return Ok(Some(info));
+    }
+    // Colaboraciones raras: el término con todos los artistas puede no
+    // devolver nada; se reintenta solo con el título y el matching filtra.
+    if !artist.is_empty() {
+        let items = search(&client, &title)?;
+        if let Some(info) = best_match(&items, original_title, artist, album, duration_ms) {
+            return Ok(Some(info));
+        }
+    }
+    Ok(None)
+}
+
+fn client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(UA)
         .build()
-        .context("cliente de tunebat")?;
+        .context("cliente de tunebat")
+}
+
+fn search(client: &reqwest::blocking::Client, term: &str) -> Result<Vec<Item>> {
     let mut url = reqwest::Url::parse(SEARCH_URL).context("url de tunebat")?;
     url.query_pairs_mut()
-        .append_pair("term", &term)
+        .append_pair("term", term)
         .append_pair("page", "1");
+    let response = get(client, url)?;
+    let Some(response) = response else {
+        return Ok(Vec::new());
+    };
+    let body: SearchResponse = response.json().context("json de tunebat")?;
+    Ok(body.data.map(|data| data.items).unwrap_or_default())
+}
+
+fn lookup_by_spotify_id(
+    client: &reqwest::blocking::Client,
+    id: &str,
+) -> Result<Option<TunebatInfo>> {
+    let mut url = reqwest::Url::parse(TRACK_URL).context("url de tunebat")?;
+    url.query_pairs_mut().append_pair("trackId", id);
+    let response = get(client, url)?;
+    let Some(response) = response else {
+        return Ok(None);
+    };
+    let body: TrackResponse = response.json().context("json de tunebat")?;
+    Ok(body.data.map(|item| info_from(&item)))
+}
+
+fn get(
+    client: &reqwest::blocking::Client,
+    url: reqwest::Url,
+) -> Result<Option<reqwest::blocking::Response>> {
     let response = client
         .get(url)
         // La API interna exige el origen de la web; sin estas cabeceras
@@ -166,18 +243,11 @@ pub fn lookup(
         .header("Referer", "https://tunebat.com/")
         .send()
         .context("tunebat")?;
-    if !response.status().is_success() {
-        return Ok(None);
+    if response.status().is_success() {
+        Ok(Some(response))
+    } else {
+        Ok(None)
     }
-    let body: SearchResponse = response.json().context("json de tunebat")?;
-    let items = body.data.map(|data| data.items).unwrap_or_default();
-    Ok(best_match(
-        &items,
-        original_title,
-        artist,
-        album,
-        duration_ms,
-    ))
 }
 
 /// Título para la búsqueda: quita la versión entre paréntesis y el sufijo
@@ -287,6 +357,8 @@ fn info_from(item: &Item) -> TunebatInfo {
         popularity: item.popularity.unwrap_or(0).min(100),
         duration_ms: item.duration_ms.unwrap_or(0),
         release_date: item.release_date.clone().unwrap_or_default(),
+        label: item.label.clone().unwrap_or_default(),
+        explicit: item.explicit.unwrap_or(false),
     }
 }
 
@@ -358,6 +430,8 @@ mod tests {
             loudness: Some(-8.6),
             release_date: Some("2001-03-12".into()),
             popularity: Some(80),
+            label: None,
+            explicit: Some(false),
         }
     }
 
@@ -406,6 +480,16 @@ mod tests {
     }
 
     #[test]
+    fn spotify_ids_only_come_from_exact_keys() {
+        assert_eq!(
+            spotify_id_from_key("spotify:track:0DiWol3AO6WpXZgp0goxAV"),
+            Some("0DiWol3AO6WpXZgp0goxAV")
+        );
+        assert!(spotify_id_from_key("sha1:0DiWol3AO6WpXZgp0goxAV").is_none());
+        assert!(spotify_id_from_key("spotify:track:corto").is_none());
+    }
+
+    #[test]
     fn search_title_drops_version_suffixes_but_keeps_symbolic_titles() {
         assert_eq!(search_title("One More Time (Romanthony's Unplugged)"), "One More Time");
         assert_eq!(search_title("Let It Happen - Radio Edit"), "Let It Happen");
@@ -437,8 +521,22 @@ mod tests {
 
     #[test]
     #[ignore = "diagnóstico manual con red"]
+    fn live_tunebat_by_spotify_id_is_exact() {
+        let id = spotify_id_from_key("spotify:track:0DiWol3AO6WpXZgp0goxAV")
+            .expect("ID de Spotify válido");
+        let info = lookup("", "", None, 0, Some(id))
+            .expect("sin error de red")
+            .expect("ficha exacta de One More Time");
+        eprintln!("spotify id: {} · {}", info.bpm_line(), info.popularity);
+        assert_eq!(info.bpm, 123.0);
+        assert_eq!(info.camelot, "10B");
+        assert_eq!(info.key, "D major");
+    }
+
+    #[test]
+    #[ignore = "diagnóstico manual con red"]
     fn live_tunebat_one_more_time() {
-        let info = lookup("One More Time", "Daft Punk", Some("Discovery"), 320_000)
+        let info = lookup("One More Time", "Daft Punk", Some("Discovery"), 320_000, None)
             .expect("sin error de red")
             .expect("tunebat debe conocer la pista");
         eprintln!(
