@@ -69,6 +69,7 @@ class LyricsClient(context: Context) {
 
         val doc = try {
             fetch(title = title, artist = artist, album = album, durationMs = durationMs)
+                ?: fetchLyricsPlus(title = title, artist = artist, album = album, durationMs = durationMs)
                 ?: fetchGenius(title = title, artist = artist)
         } catch (e: CancellationException) {
             throw e
@@ -173,6 +174,49 @@ class LyricsClient(context: Context) {
                 }
             }
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Proveedor con líneas sincronizadas (Apple/Spotify/QQ vía LyricsPlus).
+     * Si no hay tiempos reales, se descarta y se prueba Genius como texto plano.
+     */
+    private suspend fun fetchLyricsPlus(
+        title: String,
+        artist: String,
+        album: String?,
+        durationMs: Long,
+    ): LyricsDoc? {
+        if (title.isBlank() || artist.isBlank()) return null
+        val url = LYRICS_PLUS_API.toHttpUrl().newBuilder()
+            .addQueryParameter("title", title)
+            .addQueryParameter("artist", artist)
+            .apply {
+                if (!album.isNullOrBlank()) addQueryParameter("album", album)
+                if (durationMs > 0L) {
+                    addQueryParameter("duration", "%.3f".format(Locale.ROOT, durationMs / 1000.0))
+                }
+                addQueryParameter("source", "apple,spotify,qq")
+            }
+            .build()
+        val body = executeJson(url) ?: return null
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        if (root.optString("type") == "None") return null
+        val linesJson = root.optJSONArray("lyrics") ?: return null
+        val lines = buildList {
+            for (index in 0 until linesJson.length()) {
+                val item = linesJson.optJSONObject(index) ?: continue
+                val text = item.optString("text").trim()
+                if (text.isEmpty()) continue
+                val time = item.optLong("time", 0L)
+                add(LyricLine(startMs = time.coerceAtLeast(0L), text = text))
+            }
+        }
+        if (lines.size < 2 || lines.all { it.startMs == 0L }) return null
+        return LyricsDoc(
+            lines = lines.sortedBy { it.startMs },
+            synced = true,
+            source = "lyricsplus",
+        )
     }
 
     /**
@@ -465,6 +509,7 @@ class LyricsClient(context: Context) {
         private const val SOURCE = "lrclib"
         private const val USER_AGENT = "spote-android"
         private const val GENIUS_SEARCH = "https://genius.com/api/search/multi"
+        private const val LYRICS_PLUS_API = "https://lyricsplus.prjktla.my.id/v2/lyrics/get"
         private const val GENIUS_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0 Mobile Safari/537.36"

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +61,10 @@ import dev.spote.app.ui.components.LocalArtistNavigation
 import dev.spote.app.ui.components.PlayButton
 import dev.spote.app.ui.theme.LocalSpoteColors
 import dev.spote.app.util.asTrackDuration
+import kotlinx.coroutines.launch
+
+private const val LyricsHeaderIndex = 4
+private const val LyricsStartIndex = 5
 
 @Composable
 fun NowPlayingScreen(
@@ -79,35 +85,35 @@ fun NowPlayingScreen(
     val track = player.track ?: return
     val colors = LocalSpoteColors.current
     val openArtist = LocalArtistNavigation.current
-    val lyricsState = rememberLazyListState()
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var lyricsPinned by remember { mutableStateOf(false) }
     val activeIndex = remember(player.positionMs, player.lyrics, player.lyricsSynced) {
-        if (!player.lyricsSynced) {
-            -1
-        } else {
-            player.lyrics.indexOfLast { it.startMs <= player.positionMs }
-        }
+        if (!player.lyricsSynced) -1
+        else player.lyrics.indexOfLast { it.startMs <= player.positionMs }
     }
 
-    LaunchedEffect(activeIndex) {
-        if (activeIndex >= 0 && player.lyrics.isNotEmpty()) {
-            lyricsState.animateScrollToItem((activeIndex - 3).coerceAtLeast(0))
+    LaunchedEffect(listState.firstVisibleItemIndex) {
+        if (listState.firstVisibleItemIndex >= LyricsHeaderIndex) lyricsPinned = true
+    }
+    LaunchedEffect(activeIndex, lyricsPinned, player.lyricsSynced) {
+        if (lyricsPinned && player.lyricsSynced && activeIndex >= 0) {
+            listState.animateScrollToItem(
+                (LyricsStartIndex + activeIndex - 2).coerceAtLeast(LyricsStartIndex),
+            )
         }
     }
 
     AppBackground(accentStart = track.cover.start) {
         BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-            val coverSize = minOf(
-                maxWidth - 72.dp,
-                maxHeight * 0.28f,
-                300.dp,
-            ).coerceAtLeast(140.dp)
+            val coverSize = minOf(maxWidth - 64.dp, 300.dp).coerceAtLeast(170.dp)
 
             Column(modifier = Modifier.fillMaxSize()) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .height(54.dp)
+                        .height(56.dp)
                         .padding(horizontal = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -139,176 +145,190 @@ fun NowPlayingScreen(
                     Spacer(Modifier.size(40.dp))
                 }
 
-                Spacer(Modifier.height(6.dp))
-                Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CoverArt(
-                        cover = track.cover,
-                        size = coverSize,
-                        corner = 18.dp,
-                        labelSize = 64.sp,
-                    )
-                }
-
-                Spacer(Modifier.height(18.dp))
-                Row(
+                LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 26.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .weight(1f),
+                    contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = track.title,
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = MaterialTheme.colorScheme.onBackground,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = track.artist,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = if (openArtist != null) colors.accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = if (openArtist != null) {
-                                Modifier.clickable { openArtist(track.artist) }
-                            } else {
-                                Modifier
-                            },
-                        )
-                    }
-                    LikeButton(favorite = track.favorite, onClick = onLike)
-                }
-
-                Spacer(Modifier.height(14.dp))
-                SeekBar(
-                    positionMs = player.positionMs,
-                    durationMs = player.durationMs,
-                    onSeek = onSeek,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 26.dp),
-                )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 28.dp, vertical = 2.dp),
-                ) {
-                    Text(
-                        text = player.positionMs.asTrackDuration(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        text = player.durationMs.asTrackDuration(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    CircleIconButton(
-                        icon = Icons.Rounded.Shuffle,
-                        contentDescription = "Aleatorio",
-                        onClick = onShuffle,
-                        size = 42.dp,
-                        iconSize = 22.dp,
-                        tint = if (player.shuffle) colors.accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    CircleIconButton(
-                        icon = Icons.Rounded.SkipPrevious,
-                        contentDescription = "Anterior",
-                        onClick = onPrevious,
-                        size = 50.dp,
-                        iconSize = 32.dp,
-                        tint = MaterialTheme.colorScheme.onBackground,
-                    )
-                    PlayButton(isPlaying = player.isPlaying, onClick = onTogglePlay, size = 72.dp)
-                    CircleIconButton(
-                        icon = Icons.Rounded.SkipNext,
-                        contentDescription = "Siguiente",
-                        onClick = onNext,
-                        size = 50.dp,
-                        iconSize = 32.dp,
-                        tint = MaterialTheme.colorScheme.onBackground,
-                    )
-                    CircleIconButton(
-                        icon = if (player.repeat == RepeatMode.One) Icons.Rounded.RepeatOne else Icons.Rounded.Repeat,
-                        contentDescription = "Repetir",
-                        onClick = onRepeat,
-                        size = 42.dp,
-                        iconSize = 22.dp,
-                        tint = if (player.repeat != RepeatMode.Off) colors.accent else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "LETRA",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.accent,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        text = when {
-                            player.lyrics.isEmpty() -> ""
-                            player.lyricsSource == "genius" -> "Genius · sin tiempos"
-                            player.lyricsSynced -> "Sincronizada"
-                            else -> player.lyricsSource?.replaceFirstChar { it.uppercase() }.orEmpty()
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                if (player.lyrics.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                    item(key = "cover") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.Center,
                         ) {
-                            Text(
-                                text = if (player.lyricsLoading) "Buscando letra…" else "Sin letra",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            CoverArt(
+                                cover = track.cover,
+                                size = coverSize,
+                                corner = 18.dp,
+                                labelSize = 64.sp,
                             )
-                            TextButton(onClick = onRetryLyrics) {
-                                Text("Buscar otra vez")
+                        }
+                    }
+                    item(key = "meta") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 26.dp, end = 20.dp, top = 18.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = track.title,
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    color = MaterialTheme.colorScheme.onBackground,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = track.artist,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (openArtist != null) {
+                                        colors.accent
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = if (openArtist != null) {
+                                        Modifier.clickable { openArtist(track.artist) }
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                            }
+                            LikeButton(favorite = track.favorite, onClick = onLike)
+                        }
+                    }
+                    item(key = "seek") {
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            SeekBar(
+                                positionMs = player.positionMs,
+                                durationMs = player.durationMs,
+                                onSeek = onSeek,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 26.dp),
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 28.dp),
+                            ) {
+                                Text(
+                                    text = player.positionMs.asTrackDuration(),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    text = player.durationMs.asTrackDuration(),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                     }
-                } else {
-                    LazyColumn(
-                        state = lyricsState,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentPadding = PaddingValues(start = 26.dp, end = 26.dp, top = 8.dp, bottom = 18.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
+                    item(key = "controls") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            CircleIconButton(
+                                icon = Icons.Rounded.Shuffle,
+                                contentDescription = "Aleatorio",
+                                onClick = onShuffle,
+                                size = 42.dp,
+                                iconSize = 22.dp,
+                                tint = if (player.shuffle) colors.accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            CircleIconButton(
+                                icon = Icons.Rounded.SkipPrevious,
+                                contentDescription = "Anterior",
+                                onClick = onPrevious,
+                                size = 50.dp,
+                                iconSize = 32.dp,
+                                tint = MaterialTheme.colorScheme.onBackground,
+                            )
+                            PlayButton(isPlaying = player.isPlaying, onClick = onTogglePlay, size = 72.dp)
+                            CircleIconButton(
+                                icon = Icons.Rounded.SkipNext,
+                                contentDescription = "Siguiente",
+                                onClick = onNext,
+                                size = 50.dp,
+                                iconSize = 32.dp,
+                                tint = MaterialTheme.colorScheme.onBackground,
+                            )
+                            CircleIconButton(
+                                icon = if (player.repeat == RepeatMode.One) {
+                                    Icons.Rounded.RepeatOne
+                                } else {
+                                    Icons.Rounded.Repeat
+                                },
+                                contentDescription = "Repetir",
+                                onClick = onRepeat,
+                                size = 42.dp,
+                                iconSize = 22.dp,
+                                tint = if (player.repeat != RepeatMode.Off) {
+                                    colors.accent
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
+                    item(key = "lyrics-header") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 26.dp, end = 20.dp, top = 14.dp, bottom = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "LETRA",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.accent,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                text = when {
+                                    player.lyrics.isEmpty() -> ""
+                                    player.lyricsSource == "genius" -> "Genius · sin tiempos"
+                                    player.lyricsSynced -> "Sincronizada"
+                                    else -> player.lyricsSource
+                                        ?.replaceFirstChar { it.uppercase() }
+                                        .orEmpty()
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    if (player.lyrics.isEmpty()) {
+                        item(key = "lyrics-empty") {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 26.dp, vertical = 16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    text = if (player.lyricsLoading) "Buscando letra…" else "Sin letra",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                TextButton(onClick = onRetryLyrics) {
+                                    Text("Buscar otra vez")
+                                }
+                            }
+                        }
+                    } else {
                         itemsIndexed(
                             player.lyrics,
                             key = { index, line -> "$index-${line.startMs}" },
@@ -328,6 +348,7 @@ fun NowPlayingScreen(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .padding(horizontal = 26.dp, vertical = 5.dp)
                                     .then(
                                         if (player.lyricsSynced) {
                                             Modifier.clickable { onSeek(line.startMs) }
@@ -338,28 +359,39 @@ fun NowPlayingScreen(
                             )
                         }
                     }
+                    item(key = "actions") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 14.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                        ) {
+                            LabelledAction(
+                                icon = Icons.Rounded.Subtitles,
+                                label = "Letra",
+                                onClick = {
+                                    lyricsPinned = true
+                                    scope.launch {
+                                        listState.animateScrollToItem(LyricsHeaderIndex)
+                                    }
+                                },
+                                tint = MaterialTheme.colorScheme.onBackground,
+                            )
+                            LabelledAction(
+                                icon = Icons.Rounded.QueueMusic,
+                                label = "Cola",
+                                onClick = onQueue,
+                                tint = MaterialTheme.colorScheme.onBackground,
+                            )
+                            LabelledAction(
+                                icon = if (track.downloaded) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
+                                label = if (track.downloaded) "Guardada" else "Guardar",
+                                onClick = onDownload,
+                                tint = if (track.downloaded) colors.accent else MaterialTheme.colorScheme.onBackground,
+                            )
+                        }
+                    }
                 }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                ) {
-                    LabelledAction(
-                        icon = Icons.Rounded.QueueMusic,
-                        label = "Cola",
-                        onClick = onQueue,
-                        tint = MaterialTheme.colorScheme.onBackground,
-                    )
-                    LabelledAction(
-                        icon = if (track.downloaded) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
-                        label = if (track.downloaded) "Guardada" else "Guardar",
-                        onClick = onDownload,
-                        tint = if (track.downloaded) colors.accent else MaterialTheme.colorScheme.onBackground,
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
             }
         }
     }
@@ -388,20 +420,20 @@ private fun SeekBar(
                 if (durationMs <= 0L) return@pointerInput
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    var fraction = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                    draggingFraction = fraction
+                    var value = (down.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                    draggingFraction = value
                     while (true) {
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        fraction = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
-                        draggingFraction = fraction
+                        value = (change.position.x / size.width.toFloat()).coerceIn(0f, 1f)
+                        draggingFraction = value
                         if (!change.pressed) {
                             change.consume()
                             break
                         }
                         change.consume()
                     }
-                    onSeek((fraction * durationMs).toLong())
+                    onSeek((value * durationMs).toLong())
                     draggingFraction = null
                 }
             },

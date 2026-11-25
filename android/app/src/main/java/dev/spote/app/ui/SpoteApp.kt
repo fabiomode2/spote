@@ -64,7 +64,6 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
-import androidx.navigation.NavHostController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -181,6 +180,7 @@ fun SpoteApp(
 
     CompositionLocalProvider(
         LocalArtistNavigation provides { artist ->
+            appViewModel.cacheArtist(artist)
             navController.navigate("artist/${Uri.encode(artist)}")
         },
     ) {
@@ -214,12 +214,12 @@ fun SpoteApp(
                                     Tab.Now -> "now"
                                     Tab.Library -> "library"
                                 }
+                                ActionLog.log("nav.tab", "from" to route, "to" to target)
                                 navController.navigate(target) {
                                     popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
+                                        saveState = false
                                     }
                                     launchSingleTop = true
-                                    restoreState = true
                                 }
                             },
                         )
@@ -236,9 +236,9 @@ fun SpoteApp(
             composable("home") {
                 HomeScreen(
                     state = homeState,
-                    onPlayTrack = { playAndOpen(navController, appViewModel, it) },
-                    onOpenAlbum = { navController.navigate("album/${it.id}") },
-                    onOpenPlaylist = { navController.navigate("playlist/${it.id}") },
+                    onPlayTrack = { appViewModel.play(it) },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
+                    onOpenPlaylist = { navController.navigate("playlist/${Uri.encode(it.id)}") },
                     onOpenRoom = { room ->
                         socialViewModel.join(room.id)
                         navController.navigate("room/${room.id}")
@@ -255,10 +255,10 @@ fun SpoteApp(
                     onQueryChange = appViewModel::setQuery,
                     onPlayTrack = {
                         appViewModel.commitSearch(state.search.query)
-                        playAndOpen(navController, appViewModel, it)
+                        appViewModel.play(it)
                     },
-                    onOpenAlbum = { navController.navigate("album/${it.id}") },
-                    onOpenArtist = { navController.navigate("artist/${Uri.encode(it)}") },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
+                    onOpenArtist = { appViewModel.cacheArtist(it); navController.navigate("artist/${Uri.encode(it)}") },
                     onMore = { openTrackMenu(it) },
                     onClearSearch = appViewModel::clearSearch,
                     onClearHistory = appViewModel::clearSearchHistory,
@@ -270,13 +270,14 @@ fun SpoteApp(
                     state = state.library,
                     onFilter = appViewModel::setFilter,
                     onToggleGrid = appViewModel::toggleGrid,
-                    onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                    onPlayTrack = { appViewModel.play(it) },
                     onMore = { openTrackMenu(it) },
-                    onOpenAlbum = { navController.navigate("album/${it.id}") },
-                    onOpenPlaylist = { navController.navigate("playlist/${it.id}") },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
+                    onOpenPlaylist = { navController.navigate("playlist/${Uri.encode(it.id)}") },
                     onOpenDownloads = { navController.navigate("downloads") },
                     onOpenSearch = { navController.navigate("search") },
                     onOpenArtist = { artist ->
+                        appViewModel.cacheArtist(artist)
                         navController.navigate("artist/${Uri.encode(artist)}")
                     },
                     onCreatePlaylist = { showCreatePlaylist = true },
@@ -290,7 +291,16 @@ fun SpoteApp(
                 popEnterTransition = { slideInHorizontally(initialOffsetX = { -it / 4 }) },
                 popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) },
             ) { entry ->
-                val album = entry.arguments?.getString("id")?.let(appViewModel::album)
+                val albumId = Uri.decode(entry.arguments?.getString("id").orEmpty())
+                val album = appViewModel.album(albumId)
+                LaunchedEffect(albumId) {
+                    ActionLog.log(
+                        "album.open",
+                        "id" to albumId,
+                        "found" to (album != null),
+                        "catalogue" to state.library.albums.size,
+                    )
+                }
                 if (album != null) {
                     AlbumScreen(
                         album = album,
@@ -298,15 +308,15 @@ fun SpoteApp(
                         onBack = { navController.popBackStack() },
                         onPlay = {
                             album.tracks.firstOrNull()?.let {
-                                playAndOpen(navController, appViewModel, it)
+                                appViewModel.play(it)
                             }
                         },
                         onShuffle = {
                             album.tracks.shuffled().firstOrNull()?.let {
-                                playAndOpen(navController, appViewModel, it)
+                                appViewModel.play(it)
                             }
                         },
-                        onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                        onPlayTrack = { appViewModel.play(it) },
                         onMore = { openTrackMenu(it) },
                         onDownload = {
                             album.tracks.firstOrNull()?.let { appViewModel.toggleDownload(it.key) }
@@ -315,6 +325,19 @@ fun SpoteApp(
                             album.tracks.firstOrNull()?.let { appViewModel.toggleFavorite(it.key) }
                         },
                     )
+                } else {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "No se encontró el álbum",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             composable(
@@ -326,25 +349,41 @@ fun SpoteApp(
             ) { entry ->
                 val rawName = entry.arguments?.getString("name").orEmpty()
                 val artistName = Uri.decode(rawName)
-                val tracks = (
-                    state.library.tracks +
-                        state.home.recent +
-                        state.search.results +
-                        state.search.remoteResults
+                LaunchedEffect(artistName) {
+                    ActionLog.log(
+                        "artist.open",
+                        "name" to artistName,
+                        "tracks" to state.library.tracks.count {
+                            it.artist.equals(artistName, ignoreCase = true)
+                        },
+                        "albums" to state.library.albums.count {
+                            it.artist.equals(artistName, ignoreCase = true)
+                        },
                     )
-                    .filter { it.artist.equals(artistName, ignoreCase = true) }
-                    .distinctBy { it.key }
-                val albums = (state.library.albums + state.home.albums + state.search.albums)
-                    .filter { it.artist.equals(artistName, ignoreCase = true) }
-                    .distinctBy { it.id }
+                }
+                val tracks = appViewModel.cachedArtistTracks(artistName).ifEmpty {
+                    (
+                        state.library.tracks +
+                            state.home.recent +
+                            state.search.results +
+                            state.search.remoteResults
+                        )
+                        .filter { it.artist.equals(artistName, ignoreCase = true) }
+                        .distinctBy { it.key }
+                }
+                val albums = appViewModel.cachedArtistAlbums(artistName).ifEmpty {
+                    (state.library.albums + state.home.albums + state.search.albums)
+                        .filter { it.artist.equals(artistName, ignoreCase = true) }
+                        .distinctBy { it.id }
+                }
                 ArtistScreen(
                     name = artistName,
                     tracks = tracks,
                     albums = albums,
                     player = state.player,
                     onBack = { navController.popBackStack() },
-                    onPlayTrack = { playAndOpen(navController, appViewModel, it) },
-                    onOpenAlbum = { navController.navigate("album/${it.id}") },
+                    onPlayTrack = { appViewModel.play(it) },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
                     onMore = { openTrackMenu(it) },
                 )
             }
@@ -355,15 +394,16 @@ fun SpoteApp(
                 popEnterTransition = { slideInHorizontally(initialOffsetX = { -it / 4 }) },
                 popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) },
             ) { entry ->
+                val playlistId = Uri.decode(entry.arguments?.getString("id").orEmpty())
                 val playlist = (state.home.playlists + state.library.playlists)
-                    .firstOrNull { it.id == entry.arguments?.getString("id") }
-                    ?: appViewModel.playlist(entry.arguments?.getString("id") ?: "")
+                    .firstOrNull { it.id == playlistId }
+                    ?: appViewModel.playlist(playlistId)
                 if (playlist != null) {
                     PlaylistScreen(
                         playlist = playlist,
                         tracks = playlist.tracks,
                         onBack = { navController.popBackStack() },
-                        onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                        onPlayTrack = { appViewModel.play(it) },
                         onMore = { openTrackMenu(it, playlistId = playlist.id) },
                         onDelete = {
                             appViewModel.deletePlaylist(playlist.id)
@@ -430,7 +470,7 @@ fun SpoteApp(
                             socialViewModel.leave()
                             navController.popBackStack()
                         },
-                        onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                        onPlayTrack = { appViewModel.play(it) },
                         onMore = { openTrackMenu(it) },
                     )
                 }
@@ -439,7 +479,7 @@ fun SpoteApp(
                 DownloadsScreen(
                     downloaded = state.library.tracks.filter { it.downloaded },
                     onBack = { navController.popBackStack() },
-                    onPlayTrack = { playAndOpen(navController, appViewModel, it) },
+                    onPlayTrack = { appViewModel.play(it) },
                     onMore = { openTrackMenu(it) },
                     downloads = state.downloads.values.toList(),
                     onCancelDownload = appViewModel::cancelDownload,
@@ -562,7 +602,7 @@ fun SpoteApp(
                     appViewModel.playQueueItem(currentQueueIndex)
                     navController.navigate("now") { launchSingleTop = true }
                 } else {
-                    playAndOpen(navController, appViewModel, track)
+                    appViewModel.play(track)
                 }
             },
             onDownload = {
@@ -868,13 +908,3 @@ private fun SheetAction(
     }
 }
 
-private fun playAndOpen(
-    navController: NavHostController,
-    appViewModel: AppViewModel,
-    track: Track,
-) {
-    appViewModel.play(track)
-    if (navController.currentDestination?.route != "now") {
-        navController.navigate("now") { launchSingleTop = true }
-    }
-}
