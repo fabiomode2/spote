@@ -34,9 +34,17 @@ pub struct TunebatInfo {
     pub energy: f32,
     pub danceability: f32,
     pub happiness: f32,
+    pub acousticness: f32,
+    pub instrumentalness: f32,
+    pub liveness: f32,
+    pub speechiness: f32,
+    /// Loudness integrada, en dB (negativa).
+    pub loudness: f32,
     /// 0..=100.
     pub popularity: u32,
     pub duration_ms: u64,
+    /// Fecha de lanzamiento ISO (`2001-03-12`) si Tunebat la conoce.
+    pub release_date: String,
 }
 
 impl TunebatInfo {
@@ -103,6 +111,18 @@ struct Item {
     danceability: Option<f64>,
     #[serde(default, rename = "h")]
     happiness: Option<f64>,
+    #[serde(default, rename = "ac")]
+    acousticness: Option<f64>,
+    #[serde(default, rename = "i")]
+    instrumentalness: Option<f64>,
+    #[serde(default, rename = "li")]
+    liveness: Option<f64>,
+    #[serde(default, rename = "s")]
+    speechiness: Option<f64>,
+    #[serde(default, rename = "lo")]
+    loudness: Option<f64>,
+    #[serde(default, rename = "rd")]
+    release_date: Option<String>,
     #[serde(default, rename = "p")]
     popularity: Option<u32>,
 }
@@ -121,9 +141,11 @@ pub fn lookup(
     if title.is_empty() {
         return Ok(None);
     }
+    let original_title = title;
     let artist = artist.trim();
+    let title = search_title(title);
     let term = if artist.is_empty() {
-        title.to_string()
+        title
     } else {
         format!("{title} {artist}")
     };
@@ -149,7 +171,28 @@ pub fn lookup(
     }
     let body: SearchResponse = response.json().context("json de tunebat")?;
     let items = body.data.map(|data| data.items).unwrap_or_default();
-    Ok(best_match(&items, title, artist, album, duration_ms))
+    Ok(best_match(
+        &items,
+        original_title,
+        artist,
+        album,
+        duration_ms,
+    ))
+}
+
+/// Título para la búsqueda: quita la versión entre paréntesis y el sufijo
+/// « - Radio Edit» que añaden Spotify/Deezer. El matching posterior sigue
+/// usando el título original; esto solo mejora la consulta a Tunebat.
+fn search_title(title: &str) -> String {
+    let title = title.trim();
+    let base = title.split(['(', '[']).next().unwrap_or(title).trim();
+    let base = base.split(" - ").next().unwrap_or(base).trim();
+    if base.chars().filter(|ch| ch.is_alphanumeric()).count() >= 2 {
+        base.to_string()
+    } else {
+        // Títulos simbólicos como «(_8(|)»: el paréntesis es parte del nombre.
+        title.to_string()
+    }
 }
 
 fn best_match(
@@ -232,8 +275,18 @@ fn info_from(item: &Item) -> TunebatInfo {
         energy: clamp(item.energy),
         danceability: clamp(item.danceability),
         happiness: clamp(item.happiness),
+        acousticness: clamp(item.acousticness),
+        instrumentalness: clamp(item.instrumentalness),
+        liveness: clamp(item.liveness),
+        speechiness: clamp(item.speechiness),
+        loudness: item
+            .loudness
+            .filter(|value| value.is_finite())
+            .map(|value| value as f32)
+            .unwrap_or(0.0),
         popularity: item.popularity.unwrap_or(0).min(100),
         duration_ms: item.duration_ms.unwrap_or(0),
+        release_date: item.release_date.clone().unwrap_or_default(),
     }
 }
 
@@ -298,6 +351,12 @@ mod tests {
             energy: Some(0.7),
             danceability: Some(0.6),
             happiness: Some(0.5),
+            acousticness: Some(0.02),
+            instrumentalness: Some(0.0),
+            liveness: Some(0.33),
+            speechiness: Some(0.13),
+            loudness: Some(-8.6),
+            release_date: Some("2001-03-12".into()),
             popularity: Some(80),
         }
     }
@@ -344,6 +403,14 @@ mod tests {
         assert_eq!(info.album, "Discovery");
         assert_eq!(info.bpm, 123.0);
         assert_eq!(info.camelot, "10B");
+    }
+
+    #[test]
+    fn search_title_drops_version_suffixes_but_keeps_symbolic_titles() {
+        assert_eq!(search_title("One More Time (Romanthony's Unplugged)"), "One More Time");
+        assert_eq!(search_title("Let It Happen - Radio Edit"), "Let It Happen");
+        assert_eq!(search_title("Song (feat. Other)"), "Song");
+        assert_eq!(search_title("(_8(|)"), "(_8(|)");
     }
 
     #[test]
