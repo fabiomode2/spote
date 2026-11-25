@@ -15,10 +15,10 @@ JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 ./gradlew :app:recordRoborazziDebug
 | ![Home](01-home.png) | ![Buscar](02-search.png) |
 | ![Buscar vacío](03-search-empty.png) | ![Biblioteca](04-library.png) |
 | ![Álbum](05-album.png) | ![Now playing](06-now-playing.png) |
-| ![Letra](07-lyrics.png) | ![Cola](08-queue.png) |
-| ![Biblioteca grid](09-library-grid.png) | ![Playlist](10-playlist.png) |
-| ![Descargas](11-downloads.png) | ![Ajustes](12-settings.png) |
-| ![Sala](13-room.png) | ![Actualización](14-update-card.png) |
-| ![Nocturno home](15-nocturne-home.png) | ![Nocturno now playing](16-nocturne-now-playing.png) |
-| ![Nocturno álbum](17-nocturne-album.png) | ![Selector de tema](18-theme-picker.png) |
-| ![Artista](19-artist.png) | ![Contact sheet](_contact-sheet.png) |
+| ![Cola](08-queue.png) | ![Biblioteca grid](09-library-grid.png) |
+| ![Playlist](10-playlist.png) | ![Descargas](11-downloads.png) |
+| ![Ajustes](12-settings.png) | ![Sala](13-room.png) |
+| ![Actualización](14-update-card.png) | ![Nocturno home](15-nocturne-home.png) |
+| ![Nocturno now playing](16-nocturne-now-playing.png) | ![Nocturno álbum](17-nocturne-album.png) |
+| ![Selector de tema](18-theme-picker.png) | ![Artista](19-artist.png) |
+| ![Contact sheet](_contact-sheet.png) | |

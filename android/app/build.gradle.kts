@@ -118,6 +118,7 @@ dependencies {
     implementation(libs.coroutines.android)
     implementation(libs.annotation)
     implementation(libs.okhttp)
+    implementation(libs.jsoup)
     implementation(libs.security.crypto)
     implementation(libs.newpipe)
     implementation(libs.zxing.core)

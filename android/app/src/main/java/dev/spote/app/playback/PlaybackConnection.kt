@@ -12,6 +12,7 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import dev.spote.app.logging.ActionLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -247,6 +248,7 @@ class PlaybackConnection(context: Context) {
 
     fun togglePlayPause() {
         val player = controller ?: return
+        ActionLog.log("player.toggle", "playing" to player.isPlaying)
         if (player.isPlaying) {
             player.pause()
         } else {
@@ -262,6 +264,7 @@ class PlaybackConnection(context: Context) {
 
     fun next() {
         val player = controller ?: return
+        ActionLog.log("player.next", "index" to player.currentMediaItemIndex)
         if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem()
         }
@@ -270,6 +273,7 @@ class PlaybackConnection(context: Context) {
 
     fun previous() {
         val player = controller ?: return
+        ActionLog.log("player.previous", "position" to player.currentPosition)
         // Standard music-player behavior: restart the current track after 3 seconds.
         if (player.currentPosition > PREVIOUS_RESTART_MS) {
             player.seekTo(0L)
@@ -285,6 +289,7 @@ class PlaybackConnection(context: Context) {
         val player = controller ?: return
         val duration = player.duration
         val target = if (duration > 0L) ms.coerceIn(0L, duration) else ms.coerceAtLeast(0L)
+        ActionLog.log("player.seek", "to" to target, "duration" to duration)
         player.seekTo(target)
         refresh()
     }

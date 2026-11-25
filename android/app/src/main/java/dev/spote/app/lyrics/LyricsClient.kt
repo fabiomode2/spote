@@ -1,8 +1,10 @@
 package dev.spote.app.lyrics
 
 import android.content.Context
+import dev.spote.app.logging.ActionLog
 import java.io.File
 import java.io.IOException
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToLong
@@ -19,6 +21,8 @@ import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.Jsoup
+import org.jsoup.parser.Parser
 
 /**
  * Fetches lyrics from [LRCLIB](https://lrclib.net) and caches them on disk.
@@ -65,11 +69,24 @@ class LyricsClient(context: Context) {
 
         val doc = try {
             fetch(title = title, artist = artist, album = album, durationMs = durationMs)
+                ?: fetchGenius(title = title, artist = artist)
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            ActionLog.log("lyrics.error", "title" to title, "artist" to artist, "error" to e.message)
             null
-        } ?: return@withContext null
+        } ?: run {
+            ActionLog.log("lyrics.miss", "title" to title, "artist" to artist)
+            return@withContext null
+        }
+        ActionLog.log(
+            "lyrics.hit",
+            "title" to title,
+            "artist" to artist,
+            "source" to doc.source,
+            "lines" to doc.lines.size,
+            "synced" to doc.synced,
+        )
 
         val entry = CacheEntry(doc = doc, savedAt = System.currentTimeMillis())
         memoryCache[key] = entry
@@ -156,6 +173,114 @@ class LyricsClient(context: Context) {
                 }
             }
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Fallback de texto cuando LRCLIB no conoce la pista. Genius no da tiempos,
+     * así que se devuelve como letra plana (la UI no finge sincronización).
+     */
+    private suspend fun fetchGenius(title: String, artist: String): LyricsDoc? {
+        val query = "$title $artist".trim()
+        if (query.isEmpty()) return null
+        val url = GENIUS_SEARCH.toHttpUrl().newBuilder()
+            .addQueryParameter("per_page", "5")
+            .addQueryParameter("q", query)
+            .build()
+        val body = executeGenius(url) ?: return null
+        val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        val sections = root.optJSONObject("response")?.optJSONArray("sections") ?: return null
+        val wantedTitle = normalizeText(title)
+        val wantedArtist = normalizeText(artist)
+        var candidatePath: String? = null
+
+        for (sectionIndex in 0 until sections.length()) {
+            val hits = sections.optJSONObject(sectionIndex)?.optJSONArray("hits") ?: continue
+            for (hitIndex in 0 until hits.length()) {
+                val result = hits.optJSONObject(hitIndex)
+                    ?.optJSONObject("result") ?: continue
+                if (result.optString("_type") != "song") continue
+                if (result.optString("lyrics_state") != "complete") continue
+                val resultTitle = normalizeText(result.optString("title"))
+                val resultArtist = normalizeText(result.optString("artist_names"))
+                val titleOk = resultTitle == wantedTitle ||
+                    resultTitle.contains(wantedTitle) ||
+                    wantedTitle.contains(resultTitle)
+                val artistOk = wantedArtist.isBlank() ||
+                    resultArtist.contains(wantedArtist) ||
+                    wantedArtist.contains(resultArtist)
+                if (titleOk && artistOk) {
+                    candidatePath = result.optString("path").takeIf { it.isNotBlank() }
+                    break
+                }
+            }
+            if (candidatePath != null) break
+        }
+        val path = candidatePath ?: return null
+        val pageUrl = if (path.startsWith("http")) path else "https://genius.com$path"
+        val page = executeGenius(pageUrl.toHttpUrl(), acceptHtml = true) ?: return null
+        val text = extractGeniusLyrics(page)
+        if (text.isBlank()) return null
+        return LrcParser.parsePlain(text, source = "genius")
+    }
+
+    private fun extractGeniusLyrics(page: String): String {
+        val document = runCatching { Jsoup.parse(page) }.getOrNull() ?: return ""
+        val lines = mutableListOf<String>()
+        document.select("div[data-lyrics-container=true]").forEach { container ->
+            val html = container.html()
+                .replace(Regex("(?i)<br\\s*/?>"), "\n")
+                .replace(Regex("(?i)</p>"), "\n")
+            val text = Parser.unescapeEntities(html.replace(Regex("<[^>]+>"), ""), false)
+            text.lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .filterNot { it.startsWith("[") && it.endsWith("]") }
+                .filterNot { it.contains("Lyrics[Letra de") }
+                .filterNot { it.contains("Letra de \"") && it.endsWith("Lyrics") }
+                .forEach(lines::add)
+        }
+        return lines.joinToString("\n")
+    }
+
+    private fun normalizeText(value: String): String = value
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9áéíóúüñ]+"), " ")
+        .trim()
+
+    private suspend fun executeGenius(
+        url: HttpUrl,
+        acceptHtml: Boolean = false,
+    ): String? = suspendCancellableCoroutine { continuation ->
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", GENIUS_USER_AGENT)
+            .header(
+                "Accept",
+                if (acceptHtml) {
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                } else {
+                    "application/json"
+                },
+            )
+            .get()
+            .build()
+        val call = httpClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val body = try {
+                    response.use { if (it.isSuccessful) it.body?.string() else null }
+                } catch (e: Exception) {
+                    if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+                    return
+                }
+                if (continuation.isActive) continuation.resumeWith(Result.success(body))
+            }
+        })
     }
 
     private suspend fun executeJson(url: HttpUrl): String? = suspendCancellableCoroutine { continuation ->
@@ -339,6 +464,10 @@ class LyricsClient(context: Context) {
     companion object {
         private const val SOURCE = "lrclib"
         private const val USER_AGENT = "spote-android"
+        private const val GENIUS_SEARCH = "https://genius.com/api/search/multi"
+        private const val GENIUS_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/124.0 Mobile Safari/537.36"
         private const val CACHE_DIR = "lyrics"
         private const val CACHE_VERSION = 1
         private const val CACHE_TTL_MS = 30L * 24L * 60L * 60L * 1000L

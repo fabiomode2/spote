@@ -105,6 +105,13 @@ class RustSpoteRepository(private val bridge: RustBridge) : SpoteRepository {
         return runCatching { bridge.removeFromPlaylist(numeric, key) }.isSuccess
     }
 
+    override fun duplicateCount(): Long = runCatching { bridge.duplicateCount() }.getOrDefault(0L)
+
+    override fun mergeDuplicates(): Int = runCatching { bridge.mergeDuplicates() }.getOrDefault(0)
+
+    override fun backupLibrary(path: String): Boolean =
+        runCatching { bridge.backupLibrary(path) }.isSuccess
+
     private fun loadPlaylists(): List<Playlist> =
         bridge.playlists().map { dto ->
             dto.toModel(bridge.playlistTracks(dto.id))

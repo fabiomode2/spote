@@ -150,6 +150,9 @@ data class PlayerState(
     val repeat: RepeatMode = RepeatMode.Off,
     val queue: List<Track> = emptyList(),
     val lyrics: List<LyricLine> = emptyList(),
+    val lyricsSynced: Boolean = false,
+    val lyricsSource: String? = null,
+    val lyricsLoading: Boolean = false,
 )
 
 enum class Tab { Home, Search, Now, Library }

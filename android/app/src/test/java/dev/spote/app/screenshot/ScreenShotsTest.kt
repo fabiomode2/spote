@@ -9,7 +9,6 @@ import androidx.compose.ui.unit.dp
 import com.github.takahirom.roborazzi.captureRoboImage
 import dev.spote.app.data.MockData
 import dev.spote.app.model.ChatMessage
-import dev.spote.app.ui.nowplaying.LyricsScreen
 import dev.spote.app.ui.nowplaying.NowPlayingScreen
 import dev.spote.app.ui.nowplaying.QueueScreen
 import dev.spote.app.ui.screens.AlbumScreen
@@ -132,17 +131,7 @@ class ScreenShotsTest {
             onRepeat = {},
             onLike = {},
             onDownload = {},
-            onLyrics = {},
             onQueue = {},
-        )
-    }
-
-    @Test
-    fun lyrics() = shot("07-lyrics") {
-        LyricsScreen(
-            player = MockData.player.copy(isPlaying = true),
-            onBack = {},
-            onSeekTo = {},
         )
     }
 
@@ -263,7 +252,6 @@ class ScreenShotsTest {
             onRepeat = {},
             onLike = {},
             onDownload = {},
-            onLyrics = {},
             onQueue = {},
         )
     }

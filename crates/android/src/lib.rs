@@ -51,6 +51,7 @@ pub struct TrackDto {
     pub downloaded: bool,
     pub provider: Option<String>,
     pub art_path: Option<String>,
+    pub art_url: Option<String>,
     pub path: Option<String>,
     pub added_at: i64,
 }
@@ -199,6 +200,73 @@ impl SpoteEngine {
         lib.toggle_favorite(&key).map_err(SpoteError::library)
     }
 
+    /// Pistas sin portada para el backfill de metadatos.
+    pub fn tracks_without_art(&self, limit: u32) -> Result<Vec<TrackDto>, SpoteError> {
+        let lib = self.lib()?;
+        let rows = lib
+            .tracks_without_art(limit as usize)
+            .map_err(SpoteError::library)?;
+        Ok(rows.iter().map(TrackDto::from).collect())
+    }
+
+    /// Asocia una portada local y/o URL a una pista existente.
+    pub fn set_track_art(
+        &self,
+        key: String,
+        art_path: Option<String>,
+        art_url: Option<String>,
+    ) -> Result<(), SpoteError> {
+        let mut lib = self.lib()?;
+        lib.set_art(
+            &key,
+            art_path.as_deref().map(std::path::Path::new),
+            art_url.as_deref(),
+        )
+        .map_err(SpoteError::library)
+    }
+
+    /// Completa metadatos sin pisar valores mejores con vacíos.
+    pub fn update_track_metadata(
+        &self,
+        key: String,
+        artist: String,
+        title: String,
+        album: Option<String>,
+        duration_ms: u64,
+        art_url: Option<String>,
+    ) -> Result<(), SpoteError> {
+        let mut lib = self.lib()?;
+        lib.update_metadata(
+            &key,
+            &artist,
+            &title,
+            album.as_deref(),
+            duration_ms,
+            art_url.as_deref(),
+        )
+        .map_err(SpoteError::library)
+    }
+
+    /// Número de parejas de canciones duplicadas (mismo título/artista/duración).
+    pub fn duplicate_count(&self) -> Result<i64, SpoteError> {
+        let lib = self.lib()?;
+        lib.duplicate_count().map_err(SpoteError::library)
+    }
+
+    /// Fusiona duplicados conservando la copia con audio y moviendo listas/fuentes.
+    pub fn merge_duplicates(&self) -> Result<u32, SpoteError> {
+        let mut lib = self.lib()?;
+        let merged = lib.merge_duplicates().map_err(SpoteError::library)?;
+        Ok(merged as u32)
+    }
+
+    /// Copia de seguridad consistente antes de operaciones destructivas.
+    pub fn backup_library(&self, path: String) -> Result<(), SpoteError> {
+        let lib = self.lib()?;
+        lib.backup_to(std::path::Path::new(&path))
+            .map_err(SpoteError::library)
+    }
+
     /// Crea una playlist vacía y devuelve su id.
     pub fn create_playlist(&self, name: String) -> Result<i64, SpoteError> {
         let mut lib = self.lib()?;
@@ -330,6 +398,7 @@ impl From<&TrackRow> for TrackDto {
             downloaded: row.playable(),
             provider: row.provider.clone(),
             art_path: row.art_path.as_ref().map(|path| path.display().to_string()),
+            art_url: row.track.art_url.clone(),
             path: row.path.as_ref().map(|path| path.display().to_string()),
             added_at: row.added_at,
         }
