@@ -7,13 +7,13 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     if app.fullscreen == Fullscreen::Art {
         // Pantalla completa de verdad, pero por encima del transporte: si la
         // portada ocupa también esas filas, la imagen Kitty tapa los botones.
-        let area = layout.main;
+        let area = layout.full;
         let inner = inset(area, 2, 1);
         let h = inner.height.saturating_sub(1);
         let w = (h * 2).min(inner.width);
         let art_rect = centered(inner, w, h);
         draw_art(app, buf, art_rect, pal, 1.0);
-        frame_art(buf, art_rect, pal);
+        frame_art(app, buf, art_rect, pal);
         app.hit.add(layout.full, Action::ArtFullscreen);
         return;
     }
@@ -22,7 +22,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         // Zen: solo visualización. La canción sigue sonando, pero el centro
         // queda limpio y la portada/letra no se pintan.
         if let Some(track) = &app.now.track {
-            let label = format!("{}  ·  {}", track.title, track.artist);
+            let label = format!("{}  ·  {}", track.title, app.now_artist_credit());
             let rect = Rect::new(
                 layout.center.x + 2,
                 layout.center.y + 1,
@@ -48,7 +48,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         let w = (h * 2).min(inner.width);
         let art_rect = centered(inner, w, h);
         draw_art(app, buf, art_rect, pal, 1.0);
-        frame_art(buf, art_rect, pal);
+        frame_art(app, buf, art_rect, pal);
         if let Some(track) = app.now.track.clone() {
             let caption = Rect::new(
                 art_rect.x,
@@ -59,7 +59,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             text_at(
                 buf,
                 caption,
-                format!("{}  ·  {}", track.title, track.artist),
+                format!("{}  ·  {}", track.title, app.now_artist_credit()),
                 Style::new().fg(color(pal.muted)),
                 Alignment::Center,
             );
@@ -79,9 +79,13 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     let lyrics_focus = app.center_focus == CenterFocus::Lyrics;
     let art_rect = layout.art;
     let has_track = app.now.track.is_some();
-    if !lyrics_focus && has_track {
+    let scenario = app.cfg.ui.lyrics_scenario.clone();
+    if !lyrics_focus && has_track && scenario == "behind" {
+        draw_scenario(app, buf, layout.center, pal, 0.35);
+    }
+    if !lyrics_focus && has_track && scenario != "centered" {
         draw_art(app, buf, art_rect, pal, 1.0);
-        frame_art(buf, art_rect, pal);
+        frame_art(app, buf, art_rect, pal);
     }
 
     // Con la letra enfocada ocupa TODO el centro; si no hay pista, el panel
@@ -255,7 +259,9 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     let room = inner.width.saturating_sub(title_width + 3);
     if room > 6 {
         let meta_x = inner.x + title_width + 3;
-        let mut artist = track.artist.clone();
+        let artist_credit = app.now_artist_credit();
+        let primary_artist = app.now_primary_artist();
+        let mut artist = artist_credit;
         truncate_chars(&mut artist, room as usize);
         let artist_w = artist.chars().count() as u16;
         let mut album = track
@@ -279,7 +285,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             }
         }
         if artist_w > 1 {
-            let hover = app.hover == Some(Action::OpenArtist(track.artist.clone()));
+            let hover = app.hover == Some(Action::OpenArtist(primary_artist.clone()));
             link_at(
                 buf,
                 meta_x,
@@ -293,7 +299,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             );
             app.hit.add(
                 Rect::new(meta_x, y, artist_w, 1),
-                Action::OpenArtist(track.artist.clone()),
+                Action::OpenArtist(primary_artist.clone()),
             );
         }
         if let Some(album) = album {
@@ -302,7 +308,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             let album_x = sep_x + sep_w;
             let album_w = album.chars().count() as u16;
             let hover =
-                app.hover == Some(Action::OpenAlbum(album.clone(), track.artist.clone()));
+                app.hover == Some(Action::OpenAlbum(album.clone(), primary_artist.clone()));
             let drawn = link_at(
                 buf,
                 album_x,
@@ -317,7 +323,7 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
             if drawn > 1 {
                 app.hit.add(
                     Rect::new(album_x, y, drawn, 1),
-                    Action::OpenAlbum(album, track.artist.clone()),
+                    Action::OpenAlbum(album, primary_artist.clone()),
                 );
             }
         }
@@ -331,6 +337,20 @@ pub(super) fn draw_now(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         put(buf, inner.x + i, y, "─", color(rgb), None);
     }
     y += 1;
+
+    if !lyrics_focus && has_track && scenario != "off" {
+        // La letra normal se oculta: el escenario es la letra. En `behind` ya
+        // se pintó antes de los paneles, así que aquí solo se corta.
+        if scenario != "behind" && scenario != "mosaic" {
+            let area = if scenario == "centered" {
+                layout.center
+            } else {
+                layout.content
+            };
+            draw_scenario(app, buf, area, pal, 1.0);
+        }
+        return;
+    }
 
     let available = (inner.y + inner.height).saturating_sub(y);
     let lyrics_h = if app.vcenter {
@@ -1369,5 +1389,159 @@ mod tests {
         assert_eq!(relative_lyric_top(1, 1.0, &heights), 0.0);
         assert_eq!(relative_lyric_top(2, 1.0, &heights), 2.0);
         assert_eq!(relative_lyric_top(0, 1.0, &heights), -1.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Letra escenario: texto grande relleno con el mosaico
+// ---------------------------------------------------------------------------
+
+fn scenario_text(app: &App) -> String {
+    let Some(doc) = app.lyrics.as_ref() else {
+        return "SIN LETRA".to_string();
+    };
+    let ms = app.display_position_ms();
+    let Some((index, _)) = doc.active(ms) else {
+        return "♪".to_string();
+    };
+    let Some(line) = doc.lines.get(index) else {
+        return "♪".to_string();
+    };
+    let text = if app.cfg.ui.lyrics_scenario_unit == "word" {
+        let target = doc.aligned_ms(ms);
+        line.words
+            .iter()
+            .find(|word| !word.optional && target <= word.end_ms)
+            .or_else(|| line.words.iter().rev().find(|word| !word.optional))
+            .map(|word| word.text.clone())
+            .unwrap_or_else(|| line.text.clone())
+    } else {
+        line.text.clone()
+    };
+    let normalized = spote_core::util::normalize(&text).to_uppercase();
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        "♪".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Fuente 3×5. Es deliberadamente pequeña: se escala 2× cuando hay sitio y
+/// así la letra grande sigue siendo legible sin comerse el escenario entero.
+fn glyph_3x5(c: char) -> [u8; 5] {
+    match c {
+        'A' => [0b111, 0b101, 0b111, 0b101, 0b101],
+        'B' => [0b110, 0b101, 0b110, 0b101, 0b110],
+        'C' => [0b111, 0b100, 0b100, 0b100, 0b111],
+        'D' => [0b110, 0b101, 0b101, 0b101, 0b110],
+        'E' => [0b111, 0b100, 0b111, 0b100, 0b111],
+        'F' => [0b111, 0b100, 0b111, 0b100, 0b100],
+        'G' => [0b111, 0b100, 0b101, 0b101, 0b111],
+        'H' => [0b101, 0b101, 0b111, 0b101, 0b101],
+        'I' => [0b111, 0b010, 0b010, 0b010, 0b111],
+        'J' => [0b001, 0b001, 0b001, 0b101, 0b111],
+        'K' => [0b101, 0b101, 0b110, 0b101, 0b101],
+        'L' => [0b100, 0b100, 0b100, 0b100, 0b111],
+        'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
+        'N' => [0b101, 0b111, 0b111, 0b111, 0b101],
+        'O' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        'P' => [0b111, 0b101, 0b111, 0b100, 0b100],
+        'Q' => [0b111, 0b101, 0b101, 0b111, 0b001],
+        'R' => [0b111, 0b101, 0b110, 0b101, 0b101],
+        'S' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        'T' => [0b111, 0b010, 0b010, 0b010, 0b010],
+        'U' => [0b101, 0b101, 0b101, 0b101, 0b111],
+        'V' => [0b101, 0b101, 0b101, 0b101, 0b010],
+        'W' => [0b101, 0b101, 0b111, 0b111, 0b101],
+        'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
+        'Y' => [0b101, 0b101, 0b010, 0b010, 0b010],
+        'Z' => [0b111, 0b001, 0b010, 0b100, 0b111],
+        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+        '7' => [0b111, 0b001, 0b001, 0b010, 0b010],
+        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+        '?' => [0b111, 0b001, 0b011, 0b000, 0b010],
+        '!' => [0b010, 0b010, 0b010, 0b000, 0b010],
+        '-' => [0b000, 0b000, 0b111, 0b000, 0b000],
+        '\'' => [0b010, 0b010, 0b000, 0b000, 0b000],
+        '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
+        ',' => [0b000, 0b000, 0b000, 0b010, 0b100],
+        _ => [0b000, 0b000, 0b000, 0b000, 0b000],
+    }
+}
+
+fn scenario_color(
+    art: Option<&CoverArt>,
+    rect: Rect,
+    x: u16,
+    y: u16,
+    pal: &Palette,
+    alpha: f32,
+) -> Rgb {
+    let base = if let Some(art) = art.filter(|art| !art.is_empty()) {
+        let sx = ((x.saturating_sub(rect.x) as u32 * art.w as u32)
+            / rect.width.max(1) as u32)
+            .min(art.w.saturating_sub(1) as u32) as u16;
+        let sy = ((y.saturating_sub(rect.y) as u32 * art.h as u32)
+            / rect.height.max(1) as u32)
+            .min(art.h.saturating_sub(1) as u32) as u16;
+        art.cell(sx, sy)
+            .map(|cell| cell.fg)
+            .unwrap_or(pal.primary)
+    } else {
+        let t = (x.saturating_sub(rect.x) as f32 / rect.width.max(1) as f32).clamp(0.0, 1.0);
+        mix(pal.primary, pal.secondary, t)
+    };
+    if alpha >= 0.99 {
+        base
+    } else {
+        mix(pal.bg_deep, base, alpha.clamp(0.0, 1.0))
+    }
+}
+
+fn draw_scenario(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette, alpha: f32) {
+    if rect.width < 8 || rect.height < 6 {
+        return;
+    }
+    let text = scenario_text(app);
+    let mut chars: Vec<char> = text.chars().collect();
+    let art = app.ambient_art.as_ref().or(app.art.as_ref());
+    let max_chars = (rect.width as usize / 4).max(4);
+    chars.truncate(max_chars);
+    let scale: u16 = if rect.height >= 14 && rect.width >= chars.len() as u16 * 8 {
+        2
+    } else {
+        1
+    };
+    let glyph_w = 3 * scale;
+    let gap = scale;
+    let total = chars.len() as u16 * (glyph_w + gap);
+    let x0 = rect.x + rect.width.saturating_sub(total) / 2;
+    let y0 = rect.y + rect.height.saturating_sub(5 * scale) / 2;
+    for (index, ch) in chars.iter().enumerate() {
+        let pattern = glyph_3x5(*ch);
+        let gx = x0 + index as u16 * (glyph_w + gap);
+        for (row, bits) in pattern.iter().enumerate() {
+            for col in 0..3u16 {
+                if bits & (1 << (2 - col)) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = gx + col * scale + dx;
+                        let y = y0 + row as u16 * scale + dy;
+                        let fg = scenario_color(art, rect, x, y, pal, alpha);
+                        put(buf, x, y, "█", color(fg), None);
+                    }
+                }
+            }
+        }
     }
 }

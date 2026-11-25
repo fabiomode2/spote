@@ -205,10 +205,48 @@ pub struct UiCfg {
     pub button_pad: u8,
     /// Arranca en modo zen (solo visualización, sin portada ni letra).
     pub zen: bool,
+    /// Altura del efecto en zen, en % del alto (30-100). El resto queda de
+    /// fondo/mosaico para que la animación empiece más abajo.
+    pub zen_viz_pct: u8,
     /// Número de bandas del ecualizador del header.
     pub show_bpm: bool,
     /// Tamaño/zoom de la letra: 0 compacta, 1 normal, 2 grande.
     pub lyrics_size: u8,
+    /// Opacidad de los paneles, en % (55-100). El fondo se sigue viendo.
+    pub panel_opacity: u8,
+    /// Opacidad de las barras de chrome (top, navegación), en %.
+    pub chrome_opacity: u8,
+    /// Opacidad del pie (transporte, nowbar y hint), en %.
+    pub bottom_opacity: u8,
+    /// Velo de los overlays, en % (0-90).
+    pub overlay_scrim: u8,
+    /// `color` (portada reactiva), `line` (marco fino) o `none`.
+    pub panel_border: String,
+    /// Opacidad del borde (0-100), independiente del relleno del panel.
+    pub border_opacity: u8,
+    /// Intensidad del borde de color (0-100).
+    pub rim_intensity: u8,
+    /// El rim vibra con bombo/caja.
+    pub rim_reactive: bool,
+    /// `top`, `side`, `both` o `auto`. En `auto`, lateral = secciones y
+    /// arriba = pestañas de documentos.
+    pub nav_position: String,
+    /// `docked`, `expand` o `auto` para artista/álbum.
+    pub detail_mode: String,
+    /// Efectos que entran en la rotación de `v`. El resto queda a mano.
+    pub effects_enabled: Vec<String>,
+    /// Rotación temporizada de efectos. Apagada por defecto: `v` manda.
+    pub effects_auto: bool,
+    /// `lateral`, `centered`, `behind` o `off`.
+    pub lyrics_scenario: String,
+    /// `line` o `word`.
+    pub lyrics_scenario_unit: String,
+    /// Variante de paleta derivada de la portada.
+    pub palette_variant: String,
+    /// Restaura las pestañas de la sesión anterior.
+    pub restore_session: bool,
+    /// Migración interna del rediseño: no se expone en la UI.
+    pub ui_v2_migrated: bool,
     /// Diseño de paneles (se puede editar en caliente con `E`).
     pub layout: LayoutCfg,
     /// Efectos ambientales repartidos por la UI.
@@ -305,12 +343,27 @@ pub struct FxCfg {
     pub ambient: String,
     /// Opacidad del fondo ambiental (0-50 %).
     pub ambient_opacity: u8,
-    /// Movimiento del mosaico de portada: `drift`, `rows`, `columns`, `rotate`.
+    /// `mosaic`, `wallpaper`, `gradient` u `off`.
+    pub backdrop: String,
+    /// `half`, `plain`, `dither` o `braille`.
+    pub mosaic_mode: String,
+    /// Opacidad del mosaico (5-50 %).
+    pub mosaic_opacity: u8,
+    /// Reactividad automática del movimiento a la energía de la canción.
+    pub mosaic_auto: bool,
+    /// `auto`, `small`, `medium` o `large`.
+    pub mosaic_tile: String,
+    /// Wallpaper Kitty estático en vez del mosaico de celdas.
+    pub mosaic_wallpaper: bool,
+    /// Movimiento del mosaico de portada: `drift`, `rows`, `columns`,
+    /// `diagonal`, `rotate` o `auto`.
     pub mosaic_motion: String,
     /// Velocidad del mosaico (1-10).
     pub mosaic_speed: u8,
     /// El mosaico salta al compás del bombo.
     pub mosaic_beat: bool,
+    /// `mosaic` o `black`: fondo del visualizador a pantalla completa.
+    pub fullscreen_backdrop: String,
     /// Los bordes laten con bombo/caja/charles/voz.
     pub instrument_borders: bool,
     /// Llama/brasa en el borde inferior.
@@ -328,9 +381,16 @@ impl Default for FxCfg {
         Self {
             ambient: "cover".into(),
             ambient_opacity: 16,
-            mosaic_motion: "drift".into(),
+            backdrop: "mosaic".into(),
+            mosaic_mode: "half".into(),
+            mosaic_opacity: 22,
+            mosaic_auto: true,
+            mosaic_tile: "auto".into(),
+            mosaic_wallpaper: false,
+            mosaic_motion: "auto".into(),
             mosaic_speed: 4,
             mosaic_beat: true,
+            fullscreen_backdrop: "mosaic".into(),
             instrument_borders: true,
             edge_flame: true,
             bloom_play: true,
@@ -362,8 +422,32 @@ impl Default for UiCfg {
             bar_width_pct: 70,
             button_pad: 2,
             zen: false,
+            zen_viz_pct: 55,
             show_bpm: true,
             lyrics_size: 1,
+            panel_opacity: 72,
+            chrome_opacity: 40,
+            bottom_opacity: 92,
+            overlay_scrim: 40,
+            panel_border: "line".into(),
+            border_opacity: 80,
+            rim_intensity: 85,
+            rim_reactive: true,
+            nav_position: "auto".into(),
+            detail_mode: "docked".into(),
+            effects_enabled: vec![
+                "clean".into(),
+                "aurora".into(),
+                "bloom".into(),
+                "crt".into(),
+                "braille".into(),
+            ],
+            effects_auto: false,
+            lyrics_scenario: "off".into(),
+            lyrics_scenario_unit: "line".into(),
+            palette_variant: "cover".into(),
+            restore_session: false,
+            ui_v2_migrated: true,
             layout: LayoutCfg::default(),
             fx: FxCfg::default(),
         }
@@ -423,6 +507,22 @@ impl Config {
                     if cfg.ui.thumb_mode == "off" {
                         cfg.ui.thumb_mode = "plain".into();
                     }
+                    let _ = cfg.save();
+                }
+                if valid && !cfg.ui.ui_v2_migrated {
+                    // La primera versión del rediseño dejó el rim y el
+                    // escenario de letra como defaults. Se restauran el marco
+                    // fino y la letra normal una sola vez.
+                    if cfg.ui.panel_border == "rim" {
+                        cfg.ui.panel_border = "line".into();
+                    }
+                    if cfg.ui.lyrics_scenario != "off" {
+                        cfg.ui.lyrics_scenario = "off".into();
+                    }
+                    if cfg.ui.chrome_opacity == 80 {
+                        cfg.ui.chrome_opacity = 40;
+                    }
+                    cfg.ui.ui_v2_migrated = true;
                     let _ = cfg.save();
                 }
                 cfg

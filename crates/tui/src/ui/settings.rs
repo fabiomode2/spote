@@ -11,7 +11,7 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
     let rect = content_rect(app, layout);
     if app.now.track.is_some() && layout.art.width > 0 {
         draw_art(app, buf, layout.art, pal, 0.85);
-        frame_art(buf, layout.art, pal);
+        frame_art(app, buf, layout.art, pal);
     }
     panel(
         Some(app),

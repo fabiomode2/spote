@@ -5,16 +5,58 @@
 //! álbum.
 
 use std::collections::VecDeque;
+use std::sync::OnceLock;
 
-use super::dots::Dots;
 use super::{Effect, Layer, Params, Rng, VizCtx};
-use spote_core::audio::{AudioFrame, BANDS, WAVE};
 use spote_core::artwork::Rgb;
+use spote_core::audio::{AudioFrame, BANDS, WAVE};
 use spote_core::util::{mix, mix_oklab};
 
 const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const SHADES: [char; 5] = [' ', '░', '▒', '▓', '█'];
 const DOTS: [char; 6] = ['·', '•', '∙', '◦', '○', '●'];
+
+/// Glifos Braille U+2800..U+28FF indexados por su máscara de 8 puntos. El
+/// índice 0 es un espacio: una celda sin puntos no llega a pintarse.
+static BRAILLE_LUT: [char; 256] = braille_lut();
+
+const fn braille_lut() -> [char; 256] {
+    let mut table = [' '; 256];
+    let mut mask = 1usize;
+    while mask < 256 {
+        table[mask] = match char::from_u32(0x2800 + mask as u32) {
+            Some(ch) => ch,
+            None => ' ',
+        };
+        mask += 1;
+    }
+    table
+}
+
+/// Bits de una columna Braille (izquierda/derecha) con los puntos encendidos
+/// desde `top` (0 = fila superior) hasta el borde inferior. Índice 4 = vacía.
+const BRAILLE_COL: [[u8; 5]; 2] = [
+    [0x47, 0x46, 0x44, 0x40, 0x00],
+    [0xB8, 0xB0, 0xA0, 0x80, 0x00],
+];
+
+/// Bit de cada subpunto Braille, indexado por `[columna][fila]` de la celda.
+const BRAILLE_BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+
+/// Resolución de la tabla de `t^1.15`: reparte las bandas del espectro sin
+/// llamar a `powf` por subcolumna.
+const POW_STEPS: usize = 1024;
+
+fn spectrum_curve() -> &'static [f32; POW_STEPS] {
+    static CURVE: OnceLock<[f32; POW_STEPS]> = OnceLock::new();
+    CURVE.get_or_init(|| {
+        let mut lut = [0.0; POW_STEPS];
+        for (index, slot) in lut.iter_mut().enumerate() {
+            *slot = (index as f32 / (POW_STEPS - 1) as f32).powf(1.15);
+        }
+        lut
+    })
+}
 
 /// Construye un efecto por su clave. Claves desconocidas → barras.
 pub fn effect_by_key(key: &str) -> Box<dyn Effect> {
@@ -218,7 +260,13 @@ impl Effect for Bars {
                 let extra = (fraction * 8.0) as usize;
                 if extra > 0 {
                     let y = h - 1 - full;
-                    layer.put(x, y, BLOCKS[extra.min(8)], mix(base, ctx.palette.text, 0.35), 1.0);
+                    layer.put(
+                        x,
+                        y,
+                        BLOCKS[extra.min(8)],
+                        mix(base, ctx.palette.text, 0.35),
+                        1.0,
+                    );
                 }
                 // Pico flotante.
                 let peak_row = self.peaks[i];
@@ -300,7 +348,11 @@ impl Effect for Wave {
             layer.put(x, y, ch, color, 0.95);
             if let Some(prev) = previous {
                 // Rellena el hueco vertical para que la onda no se corte.
-                let (a, b) = if prev < y { (prev + 1, y) } else { (y + 1, prev) };
+                let (a, b) = if prev < y {
+                    (prev + 1, y)
+                } else {
+                    (y + 1, prev)
+                };
                 for fill in a..b {
                     layer.put(x, fill, '│', color, 0.55);
                 }
@@ -396,7 +448,13 @@ impl Effect for Circle {
         }
         // Núcleo que late.
         let core = 0.5 + ctx.audio.beat_pulse * 1.5 + energy * 0.5;
-        layer.put(cx as i32, cy as i32, '◉', ctx.shade(1.0), (0.5 + core * 0.3).min(1.0));
+        layer.put(
+            cx as i32,
+            cy as i32,
+            '◉',
+            ctx.shade(1.0),
+            (0.5 + core * 0.3).min(1.0),
+        );
     }
 }
 
@@ -621,9 +679,10 @@ pub struct Matrix {
 impl Default for Matrix {
     fn default() -> Self {
         // ASCII y bloques: todos de ancho 1 en cualquier terminal.
-        let glyphs = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz<>[]{}/\\|=+-*#%&$@!?"
-            .chars()
-            .collect();
+        let glyphs =
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz<>[]{}/\\|=+-*#%&$@!?"
+                .chars()
+                .collect();
         Self {
             params: Params::default(),
             columns: Vec::new(),
@@ -988,7 +1047,8 @@ impl Effect for Neural {
                 }
             }
         }
-        self.pulse = (self.pulse * 0.92).max(ctx.audio.beat_pulse * 0.7 + ctx.audio.snare_pulse * 0.6);
+        self.pulse =
+            (self.pulse * 0.92).max(ctx.audio.beat_pulse * 0.7 + ctx.audio.snare_pulse * 0.6);
         let time = ctx.time;
         let mut positions: Vec<(i32, i32, f32)> = Vec::with_capacity(self.nodes.len());
         for (x, y, band) in &self.nodes {
@@ -1008,7 +1068,15 @@ impl Effect for Neural {
                 }
                 let strength = ((v1 + v2) * 0.5).clamp(0.0, 1.0);
                 let alpha = 0.08 + strength * 0.5 + self.pulse * 0.15;
-                layer.line(x1, y1, x2, y2, '·', ctx.shade(0.32 + strength * 0.35), alpha);
+                layer.line(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    '·',
+                    ctx.shade(0.32 + strength * 0.35),
+                    alpha,
+                );
             }
         }
         for (x, y, value) in positions {
@@ -1274,6 +1342,9 @@ pub struct Scope {
     sweeps: VecDeque<Vec<f32>>,
     /// Buffer reutilizado para el remuestreo del frame actual.
     resampled: Vec<f32>,
+    /// Máscaras de subpíxeles del haz (una por celda), reutilizadas entre
+    /// barridos y frames. Evita el búfer completo de brillos del braille.
+    beam_masks: Vec<u8>,
     /// Reloj del analizador del último barrido (identifica la generación de audio).
     last_generation: f32,
     /// `ctx.time` del último barrido, para el refresco mínimo de ~50 ms.
@@ -1286,23 +1357,170 @@ impl Default for Scope {
             params: Params::default(),
             sweeps: VecDeque::with_capacity(SCOPE_TRAILS),
             resampled: vec![0.0; SCOPE_POINTS],
+            beam_masks: Vec::new(),
             last_generation: f32::NEG_INFINITY,
             last_sweep: f32::NEG_INFINITY,
         }
     }
 }
 
+/// Muestra la forma de onda en una posición fraccional, con interpolación.
+#[inline]
+fn waveform_at(audio: &AudioFrame, pos: f32) -> f32 {
+    let pos = pos.clamp(0.0, (WAVE - 1) as f32);
+    let a = pos as usize;
+    let b = (a + 1).min(WAVE - 1);
+    let frac = pos - a as f32;
+    audio.waveform[a] * (1.0 - frac) + audio.waveform[b] * frac
+}
+
+/// Resolución del haz del osciloscopio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeamMode {
+    /// 2×4 subpíxeles por celda: terminales con altura suficiente.
+    Braille,
+    /// 1×2 subpíxeles con medios bloques: terminales bajas, haz más grueso.
+    Half,
+}
+
+impl BeamMode {
+    /// Con menos de 8 filas los puntos Braille se leen como ruido; ahí manda
+    /// la media celda.
+    fn for_height(h: u16) -> Self {
+        if h >= 8 {
+            Self::Braille
+        } else {
+            Self::Half
+        }
+    }
+
+    fn cols(self) -> i32 {
+        match self {
+            Self::Braille => 2,
+            Self::Half => 1,
+        }
+    }
+
+    fn rows(self) -> i32 {
+        match self {
+            Self::Braille => 4,
+            Self::Half => 2,
+        }
+    }
+
+    #[inline]
+    fn bit(self, sx: i32, sy: i32) -> u8 {
+        match self {
+            Self::Braille => BRAILLE_BITS[(sx & 1) as usize][(sy & 3) as usize],
+            Self::Half => {
+                if sy & 1 == 0 {
+                    0x01
+                } else {
+                    0x02
+                }
+            }
+        }
+    }
+
+    fn glyph(self, mask: u8) -> char {
+        match self {
+            Self::Braille => BRAILLE_LUT[mask as usize],
+            Self::Half => match mask {
+                0x01 => '▀',
+                0x02 => '▄',
+                0x03 => '█',
+                _ => ' ',
+            },
+        }
+    }
+}
+
+/// Rasteriza un barrido sobre la rejilla de subpíxeles de `masks` (una máscara
+/// por celda). Cada subcolumna recibe al menos un punto y los tramos
+/// verticales se rellenan, así el trazo queda continuo.
+fn rasterize_beam(
+    masks: &mut [u8],
+    mode: BeamMode,
+    w: i32,
+    h: i32,
+    sweep: &[f32],
+    amplitude: f32,
+    thickness: i32,
+) {
+    if w <= 0 || h <= 0 || sweep.len() < 2 {
+        return;
+    }
+    let cols = w * mode.cols();
+    let rows = h * mode.rows();
+    let mid = rows as f32 / 2.0;
+    let sample = |sx: i32| -> f32 {
+        let t = if cols > 1 {
+            sx as f32 / (cols - 1) as f32
+        } else {
+            0.0
+        };
+        let pos = t * (sweep.len() - 1) as f32;
+        let a = pos as usize;
+        let b = (a + 1).min(sweep.len() - 1);
+        let frac = pos - a as f32;
+        sweep[a] * (1.0 - frac) + sweep[b] * frac
+    };
+    let y_of = |value: f32| -> i32 {
+        (mid - value.clamp(-1.0, 1.0) * amplitude)
+            .round()
+            .clamp(0.0, (rows - 1) as f32) as i32
+    };
+    let cell_rows = mode.rows();
+    let cell_cols = mode.cols();
+    let mut prev = y_of(sample(0));
+    for sx in 0..cols {
+        let y = y_of(sample(sx));
+        let (from, to) = if prev <= y { (prev, y) } else { (y, prev) };
+        let end = (to + thickness - 1).min(rows - 1);
+        let cell = sx / cell_cols;
+        for sy in from..=end {
+            let index = (sy / cell_rows) * w + cell;
+            if let Some(slot) = masks.get_mut(index as usize) {
+                *slot |= mode.bit(sx, sy);
+            }
+        }
+        prev = y;
+    }
+}
+
+/// Vuelca las máscaras del haz a la capa: un glifo y un color por celda.
+fn blit_beam(
+    layer: &mut Layer,
+    masks: &[u8],
+    mode: BeamMode,
+    w: i32,
+    h: i32,
+    color: Rgb,
+    alpha: f32,
+) {
+    for cy in 0..h {
+        for cx in 0..w {
+            let mask = masks[(cy * w + cx) as usize];
+            if mask == 0 {
+                continue;
+            }
+            layer.put(cx, cy, mode.glyph(mask), color, alpha);
+        }
+    }
+}
+
 impl Scope {
-    /// Remuestrea las 256 muestras del analizador al ancho interno del efecto.
+    /// Remuestrea las 256 muestras del analizador al ancho interno del efecto,
+    /// con un suavizado de 3 puntos para que el trazo no salga a saltos.
     fn resample(&mut self, audio: &AudioFrame) {
         let last = (WAVE - 1) as f32;
+        let step = last / (SCOPE_POINTS - 1) as f32;
         for (i, out) in self.resampled.iter_mut().enumerate() {
-            let t = i as f32 / (SCOPE_POINTS - 1) as f32;
-            let pos = t * last;
-            let a = pos as usize;
-            let b = (a + 1).min(WAVE - 1);
-            let frac = pos - a as f32;
-            *out = audio.waveform[a] * (1.0 - frac) + audio.waveform[b] * frac;
+            let pos = i as f32 * step;
+            let smooth = waveform_at(audio, pos - step) * 0.25
+                + waveform_at(audio, pos) * 0.5
+                + waveform_at(audio, pos + step) * 0.25;
+            *out = smooth.clamp(-1.0, 1.0);
         }
     }
 
@@ -1322,7 +1540,8 @@ impl Scope {
         self.sweeps.push_back(sweep);
     }
 
-    /// Rejilla tenue de osciloscopio: verticales cada w/10 y horizontales cada h/8.
+    /// Rejilla tenue de osciloscopio: verticales cada w/10 y scanlines cada
+    /// h/8, con un mínimo de 2–3 filas para no tapar el haz en pantallas bajas.
     fn draw_grid(&self, layer: &mut Layer, ctx: &VizCtx) {
         if self.params.density < 0.3 {
             return;
@@ -1333,7 +1552,9 @@ impl Scope {
         }
         let color = ctx.shade(0.18);
         let step_x = (w / 10).max(2) as usize;
-        let step_y = (h / 8).max(1) as usize;
+        // Scanlines cada 2–3 filas como mínimo: en pantallas bajas una línea
+        // por fila tapaba el haz y se leía como ruido.
+        let step_y = if h < 12 { 3 } else { (h / 8).max(2) } as usize;
         for x in (step_x as i32..w).step_by(step_x) {
             for y in 0..h {
                 layer.put(x, y, '·', color, 0.16);
@@ -1346,7 +1567,7 @@ impl Scope {
         }
     }
 
-    /// Línea base del haz. En silencio se queda más marcada y sin trazas.
+    /// Dibuja la línea base del haz. En silencio se queda más marcada.
     fn draw_baseline(&self, layer: &mut Layer, ctx: &VizCtx, y: i32, silent: bool) {
         let color = if silent {
             ctx.shade(0.45)
@@ -1356,43 +1577,6 @@ impl Scope {
         let alpha = if silent { 0.55 } else { 0.25 };
         for x in 0..layer.w as i32 {
             layer.put(x, y, '·', color, alpha);
-        }
-    }
-
-    /// Dibuja un barrido conectando muestras con la celda vertical intermedia.
-    fn draw_sweep(&self, layer: &mut Layer, sweep: &[f32], color: Rgb, alpha: f32) {
-        let (w, h) = (layer.w as i32, layer.h as i32);
-        if w <= 0 || h <= 0 || sweep.len() < 2 {
-            return;
-        }
-        let mid = h as f32 / 2.0;
-        let amplitude = (h as f32 * 0.42 * self.params.sensitivity.clamp(0.1, 4.0)).max(0.5);
-        let x_of = |i: usize| -> i32 {
-            (i as f32 / (sweep.len() - 1) as f32 * (w - 1) as f32).round() as i32
-        };
-        let y_of = |value: f32| -> i32 {
-            (mid - value.clamp(-1.0, 1.0) * amplitude)
-                .round()
-                .clamp(0.0, (h - 1) as f32) as i32
-        };
-        let mut prev = (x_of(0), y_of(sweep[0]));
-        layer.put(prev.0, prev.1, '•', color, alpha);
-        for i in 1..sweep.len() {
-            let x = x_of(i);
-            let y = y_of(sweep[i]);
-            if x == prev.0 {
-                let (from, to) = if prev.1 <= y {
-                    (prev.1, y)
-                } else {
-                    (y, prev.1)
-                };
-                for yy in from..=to {
-                    layer.put(x, yy, '│', color, alpha);
-                }
-            } else {
-                layer.line(prev.0, prev.1, x, y, '─', color, alpha);
-            }
-            prev = (x, y);
         }
     }
 }
@@ -1441,9 +1625,31 @@ impl Effect for Scope {
         }
 
         // `density` decide cuántas estelas se muestran (3 o 4) y si hay rejilla.
-        let visible = if self.params.density >= 0.75 { 4 } else { 3 };
+        // En pantallas bajas se recortan para no embarrar el haz.
+        let mut visible = if self.params.density >= 0.75 { 4 } else { 3 };
+        if h < 6 {
+            visible = 2;
+        }
         let total = self.sweeps.len();
         let skip = total.saturating_sub(visible);
+
+        // El haz se dibuja en subpíxeles: braille 2×4 cuando hay altura y
+        // media celda (1×2) en terminales bajas. Cuanto menor la resolución,
+        // más grueso el trazo para que siga leyéndose.
+        let mode = BeamMode::for_height(layer.h);
+        let masks_len = w as usize * h as usize;
+        if self.beam_masks.len() != masks_len {
+            self.beam_masks.clear();
+            self.beam_masks.resize(masks_len, 0);
+        }
+        let rows = (h * mode.rows()) as f32;
+        let amplitude = (rows * 0.42 * self.params.sensitivity.clamp(0.1, 4.0)).max(0.5);
+        let thickness = match mode {
+            BeamMode::Half => 1,
+            BeamMode::Braille if h >= 16 => 1,
+            BeamMode::Braille => 2,
+        };
+
         for (index, sweep) in self.sweeps.iter().enumerate().skip(skip) {
             let newest = index + 1 == total;
             let recency = if total > 1 {
@@ -1458,7 +1664,17 @@ impl Effect for Scope {
                 ctx.shade(0.22 + 0.62 * recency)
             };
             let alpha = if newest { 0.92 } else { 0.14 + 0.5 * recency };
-            self.draw_sweep(layer, sweep, color, alpha);
+            self.beam_masks.fill(0);
+            rasterize_beam(
+                &mut self.beam_masks,
+                mode,
+                w,
+                h,
+                sweep,
+                amplitude,
+                thickness,
+            );
+            blit_beam(layer, &self.beam_masks, mode, w, h, color, alpha);
         }
     }
 }
@@ -1723,14 +1939,19 @@ impl Effect for Led {
 
 pub struct BarsBraille {
     params: Params,
-    dots: Dots,
+    /// Primera fila de subpíxel encendida de cada subcolumna (2W), calculada
+    /// una vez por frame.
+    tops: Vec<i32>,
+    /// Color por fila de subpíxel (4H), también una vez por frame.
+    row_colors: Vec<Rgb>,
 }
 
 impl Default for BarsBraille {
     fn default() -> Self {
         Self {
             params: Params::default(),
-            dots: Dots::default(),
+            tops: Vec::new(),
+            row_colors: Vec::new(),
         }
     }
 }
@@ -1747,31 +1968,51 @@ impl Effect for BarsBraille {
     }
 
     fn frame(&mut self, layer: &mut Layer, ctx: &VizCtx) {
-        let (w, h) = (layer.w, layer.h);
-        if w == 0 || h == 0 {
+        let (w, h) = (layer.w as i32, layer.h as i32);
+        if w <= 0 || h <= 0 {
             return;
         }
-        self.dots.resize(w, h);
-        self.dots.clear();
-        let dw = w as i32 * 2;
-        let dh = h as i32 * 4;
-        for x in 0..dw {
+        let dw = w * 2;
+        let dh = h * 4;
+        // Altura de cada subcolumna una sola vez por frame. La curva se
+        // muestrea en una tabla; antes era un `powf` por subcolumna.
+        self.tops.resize(dw as usize, 0);
+        let curve = spectrum_curve();
+        let sensitivity = self.params.sensitivity;
+        let boost = 1.0 + ctx.audio.kick * 0.18;
+        for (x, top) in self.tops.iter_mut().enumerate() {
             let t = if dw > 1 {
-                x as f32 / (dw - 1) as f32
+                x * (POW_STEPS - 1) / (dw as usize - 1)
             } else {
-                0.0
+                0
             };
-            let band = t.powf(1.15) * (BANDS - 1) as f32;
-            let value =
-                (ctx.audio.band(band) * self.params.sensitivity * (1.0 + ctx.audio.kick * 0.18))
-                    .clamp(0.0, 1.0);
-            // Relleno continuo desde abajo: no quedan huecos entre barras.
-            let top = dh - (value * dh as f32).round() as i32;
-            for y in top.max(0)..dh {
-                self.dots.plot(x, y, 1.0);
+            let band = curve[t] * (BANDS - 1) as f32;
+            let value = (ctx.audio.band(band) * sensitivity * boost).clamp(0.0, 1.0);
+            *top = dh - (value * dh as f32).round() as i32;
+        }
+        // Mismo degradado que `Dots::render`: color según la fila más alta
+        // encendida de la celda, sobre un relleno sólido (brillo 1 → alfa 1).
+        self.row_colors.resize(dh as usize, (0, 0, 0));
+        for (y, color) in self.row_colors.iter_mut().enumerate() {
+            let height = 1.0 - y as f32 / dh as f32;
+            *color = ctx.shade(0.28 + 0.64 * height);
+        }
+        // Una máscara Braille por celda desde las dos columnas de su rejilla
+        // 2×4. El relleno va de `top` al borde inferior, así que la máscara se
+        // arma con dos entradas de tabla y un solo `put` por celda.
+        for cy in 0..h {
+            for cx in 0..w {
+                let left = (self.tops[(cx * 2) as usize] - cy * 4).clamp(0, 4);
+                let right = (self.tops[(cx * 2 + 1) as usize] - cy * 4).clamp(0, 4);
+                let mask = BRAILLE_COL[0][left as usize] | BRAILLE_COL[1][right as usize];
+                if mask == 0 {
+                    continue;
+                }
+                let top = left.min(right);
+                let color = self.row_colors[(cy * 4 + top) as usize];
+                layer.put(cx, cy, BRAILLE_LUT[mask as usize], color, 1.0);
             }
         }
-        self.dots.render(layer, ctx, 128, 0.28, 0.92);
     }
 }
 
@@ -1981,11 +2222,20 @@ mod tests {
     fn scope_survives_extreme_geometries() {
         let palette = Palette::dark();
         let audio = test_audio(0.9);
+        let silent = AudioFrame::default();
         let mut scope = Scope::default();
-        for (w, h, time) in [(20u16, 6u16, 1.0f32), (1, 1, 2.0), (120, 40, 3.0)] {
+        let cases: [(u16, u16, f32, &AudioFrame); 6] = [
+            (1, 1, 2.0, &audio),
+            (200, 56, 3.0, &audio),
+            (120, 40, 3.5, &audio),
+            (20, 6, 1.0, &audio),
+            (1, 1, 4.0, &silent),
+            (200, 56, 5.0, &silent),
+        ];
+        for (w, h, time, frame) in cases {
             let mut layer = Layer::new(w, h);
             let ctx = VizCtx {
-                audio: &audio,
+                audio: frame,
                 palette: &palette,
                 lut: crate::viz::shade_lut(&palette),
                 w,
@@ -1995,6 +2245,50 @@ mod tests {
             };
             scope.frame(&mut layer, &ctx);
         }
+    }
+
+    #[test]
+    fn scope_beam_adapts_to_height() {
+        let palette = Palette::dark();
+        let audio = test_audio(0.9);
+        let lut = crate::viz::shade_lut(&palette);
+        let mut scope = Scope::default();
+
+        let mut tall = Layer::new(80, 24);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut,
+            w: 80,
+            h: 24,
+            dt: 1.0 / 60.0,
+            time: 1.0,
+        };
+        scope.frame(&mut tall, &ctx);
+        let braille = tall
+            .cells
+            .iter()
+            .filter(|cell| ('\u{2801}'..='\u{28ff}').contains(&cell.ch))
+            .count();
+        assert!(braille > 0, "sin haz braille a 80x24");
+
+        let mut short = Layer::new(40, 4);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut,
+            w: 40,
+            h: 4,
+            dt: 1.0 / 60.0,
+            time: 2.0,
+        };
+        scope.frame(&mut short, &ctx);
+        let half = short
+            .cells
+            .iter()
+            .filter(|cell| matches!(cell.ch, '▀' | '▄' | '█'))
+            .count();
+        assert!(half > 0, "sin haz de media celda a 40x4");
     }
 
     #[test]
@@ -2062,7 +2356,10 @@ mod tests {
             time: 1.0,
         };
         scope.frame(&mut layer, &ctx);
-        assert!(scope.sweeps.is_empty(), "el silencio no debe capturar barridos");
+        assert!(
+            scope.sweeps.is_empty(),
+            "el silencio no debe capturar barridos"
+        );
         assert_eq!(layer.ch_at(0, 4), '·', "falta la línea base");
     }
 
@@ -2144,6 +2441,51 @@ mod tests {
             assert!(
                 ('\u{2800}'..='\u{28ff}').contains(&ch),
                 "hueco en el braille: x={x} ch={ch:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn braille_full_height_fills_every_cell() {
+        let palette = Palette::dark();
+        let mut audio = test_audio(1.0);
+        for band in audio.bands.iter_mut() {
+            *band = 1.0;
+        }
+        let mut effect = effect_by_key("bars_braille");
+        let (w, h) = (48u16, 12u16);
+        let mut layer = Layer::new(w, h);
+        let ctx = VizCtx {
+            audio: &audio,
+            palette: &palette,
+            lut: crate::viz::shade_lut(&palette),
+            w,
+            h,
+            dt: 1.0 / 60.0,
+            time: 1.0,
+        };
+        effect.frame(&mut layer, &ctx);
+        for cy in 0..h as i32 {
+            for cx in 0..w as i32 {
+                assert_eq!(
+                    layer.ch_at(cx, cy),
+                    '\u{28ff}',
+                    "celda incompleta en ({cx},{cy})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn braille_lut_maps_blank_and_full() {
+        assert_eq!(BRAILLE_LUT[0], ' ');
+        assert_eq!(BRAILLE_LUT[0xFF], '\u{28ff}');
+        assert_eq!(BRAILLE_LUT[0x01], '\u{2801}');
+        assert_eq!(BRAILLE_LUT[0x80], '\u{2880}');
+        for mask in 1..=0xFFu8 {
+            assert!(
+                !BRAILLE_LUT[mask as usize].is_whitespace(),
+                "máscara {mask:#04x} vacía"
             );
         }
     }

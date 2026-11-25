@@ -8,6 +8,73 @@ use image::DynamicImage;
 use super::Rgb;
 use crate::util::{hsv_to_rgb, luma, mix, mix_oklab, rgb_to_hsv, scale, with_value};
 
+/// Paletas derivadas de la portada para el menú `P`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaletteVariant {
+    #[default]
+    Cover,
+    Vibrant,
+    Pastel,
+    Complementary,
+    Analogous,
+    Mono,
+    Duotone,
+    Contrast,
+}
+
+impl PaletteVariant {
+    pub const ALL: [Self; 8] = [
+        Self::Cover,
+        Self::Vibrant,
+        Self::Pastel,
+        Self::Complementary,
+        Self::Analogous,
+        Self::Mono,
+        Self::Duotone,
+        Self::Contrast,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cover => "portada",
+            Self::Vibrant => "vibrante",
+            Self::Pastel => "pastel",
+            Self::Complementary => "complementaria",
+            Self::Analogous => "analógica",
+            Self::Mono => "mono",
+            Self::Duotone => "duotone",
+            Self::Contrast => "contraste",
+        }
+    }
+
+    pub fn from_str(text: &str) -> Option<Self> {
+        match text {
+            "cover" | "portada" => Some(Self::Cover),
+            "vibrant" | "vibrante" => Some(Self::Vibrant),
+            "pastel" => Some(Self::Pastel),
+            "complementary" | "complementaria" => Some(Self::Complementary),
+            "analogous" | "analogica" | "analógica" => Some(Self::Analogous),
+            "mono" => Some(Self::Mono),
+            "duotone" => Some(Self::Duotone),
+            "contrast" | "contraste" => Some(Self::Contrast),
+            _ => None,
+        }
+    }
+
+    pub fn config_value(self) -> &'static str {
+        match self {
+            Self::Cover => "cover",
+            Self::Vibrant => "vibrant",
+            Self::Pastel => "pastel",
+            Self::Complementary => "complementary",
+            Self::Analogous => "analogous",
+            Self::Mono => "mono",
+            Self::Duotone => "duotone",
+            Self::Contrast => "contrast",
+        }
+    }
+}
+
 /// Tema completo de la UI, derivado de la portada.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
@@ -130,6 +197,37 @@ impl Palette {
         };
         pal.ramp = build_ramp(&pal);
         pal
+    }
+
+    /// Variante derivada de la paleta de la portada para el menú `P`.
+    pub fn variant(&self, kind: PaletteVariant) -> Self {
+        let white = (255, 255, 255);
+        match kind {
+            PaletteVariant::Cover => self.clone(),
+            PaletteVariant::Vibrant => Self::from_accents(
+                legible(self.primary, 0.70, 0.68, 0.96),
+                legible(self.secondary, 0.66, 0.62, 0.94),
+            ),
+            PaletteVariant::Pastel => Self::from_accents(
+                mix(self.primary, white, 0.48),
+                mix(self.secondary, white, 0.48),
+            ),
+            PaletteVariant::Complementary => {
+                Self::from_accents(self.primary, rotate_hue(self.secondary, 180.0))
+            }
+            PaletteVariant::Analogous => Self::from_accents(
+                rotate_hue(self.primary, 28.0),
+                rotate_hue(self.secondary, -28.0),
+            ),
+            PaletteVariant::Mono => Self::from_accents(self.primary, self.primary),
+            PaletteVariant::Duotone => {
+                Self::from_accents(self.primary, mix(self.primary, self.secondary, 0.5))
+            }
+            PaletteVariant::Contrast => Self::from_accents(
+                rotate_hue(self.primary, 180.0),
+                rotate_hue(self.secondary, 180.0),
+            ),
+        }
     }
 
     /// Mezcla dos temas (transición entre canciones).
@@ -374,6 +472,19 @@ mod tests {
         assert!(sat > 0.5, "sat={sat}");
         assert!(value >= 0.55, "value={value}");
         assert!(Palette::contrast(pal.text, pal.bg) >= 7.0);
+    }
+
+    #[test]
+    fn palette_variants_keep_text_legible() {
+        let base = Palette::from_accents((220, 60, 90), (40, 160, 220));
+        for variant in PaletteVariant::ALL {
+            let pal = base.variant(variant);
+            assert!(
+                Palette::contrast(pal.text, pal.bg) >= 4.5,
+                "contraste bajo en {variant:?}"
+            );
+            assert!(!pal.ramp.iter().all(|c| *c == (0, 0, 0)));
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.top;
-    fill_soft(buf, rect, pal.bg_deep, 0.84, pal.bg_deep);
+    fill_soft(buf, rect, pal.bg_deep, chrome_alpha(app), pal.bg_deep);
     // Logo.
     let logo_style = Style::new()
         .fg(color(mix_oklab(pal.primary, pal.text, 0.25)))
@@ -22,45 +22,138 @@ pub(super) fn draw_top(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     put(buf, rect.x + 3, rect.y, &logo, color(pal.text), None);
     let _ = logo_style;
 
-    // Tabs.
+    // Navegación de documentos. Las secciones fijas viven en el lateral;
+    // arriba solo aparecen las pestañas abiertas, sin duplicar información.
     let mut x = rect.x + 11;
-    for tab in Tab::ALL {
-        let label = format!("{} {}", tab.icon(), tab.label());
-        let width = label.chars().count() as u16 + 2;
-        if x + width > rect.x + rect.width.saturating_sub(24) {
+    let sections_top = matches!(app.cfg.ui.nav_position.as_str(), "top" | "both");
+    if sections_top {
+        for tab in Tab::ALL {
+            let label = format!("{} {}", tab.icon(), tab.label());
+            let width = label.chars().count() as u16 + 2;
+            if x + width > rect.x + rect.width.saturating_sub(30) {
+                break;
+            }
+            let hit = Rect::new(x, rect.y, width, 1);
+            let active = app.tab == tab;
+            fill(
+                buf,
+                hit,
+                if active {
+                    mix(pal.surface, pal.primary, 0.30)
+                } else {
+                    pal.surface
+                },
+            );
+            text_at(
+                buf,
+                hit,
+                label,
+                Style::new().fg(color(if active { pal.text } else { pal.muted })),
+                Alignment::Center,
+            );
+            app.hit.add(hit, Action::Tab(tab));
+            x += width + 1;
+        }
+        x += 1;
+    }
+    let nav = [("‹", Action::NavBack), ("›", Action::NavForward), ("×", Action::NavClose)];
+    for (index, (glyph, action)) in nav.iter().enumerate() {
+        if x + 3 > rect.x + rect.width.saturating_sub(24) {
             break;
         }
-        let tab_rect = Rect::new(x, rect.y, width, 1);
-        let active = app.tab == tab;
-        let hover = app.hover == Some(Action::Tab(tab));
-        chip(buf, tab_rect, pal, active, hover);
-        if active {
-            let glow = mix_oklab(pal.primary, pal.secondary, kick * 0.35);
-            fill(buf, tab_rect, glow);
-            let _ = glow;
-        }
+        let hit = Rect::new(x, rect.y, 2, 1);
+        let hover = app.hover == Some(action.clone());
+        fill(
+            buf,
+            hit,
+            if hover { pal.surface_alt } else { pal.surface },
+        );
         text_at(
             buf,
-            tab_rect,
-            label,
-            Style::new()
-                .fg(color(if active { pal.bg_deep } else { pal.muted }))
-                .bg(color(if active {
-                    pal.primary
+            hit,
+            *glyph,
+            Style::new().fg(color(if index == 2 {
+                pal.dim
+            } else {
+                pal.muted
+            })),
+            Alignment::Center,
+        );
+        app.hit.add(hit, action.clone());
+        x += 3;
+    }
+
+    if app.doc_tabs.is_empty() {
+        if !sections_top {
+            let breadcrumb = format!("{}  {}", app.tab.icon(), app.tab.label());
+            let width = breadcrumb.chars().count() as u16;
+            text_at(
+                buf,
+                Rect::new(x, rect.y, rect.width.saturating_sub(28), 1),
+                breadcrumb,
+                Style::new().fg(color(pal.dim)),
+                Alignment::Left,
+            );
+            x += width + 1;
+        }
+    } else {
+        let tabs: Vec<(crate::app::DocKind, String)> = app
+            .doc_tabs
+            .iter()
+            .map(|tab| (tab.kind, tab.title.clone()))
+            .collect();
+        for (index, (kind, title)) in tabs.into_iter().enumerate() {
+            let icon = match kind {
+                crate::app::DocKind::Artist => "◎",
+                crate::app::DocKind::Album => "▣",
+                crate::app::DocKind::Other => "◇",
+            };
+            let mut label = format!("{icon} {title}");
+            let max = 28u16.min(rect.width / 4).max(10);
+            truncate_chars(&mut label, max.saturating_sub(4) as usize);
+            let width = label.chars().count() as u16 + 4;
+            if x + width > rect.x + rect.width.saturating_sub(24) {
+                break;
+            }
+            let tab_rect = Rect::new(x, rect.y, width, 1);
+            let active = app.active_doc == Some(index);
+            let hover = app.hover == Some(Action::DocTab(index));
+            fill(
+                buf,
+                tab_rect,
+                if active {
+                    mix_oklab(pal.primary, pal.secondary, app.audio.kick_pulse * 0.25)
                 } else if hover {
                     pal.surface_alt
                 } else {
                     pal.surface
-                }))
-                .add_modifier(if active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-            Alignment::Center,
-        );
-        app.hit.add(tab_rect, Action::Tab(tab));
-        x += width + 1;
+                },
+            );
+            text_at(
+                buf,
+                Rect::new(tab_rect.x, tab_rect.y, tab_rect.width.saturating_sub(2), 1),
+                label,
+                Style::new()
+                    .fg(color(if active { pal.bg_deep } else { pal.muted }))
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+                Alignment::Left,
+            );
+            app.hit.add(tab_rect, Action::DocTab(index));
+            let close = Rect::new(tab_rect.x + tab_rect.width - 2, tab_rect.y, 2, 1);
+            text_at(
+                buf,
+                close,
+                "×",
+                Style::new().fg(color(if active { pal.bg_deep } else { pal.dim })),
+                Alignment::Center,
+            );
+            app.hit.add(close, Action::DocClose(index));
+            x += width + 1;
+        }
     }
 
     // Chip del reproductor del sistema: puerta de entrada al modo MPRIS.
@@ -209,6 +302,9 @@ pub(super) fn local_offset_secs() -> i64 {
 
 pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     use crate::app::LibFilter;
+    if app.cfg.ui.nav_position == "top" {
+        return;
+    }
     let rect = layout.nav;
     let focused = app.focus == crate::app::Pane::Nav;
     panel(
@@ -350,7 +446,7 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     if rect.height == 0 || rect.width < 24 {
         return;
     }
-    fill_soft(buf, rect, mix(pal.bg_deep, pal.surface, 0.62), 0.88, pal.bg_deep);
+    fill_soft(buf, rect, mix(pal.bg_deep, pal.surface, 0.62), bottom_alpha(app), pal.bg_deep);
     for x in rect.x..rect.x + rect.width {
         put(buf, x, rect.y, "─", color(pal.border_dim), None);
     }
@@ -434,7 +530,8 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
 
     // Artista y álbum van por separado para que cada uno tenga su hitbox y su
     // resaltado animado. La línea se alinea a la derecha como antes.
-    let mut artist = track.artist.clone();
+    let primary_artist = app.now_primary_artist();
+    let mut artist = app.now_artist_credit();
     truncate_chars(&mut artist, text_w as usize);
     let album = track
         .album
@@ -463,7 +560,7 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         .unwrap_or(0);
     let line_w = artist_w + if album_w > 0 { sep_w + album_w } else { 0 };
     let line_x = title_right.saturating_sub(line_w);
-    let hover_artist = app.hover == Some(Action::OpenArtist(track.artist.clone()));
+    let hover_artist = app.hover == Some(Action::OpenArtist(primary_artist.clone()));
     if artist_w > 1 {
         link_at(
             buf,
@@ -478,7 +575,7 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         );
         app.hit.add(
             Rect::new(line_x, rect.y + 1, artist_w, 1),
-            Action::OpenArtist(track.artist.clone()),
+            Action::OpenArtist(primary_artist.clone()),
         );
     }
     if let Some(album) = album {
@@ -486,7 +583,7 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         put(buf, sep_x, rect.y + 1, sep, color(pal.dim), None);
         let album_x = sep_x + sep_w;
         let hover_album =
-            app.hover == Some(Action::OpenAlbum(album.clone(), track.artist.clone()));
+            app.hover == Some(Action::OpenAlbum(album.clone(), primary_artist.clone()));
         let drawn = link_at(
             buf,
             album_x,
@@ -501,7 +598,7 @@ pub(super) fn draw_nowbar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         if drawn > 1 {
             app.hit.add(
                 Rect::new(album_x, rect.y + 1, drawn, 1),
-                Action::OpenAlbum(album, track.artist.clone()),
+                Action::OpenAlbum(album, primary_artist.clone()),
             );
         }
     }
@@ -512,7 +609,7 @@ pub(super) fn draw_transport(app: &mut App, buf: &mut Buffer, layout: &Layout, p
     if rect.height == 0 || rect.width < 12 {
         return;
     }
-    fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
+    fill_soft(buf, rect, pal.bg_deep, bottom_alpha(app), pal.bg_deep);
     let progress = if app.now.duration_ms == 0 {
         0.0
     } else {
@@ -1114,7 +1211,7 @@ pub(super) fn draw_progress_bar(
 
 pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = layout.hint;
-    fill_soft(buf, rect, pal.bg_deep, 0.82, pal.bg_deep);
+    fill_soft(buf, rect, pal.bg_deep, bottom_alpha(app), pal.bg_deep);
     let right_text = if app.update_run.is_some() {
         let secs = app
             .update_started
@@ -1134,7 +1231,7 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             format!(
                 "♪ {}  ·  {}{}",
                 track.title,
-                track.artist,
+                app.now_artist_credit(),
                 if app.follow_spotify {
                     "  ·  sistema"
                 } else {
@@ -1165,11 +1262,9 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             Alignment::Right,
         );
         if layout.nowbar.height == 0 {
-            if let Some(track) = &app.now.track {
-                if !track.artist.is_empty() {
-                    app.hit
-                        .add(right_rect, Action::OpenArtist(track.artist.clone()));
-                }
+            let primary = app.now_primary_artist();
+            if !primary.is_empty() {
+                app.hit.add(right_rect, Action::OpenArtist(primary));
             }
         }
     }
@@ -1191,16 +1286,51 @@ pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         put(buf, x, rect.y, hint.label, color(pal.dim), None);
         x += hint.label.chars().count() as u16 + 2;
     }
-    // La barra de teclas cambia de longitud al abrir overlays. Forzamos su
-    // difusión completa para que no queden restos de la leyenda anterior en
-    // terminales que no limpian bien las celdas reemplazadas por espacios.
-    for x in rect.x..rect.x + rect.width {
-        if let Some(cell) = buf.cell_mut((x, rect.y)) {
-            cell.diff_option = ratatui::buffer::CellDiffOption::AlwaysUpdate;
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Toasts y overlays
 // ---------------------------------------------------------------------------
+
+/// Barra mínima de zen: efecto a pantalla completa y solo progreso/tiempo.
+/// Nada de etiquetas ni controles gigantes encima del visual.
+pub(super) fn draw_zen_bar(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let area = layout.full;
+    if area.height < 3 || area.width < 24 {
+        return;
+    }
+    let y = area.y + area.height - 1;
+    let rect = Rect::new(area.x, y, area.width, 1);
+    fill_soft(buf, rect, pal.bg_deep, bottom_alpha(app), pal.bg_deep);
+    let duration = app.now.duration_ms.max(1);
+    let position = app.display_position_ms().min(duration);
+    let progress = position as f32 / duration as f32;
+    let left = format!(
+        "{}  {}",
+        if app.now.playing { "⏸" } else { "⏵" },
+        format_ms(position)
+    );
+    put(buf, rect.x + 2, y, &left, color(pal.text), None);
+    let right = format_ms(duration);
+    let right_w = right.chars().count() as u16;
+    put(buf, rect.x + rect.width - right_w - 2, y, &right, color(pal.dim), None);
+    let bar_x = rect.x + left.chars().count() as u16 + 4;
+    let bar_w = rect
+        .width
+        .saturating_sub(left.chars().count() as u16 + right_w + 8);
+    if bar_w > 8 {
+        draw_progress_bar(
+            app,
+            buf,
+            Rect::new(bar_x, y, bar_w, 1),
+            pal,
+            progress,
+            0.0,
+            false,
+        );
+    }
+    app.hit.add(
+        Rect::new(rect.x, y, 5, 1),
+        Action::PlayPause,
+    );
+}

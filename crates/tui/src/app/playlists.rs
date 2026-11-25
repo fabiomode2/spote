@@ -39,15 +39,38 @@ impl App {
                 KeyCode::Char('c') | KeyCode::Backspace => self.clear_trim(),
                 _ => {}
             },
-            Overlay::Help | Overlay::Effects => match key.code {
+            Overlay::Palette => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.palette_cancel(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.palette_selected = self.palette_selected.saturating_sub(1);
+                    self.palette_preview();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.palette_selected =
+                        (self.palette_selected + 1).min(PaletteVariant::ALL.len() - 1);
+                    self.palette_preview();
+                }
+                KeyCode::Enter => self.palette_apply(false),
+                KeyCode::Char('s') | KeyCode::Char('S') => self.palette_apply(true),
+                _ => {}
+            },
+            Overlay::Help => match key.code {
                 KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
                     self.overlay = Overlay::None;
                 }
-                KeyCode::Char(c @ '1'..='9') if self.overlay == Overlay::Effects => {
-                    self.viz.toggle_layer(c as usize - '1' as usize);
-                }
-                KeyCode::Char('e') if self.overlay == Overlay::Effects => {
+                _ => {}
+            },
+            Overlay::Effects => match key.code {
+                KeyCode::Esc | KeyCode::Char('e') | KeyCode::Char('q') => {
                     self.overlay = Overlay::None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.select_effect(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.select_effect(1),
+                KeyCode::Enter => self.select_effect(0),
+                KeyCode::Char(' ') => self.toggle_selected_effect(),
+                KeyCode::Char('v') => self.cycle_viz(1),
+                KeyCode::Char(c @ '1'..='9') => {
+                    self.viz.toggle_layer(c as usize - '1' as usize);
                 }
                 _ => {}
             },

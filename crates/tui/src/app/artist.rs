@@ -5,10 +5,12 @@ use super::*;
 impl App {
     /// Abre el perfil por nombre. Lo usan los nombres clicables de toda la UI.
     pub(super) fn open_artist_by_name(&mut self, name: &str) {
-        let name = name.split(',').next().unwrap_or(name).trim().to_string();
+        let name = name.trim().to_string();
         if name.is_empty() {
             return;
         }
+        let previous = self.snapshot();
+        let title = name.clone();
         self.artist = None;
         self.artist_art = None;
         self.artist_selected = 0;
@@ -19,10 +21,13 @@ impl App {
         self.artist_album_scroll = 0;
         self.overlay = Overlay::None;
         self.meta_worker.artist(name);
+        self.push_doc_page(DocKind::Artist, title, previous);
     }
 
     /// Abre un artista de la búsqueda por su id de proveedor.
     pub(super) fn open_artist_summary(&mut self, artist: &spote_core::spotify_api::ArtistSummary) {
+        let previous = self.snapshot();
+        let title = artist.name.clone();
         self.artist = None;
         self.artist_art = None;
         self.artist_selected = 0;
@@ -37,6 +42,7 @@ impl App {
             artist.id.clone(),
             artist.name.clone(),
         );
+        self.push_doc_page(DocKind::Artist, title, previous);
     }
 
     /// Abre el perfil del artista de la pista sonando o de la seleccionada.
@@ -57,10 +63,10 @@ impl App {
                     }
                     None => None,
                 },
-                Tab::Library => self.selected_row().map(|row| row.track.artist.clone()),
+                Tab::Library => self.selected_row().map(|row| crate::app::credits::row_primary_artist(&row)),
                 Tab::Albums => self
                     .selected_row()
-                    .map(|row| row.track.artist.clone())
+                    .map(|row| crate::app::credits::row_primary_artist(&row))
                     .or_else(|| {
                         self.album_open
                             .as_ref()
@@ -76,18 +82,19 @@ impl App {
                     .as_ref()
                     .and_then(|state| state.track.as_ref())
                     .map(|track| track.artist.clone())
-                    .or_else(|| self.now.track.as_ref().map(|track| track.artist.clone())),
-                _ => self.now.track.as_ref().map(|track| track.artist.clone()),
+                    .or_else(|| Some(self.now_primary_artist())),
+                _ => Some(self.now_primary_artist()),
             }
-            .or_else(|| self.now.track.as_ref().map(|track| track.artist.clone()))
+            .or_else(|| Some(self.now_primary_artist()))
             .unwrap_or_default()
         };
-        // Varios artistas separados por coma: el perfil es el primero.
-        let name = name.split(',').next().unwrap_or(&name).trim().to_string();
+        let name = name.trim().to_string();
         if name.is_empty() {
             self.toast("no hay artista seleccionado", ToastKind::Warn);
             return;
         }
+        let previous = self.snapshot();
+        let title = name.clone();
         self.artist = None;
         self.artist_art = None;
         self.artist_selected = 0;
@@ -98,6 +105,7 @@ impl App {
         self.artist_album_scroll = 0;
         self.overlay = Overlay::None;
         self.meta_worker.artist(name);
+        self.push_doc_page(DocKind::Artist, title, previous);
     }
 
     /// Enruta el teclado al panel de detalle activo. Devuelve `false` para
@@ -165,6 +173,11 @@ impl App {
 
     /// Cierra el panel persistente de detalle sin tocar la pestaña actual.
     pub fn close_detail(&mut self) {
+        // Si la ficha vive en una pestaña de documento, “volver” es un pop de
+        // historial. Solo se limpia a mano cuando no hay pila (flujo antiguo).
+        if self.nav_back() {
+            return;
+        }
         self.detail = None;
         self.overlay = Overlay::None;
         self.detail_albums_area = Rect::default();

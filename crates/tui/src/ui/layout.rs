@@ -193,6 +193,12 @@ impl Layout {
         } else {
             Rect::default()
         };
+        // La ficha de artista/álbum usa toda la altura disponible: en el
+        // bloque centrado solo cabían dos pistas populares.
+        if detail_open && side_w > 0 {
+            out.side.y = main.y;
+            out.side.height = main.height;
+        }
         // Si nav y lateral comparten lado, se apilan en vertical.
         if same_side {
             let nav_h = (block.height as f32 * 0.42) as u16;

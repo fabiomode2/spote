@@ -18,7 +18,11 @@ MPRIS, SQLite) vive en un worker.
 
 | módulo | contiene |
 | --- | --- |
-| `app/mod.rs` | `App`, enums (`Tab`, `Action`, `Overlay`...), arranque, `tick`, reproducción, cola, búsqueda, salas, arte. |
+| `app/mod.rs` | `App`, enums (`Tab`, `Action`, `Overlay`, `DocKind`...), arranque, `tick`, reproducción, cola, búsqueda, salas, arte. |
+| `app/nav.rs` | Pestañas de documentos, pila de historial, snapshots de vista y cambio de sección. |
+| `app/credits.rs` | Créditos multi-artista y refresco de la pista actual. |
+| `app/effects.rs` | Rotación configurable de efectos. |
+| `app/palette.rs` | Menú de paletas y override por álbum. |
 | `app/input.rs` | teclado (`on_key`). |
 | `app/actions.rs` | ratón y `perform(Action)` (lo que dispara un clic o una tecla ya traducida). |
 | `app/settings.rs` | `SettingRow`, valores, `adjust_setting`/`toggle_setting`, guardado. |
@@ -31,9 +35,13 @@ MPRIS, SQLite) vive en un worker.
 | `app/layout_editor.rs` | editor de diseño en caliente (`E`): paneles, docks y tamaños. |
 | `app/keymap.rs` | fuente única de leyendas y ayuda; la barra inferior no miente. |
 
+Las pistas guardan `artists_json` + `artists_version` + `album_artist`; el
+backfill rellena la lista sin tocar claves ni FTS. La navegación de documentos
+vive en `app/nav.rs` y el dibujo de fondo en `ui/mosaic.rs`.
+
 Cada frame: `tick()` → sondea workers (`poll_stream`, `poll_downloads`,
-`poll_art`, `poll_lyrics`, `poll_spotify`, `poll_social`, `poll_spotify_jobs`)
-→ `ui::draw`
+`poll_art`, `poll_lyrics`, `poll_spotify`, `poll_social`, `poll_spotify_jobs`,
+`poll_artist_backfill`) → `ui::draw`
 lee el estado → el usuario pulsa algo → `on_key`/`on_mouse` → `perform`.
 
 Los workers (`fetch.rs`, `spotify_jobs.rs`, `Downloader`, `stream.rs`) hablan por canales
@@ -44,14 +52,16 @@ Los workers (`fetch.rs`, `spotify_jobs.rs`, `Downloader`, `stream.rs`) hablan po
 | módulo | contiene |
 | --- | --- |
 | `ui/layout.rs` | layout declarativo: `LayoutCfg` → rectángulos, docks, centrado vertical, asas de arrastre y proporción de portada. |
-| `ui/mod.rs` | `draw`, fondo ambiental (void/neural/glitch/cover/lyrics), primitivas (`put`, `fill`, `panel`, `text_at`, `centered`, `truncate_chars`). |
+| `ui/mod.rs` | `draw`, compositor de fondo por capas, paneles translúcidos, rim reactivo, primitivas (`put`, `fill`, `panel`, `text_at`, `centered`, `truncate_chars`). |
+| `ui/mosaic.rs` | Mosaico de portada, movimiento auto/diagonal, mitad de celda con fg/bg y caché de textura. |
 | `ui/albums.rs` | tarjetas de álbum (1-2 columnas) y detalle con portada. |
-| `hires.rs` | portada PNG real en Kitty (protocolo gráfico, solo cuando cambia). |
+| `hires.rs` | portada y foto de artista PNG en Kitty, wallpaper, reubicación con `a=p`, hash de contenido. |
 | `ui/art.rs` | portada grande, marco, miniaturas y badges. |
 | `ui/now.rs` | vista «ahora»: cabecera, letra palabra a palabra, clic para seek y tamaño de letra. |
 | `ui/lists.rs` | búsqueda mixta (artistas/álbumes/pistas), biblioteca, tarjetas y salas. |
 | `ui/side.rs` | cola, amigos/feeling de la canción y visualizador. |
-| `ui/settings.rs` | pestaña de ajustes. |
+| `ui/settings.rs` | pestaña de ajustes agrupada. |
+| `artist_backfill.rs` | Worker de fondo que completa artistas vía Spotify/Deezer. |
 | `ui/chrome.rs` | barra superior, navegación, transporte, barra de progreso y leyenda. |
 | `ui/overlays.rs` | ayuda, editor de efectos y formularios modales. |
 

@@ -7,10 +7,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
-use spote_core::artwork::{ArtMode, CoverArt, Palette, Rgb};
+use spote_core::artwork::{ArtMode, CoverArt, Palette, PaletteVariant, Rgb};
 use spote_core::util::{format_ms, luma, mix, mix_oklab, scale};
 
-use crate::app::{Action, App, Overlay, Pane, Tab, ThumbMode, ToastKind};
+use crate::app::{Action, App, LibFilter, Overlay, Pane, Tab, ThumbMode, ToastKind};
 use crate::theme::ease_out_cubic;
 use crate::viz::Blend;
 
@@ -19,8 +19,10 @@ mod art;
 mod audio;
 mod chrome;
 mod detail;
+use detail::*;
 mod layout;
 mod lists;
+mod mosaic;
 mod now;
 mod overlays;
 mod settings;
@@ -43,6 +45,11 @@ const PAUSE: &str = "⏸";
 
 pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     app.art_visible_rect = None;
+    app.wallpaper_rect = if app.cfg.ui.fx.backdrop == "wallpaper" && !app.zen {
+        Some(area)
+    } else {
+        None
+    };
     app.hi_thumbs.clear();
     if app.overlay != app.overlay_seen {
         app.overlay_seen = app.overlay.clone();
@@ -66,13 +73,23 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             Tab::Audio | Tab::Albums | Tab::Settings => 0,
         }
     };
+    let detail_expand = app.detail.is_some()
+        && match app.cfg.ui.detail_mode.as_str() {
+            "expand" => true,
+            "auto" => area.width < 150,
+            _ => false,
+        };
+    let mut layout_cfg = app.cfg.ui.layout.clone();
+    if app.cfg.ui.nav_position == "top" {
+        layout_cfg.nav = false;
+    }
     let layout = Layout::compute(
         area,
-        &app.cfg.ui.layout,
+        &layout_cfg,
         app.show_viz,
         app.fullscreen,
         art_ratio,
-        app.detail.is_some(),
+        app.detail.is_some() && !detail_expand,
     );
     app.last_main = layout.main;
     app.hit.clear();
@@ -84,19 +101,27 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         && app.show_viz
         && layout.main.height > 2;
 
+    // Con mosaico, el fondo base no debe latir: si cambia cada frame, el
+    // mosaico mezcla contra colores nuevos y la terminal acaba repintando
+    // toda la pantalla a 60 Hz aunque el mosaico avance a 30.
+    let reactive_background = app.cfg.ui.fx.backdrop != "mosaic";
     background(
         buf,
         area,
         &pal,
         app.intro,
-        app.audio.bass,
-        app.audio.kick_pulse,
-        app.song_intensity,
+        if reactive_background { app.audio.bass } else { 0.0 },
+        if reactive_background { app.audio.kick_pulse } else { 0.0 },
+        if reactive_background { app.song_intensity } else { 0.0 },
     );
     // Mosaico de portada: va detrás de absolutamente todo. Se pinta antes que
     // los paneles para que estos solo lo dejen entrever con su transparencia.
-    if app.cfg.ui.fx.ambient == "mosaic" {
-        draw_mosaic_cover(app, buf, area, &pal);
+    let black_fullscreen = app.fullscreen == crate::app::Fullscreen::Viz
+        && app.cfg.ui.fx.fullscreen_backdrop == "black";
+    if !black_fullscreen
+        && (app.cfg.ui.fx.backdrop == "mosaic" || app.cfg.ui.fx.ambient == "mosaic")
+    {
+        mosaic::draw(app, buf, area, &pal);
     }
     // Fondo ambiental: un efecto ruidoso (void/neural/glitch/aurora) a baja
     // opacidad detrás de los paneles. Los paneles son translúcidos, así que se
@@ -124,24 +149,56 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     }
     if viz_fullscreen {
         let hz = app.full_effects_hz();
+        // En zen el efecto se ancla abajo: el fondo/mosaico se ve arriba y la
+        // animación empieza más abajo, como una banda de escenario.
+        let zen_viz = if zen && app.fullscreen != crate::app::Fullscreen::Viz {
+            let pct = app.cfg.ui.zen_viz_pct.clamp(30, 100) as u32;
+            let h = (area.height as u32 * pct / 100) as u16;
+            Some(Rect::new(
+                area.x,
+                area.y + area.height.saturating_sub(h),
+                area.width,
+                h.max(6),
+            ))
+        } else {
+            None
+        };
+        let viz_rect = zen_viz.unwrap_or(layout.full);
         app.pump_viz(
-            layout.full.width.max(20),
-            layout.full.height.max(6),
+            viz_rect.width.max(20),
+            viz_rect.height.max(6),
             hz,
             &pal,
         );
-        // En zen (y en el visualizador a pantalla completa) el efecto es el
-        // protagonista: más opaco y sin paneles.
         if zen || app.fullscreen == crate::app::Fullscreen::Viz {
-            // Solo glifos sobre el fondo oscuro: antes el `bg_amount` alto
-            // lavaba la pantalla con un velo blanquecino en presets claros.
-            blit_viz(app, buf, layout.full, 0, 0.95, 0.0, VIZ_SCALE);
+            blit_viz(app, buf, viz_rect, 0, 0.95, 0.0, VIZ_SCALE);
         } else {
-            blit_viz(app, buf, layout.full, 0, 0.32, 0.10, VIZ_SCALE);
+            blit_viz(app, buf, viz_rect, 0, 0.32, 0.10, VIZ_SCALE);
         }
+    }
+    if app.zen {
+        // Zen de verdad: visual a pantalla completa y una sola línea de
+        // progreso. Sin transporte gigante, hint ni barras que tapen el arte.
+        chrome::draw_zen_bar(app, buf, &layout, &pal);
+        draw_overlay(app, buf, &layout, &pal);
+        seal_frame(buf, &pal);
+        return;
     }
     if layout.main.width < 20 {
         draw_too_small(buf, area, &pal);
+        return;
+    }
+
+    // Portada a pantalla completa real: sin top, nav, cola ni nowbar.
+    if app.fullscreen == crate::app::Fullscreen::Art {
+        draw_now(app, buf, &layout, &pal);
+        if layout.transport.height > 0 {
+            draw_transport(app, buf, &layout, &pal);
+        }
+        if layout.hint.height > 0 {
+            draw_hint(app, buf, &layout, &pal);
+        }
+        draw_overlay(app, buf, &layout, &pal);
         return;
     }
 
@@ -165,17 +222,32 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if !zen && layout.nav.width > 0 {
         draw_nav(app, buf, &layout, &pal);
     }
-    match app.tab {
-        Tab::Now => draw_now(app, buf, &layout, &pal),
-        Tab::Search => draw_search(app, buf, &layout, &pal),
-        Tab::Library => draw_library(app, buf, &layout, &pal),
-        Tab::Audio => draw_audio_tab(app, buf, &layout, &pal),
-        Tab::Albums => draw_albums(app, buf, &layout, &pal),
-        Tab::Room => draw_room(app, buf, &layout, &pal),
-        Tab::Settings => draw_settings(app, buf, &layout, &pal),
-    }
-    if !zen && layout.side.width > 0 {
-        draw_side(app, buf, &layout, &pal);
+    if detail_expand {
+        // El detalle manda y ocupa el ancho del contenido, respetando el
+        // lateral de secciones si está visible.
+        let mut rect = layout.main;
+        if layout.nav.width > 0 {
+            if app.cfg.ui.layout.nav_left() {
+                rect.x += layout.nav.width;
+                rect.width = rect.width.saturating_sub(layout.nav.width);
+            } else {
+                rect.width = rect.width.saturating_sub(layout.nav.width);
+            }
+        }
+        draw_detail(app, buf, rect, &pal);
+    } else {
+        match app.tab {
+            Tab::Now => draw_now(app, buf, &layout, &pal),
+            Tab::Search => draw_search(app, buf, &layout, &pal),
+            Tab::Library => draw_library(app, buf, &layout, &pal),
+            Tab::Audio => draw_audio_tab(app, buf, &layout, &pal),
+            Tab::Albums => draw_albums(app, buf, &layout, &pal),
+            Tab::Room => draw_room(app, buf, &layout, &pal),
+            Tab::Settings => draw_settings(app, buf, &layout, &pal),
+        }
+        if !zen && layout.side.width > 0 {
+            draw_side(app, buf, &layout, &pal);
+        }
     }
     if layout.viz.height > 0 {
         draw_viz(app, buf, &layout, &pal);
@@ -189,12 +261,17 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     if layout.hint.height > 0 {
         draw_hint(app, buf, &layout, &pal);
     }
+
     // Portada/letra ambiental: se mezcla solo el fondo de las celdas ya
     // pintadas, preservando el texto. Así se ve a través de los paneles sin
     // taparlos ni ensuciar la lectura.
     if fx_opacity > 0.001 {
         match app.cfg.ui.fx.ambient.as_str() {
-            "cover" => draw_ambient_cover_tint(app, buf, area, fx_opacity),
+            // Con el mosaico activo, `cover` sería una segunda capa de la
+            // misma portada: se ignora. `lyrics` sigue siendo útil encima.
+            "cover" if app.cfg.ui.fx.backdrop != "mosaic" => {
+                draw_ambient_cover_tint(app, buf, area, fx_opacity)
+            }
             "lyrics" => draw_ambient_lyrics_tint(app, buf, area, fx_opacity),
             _ => {}
         }
@@ -232,9 +309,6 @@ fn seal_frame(buf: &mut Buffer, pal: &Palette) {
             }
             if matches!(cell.fg, Color::Reset) {
                 cell.set_fg(bg);
-            }
-            if y == area.y || y == area.y + area.height - 1 || x == area.x || x == area.x + area.width - 1 {
-                cell.diff_option = ratatui::buffer::CellDiffOption::AlwaysUpdate;
             }
         }
     }
@@ -465,6 +539,14 @@ fn put_bg(buf: &mut Buffer, x: u16, y: u16, bg: Rgb) {
     }
 }
 
+fn chrome_alpha(app: &App) -> f32 {
+    app.cfg.ui.chrome_opacity.clamp(0, 100) as f32 / 100.0
+}
+
+fn bottom_alpha(app: &App) -> f32 {
+    app.cfg.ui.bottom_opacity.clamp(0, 100) as f32 / 100.0
+}
+
 fn fill(buf: &mut Buffer, rect: Rect, bg: Rgb) {
     let area = *buf.area();
     let clip = rect.intersection(area);
@@ -575,124 +657,6 @@ fn link_at(
     width
 }
 
-/// Portada en mosaico detrás de toda la interfaz. Cada celda muestrea la
-/// portada repetida; la opacidad, el movimiento y el salto al bombo salen de
-/// `[ui.fx]`. Se pinta antes de los paneles, así que cualquier texto sigue
-/// encima y legible.
-fn draw_mosaic_cover(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
-    let opacity = (app.cfg.ui.fx.ambient_opacity.clamp(5, 50) as f32 / 100.0).clamp(0.05, 0.50);
-    if app.art_size_hint.0 < 4 || app.art_size_hint.1 < 2 {
-        // En pestañas sin portada grande (biblioteca, ajustes) no hay quien
-        // fije el tamaño; el mosaico pide su propia miniatura.
-        app.set_art_size_hint(48, 24);
-    }
-    app.ensure_art();
-    let Some(art) = app.art.as_ref().or(app.ambient_art.as_ref()) else {
-        return;
-    };
-    if art.is_empty() {
-        return;
-    }
-    let area_buf = *buf.area();
-    let clip = area.intersection(area_buf);
-    if clip.width == 0 || clip.height == 0 {
-        return;
-    }
-    let speed = app.cfg.ui.fx.mosaic_speed.clamp(1, 10) as f32 * 0.11;
-    // El mosaico mueve todas las celdas de la pantalla. A 60 fps eso es un
-    // repintado completo constante y algunos terminales parpadean; se avanza
-    // en pasos de ~15 fps, que sigue viéndose fluido y reduce muchísimo el
-    // tráfico por frame.
-    let step = 1.0 / 15.0;
-    let t = ((app.mosaic_time / step).floor() * step) * speed;
-    let motion = app.cfg.ui.fx.mosaic_motion.as_str();
-    let beat: f32 = if app.cfg.ui.fx.mosaic_beat {
-        // Salto binario al bombo: mantenerlo estable entre frames evita que
-        // todo el fondo cambie de color cada 16 ms.
-        if app.audio.kick_pulse > 0.65 {
-            1.0
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-    // Al compás el mosaico da un salto entero de celda; entre golpes sigue
-    // desplazándose poco a poco.
-    let jump_x = (beat * 2.5).round() as i32;
-    let jump_y = (beat * 1.4).round() as i32;
-    let tile_h = (clip.height as f32 / 4.5).clamp(5.0, 12.0);
-    let tile_w = tile_h * 2.0;
-    let cx = clip.x as f32 + clip.width as f32 / 2.0;
-    let cy = clip.y as f32 + clip.height as f32 / 2.0;
-    let angle = if motion == "rotate" {
-        0.025 + t * 0.055
-    } else {
-        0.0
-    };
-    let (sin, cos) = angle.sin_cos();
-    let width = area_buf.width as usize;
-    let alpha = (opacity * (1.0 + beat * 0.55)).min(0.58);
-
-    for y in clip.y..clip.y + clip.height {
-        let start = (y - area_buf.y) as usize * width + (clip.x - area_buf.x) as usize;
-        for (offset, cell) in buf.content[start..start + clip.width as usize]
-            .iter_mut()
-            .enumerate()
-        {
-            let x = clip.x + offset as u16;
-            let mut gx = x as f32;
-            let mut gy = y as f32;
-            if angle != 0.0 {
-                let dx = gx - cx;
-                let dy = gy - cy;
-                gx = cx + dx * cos - dy * sin;
-                gy = cy + dx * sin + dy * cos;
-            }
-            let mut u = gx / tile_w;
-            let mut v = gy / tile_h;
-            match motion {
-                "rows" => {
-                    let row = (gy / tile_h).floor() as i32;
-                    u += t * (0.45 + (row.rem_euclid(3) as f32) * 0.35)
-                        * if row.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
-                    v += t * 0.08;
-                }
-                "columns" => {
-                    let column = (gx / tile_w).floor() as i32;
-                    v += t * (0.45 + (column.rem_euclid(3) as f32) * 0.30)
-                        * if column.rem_euclid(2) == 0 { 1.0 } else { -1.0 };
-                    u += t * 0.06;
-                }
-                "rotate" => {
-                    u += t * 0.10;
-                    v += t * 0.06;
-                }
-                _ => {
-                    u += t * 0.34;
-                    v += t * 0.13;
-                }
-            }
-            u += jump_x as f32 / tile_w;
-            v += jump_y as f32 / tile_h;
-            let sx = ((u.rem_euclid(1.0)) * art.w as f32) as u16;
-            let sy = ((v.rem_euclid(1.0)) * art.h as f32) as u16;
-            let Some(src) = art.cell(sx.min(art.w.saturating_sub(1)), sy.min(art.h.saturating_sub(1))) else {
-                continue;
-            };
-            let under = match cell.bg {
-                Color::Rgb(r, g, b) => (r, g, b),
-                _ => pal.bg_deep,
-            };
-            let toned = mix_oklab(src.fg, pal.primary, 0.18);
-            let mixed = mix(under, toned, alpha);
-            cell.set_symbol(" ");
-            cell.set_fg(color(mixed));
-            cell.set_bg(color(mixed));
-        }
-    }
-}
-
 fn background(
     buf: &mut Buffer,
     area: Rect,
@@ -741,10 +705,6 @@ fn draw_too_small(buf: &mut Buffer, area: Rect, pal: &Palette) {
 /// Panel con borde fino y relleno tintado. `active` enciende el borde.
 /// Los paneles se vuelven ligeramente translúcidos cuando hay visualizador de
 /// fondo, para que los efectos se lean "a través" de la UI.
-fn soft_background(_pal: &Palette) -> bool {
-    true
-}
-
 /// Tinta el panel con el canvas ambiental. Mantiene el glifo (texto/borde) y
 /// solo mezcla el fondo, así el efecto se ve dentro del panel sin ensuciar la
 /// lectura.
@@ -822,16 +782,12 @@ fn panel(
         None
     };
     if opaque {
-        let under = app
-            .map(|app| app.cfg.ui.fx.ambient.as_str() == "mosaic")
-            .unwrap_or(false);
-        fill_soft(
-            buf,
-            rect,
-            fill_color,
-            if under { 0.86 } else if soft_background(pal) { 0.92 } else { 1.0 },
-            pal.bg,
-        );
+        // La transparencia real la manda `panel_opacity`; el `alpha` de
+        // entrada solo elige el color del panel.
+        let opacity = app
+            .map(|app| app.cfg.ui.panel_opacity.clamp(55, 100) as f32 / 100.0)
+            .unwrap_or(1.0);
+        fill_soft(buf, rect, fill_color, opacity, pal.bg);
         if let Some(app) = app {
             let mode = app.cfg.ui.fx.ambient.as_str();
             if !matches!(mode, "off" | "cover" | "lyrics" | "mosaic") {
@@ -885,16 +841,80 @@ fn panel(
     };
     let (x0, y0) = (rect.x, rect.y);
     let (x1, y1) = (rect.x + rect.width - 1, rect.y + rect.height - 1);
-    for x in x0 + 1..x1 {
-        put(buf, x, y0, "─", color(border), bg);
-        put(buf, x, y1, "─", color(border), bg);
-    }
-    for y in y0 + 1..y1 {
-        put(buf, x0, y, "│", color(border), bg);
-        put(buf, x1, y, "│", color(border), bg);
-    }
-    for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")] {
-        put(buf, x, y, glyph, color(border), bg);
+    let border_mode = app
+        .map(|app| app.cfg.ui.panel_border.as_str())
+        .unwrap_or("line");
+    let border_opacity = app
+        .map(|app| app.cfg.ui.border_opacity.clamp(0, 100) as f32 / 100.0)
+        .unwrap_or(1.0);
+    match border_mode {
+        "none" => {}
+        "rim" | "color" => {
+            // Banda de píxeles de 1 celda. Los colores salen de la paleta de
+            // la portada y recorren el perímetro; la canción modula brillo y
+            // fase. No se mueve la geometría, solo el color/patrón.
+            let rim_strength = app
+                .map(|app| app.cfg.ui.rim_intensity.clamp(0, 100) as f32 / 100.0)
+                .unwrap_or(0.6);
+            let reactive = app.is_some_and(|app| app.cfg.ui.rim_reactive);
+            let time = app.map(|app| app.mosaic_time).unwrap_or(0.0);
+            let amount = if reactive {
+                (0.35 + hit * 0.65).clamp(0.0, 1.0)
+            } else {
+                0.55
+            };
+            let perimeter = 2 * (rect.width as usize + rect.height as usize).max(1);
+            let mut index = 0usize;
+            let mut paint = |x: u16, y: u16| {
+                let t = if perimeter > 1 {
+                    index as f32 / perimeter as f32
+                } else {
+                    0.0
+                };
+                let wave = (t * std::f32::consts::TAU * 2.0 + time * 1.7).sin() * 0.5 + 0.5;
+                let base = app
+                    .and_then(|app| art::cover_edge_color(app, t))
+                    .unwrap_or_else(|| mix(pal.primary, pal.secondary, wave));
+                let lit = mix(
+                    pal.bg_deep,
+                    base,
+                    (0.65 + amount * 0.35) * rim_strength.clamp(0.15, 1.0),
+                );
+                let lit = mix(fill_color, lit, border_opacity);
+                put(buf, x, y, "█", color(lit), bg);
+                index += 1;
+            };
+            for x in x0..=x1 {
+                paint(x, y0);
+            }
+            for y in (y0 + 1)..=y1 {
+                paint(x1, y);
+            }
+            if y1 > y0 {
+                for x in (x0..x1).rev() {
+                    paint(x, y1);
+                }
+            }
+            if x1 > x0 {
+                for y in ((y0 + 1)..y1).rev() {
+                    paint(x0, y);
+                }
+            }
+        }
+        _ => {
+            let fg = color(mix(fill_color, border, border_opacity));
+            for x in x0 + 1..x1 {
+                put(buf, x, y0, "─", fg, bg);
+                put(buf, x, y1, "─", fg, bg);
+            }
+            for y in y0 + 1..y1 {
+                put(buf, x0, y, "│", fg, bg);
+                put(buf, x1, y, "│", fg, bg);
+            }
+            for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")] {
+                put(buf, x, y, glyph, fg, bg);
+            }
+        }
     }
     if let Some(title) = title {
         if rect.width > 8 {
@@ -904,34 +924,12 @@ fn panel(
             let fg = if active { pal.text } else { pal.muted };
             if opaque {
                 put(buf, x0 + 2, y0, " ", color(fill_color), bg);
+                put(buf, x0 + 3, y0, &label, color(fg), Some(color(fill_color)));
+            } else {
+                put(buf, x0 + 3, y0, &label, color(fg), bg);
             }
-            put(buf, x0 + 3, y0, &label, color(fg), bg);
         }
     }
-}
-
-fn chip(buf: &mut Buffer, rect: Rect, pal: &Palette, active: bool, hover: bool) {
-    if rect.width < 2 {
-        return;
-    }
-    let bg = if active {
-        pal.primary
-    } else if hover {
-        pal.surface_alt
-    } else {
-        pal.surface
-    };
-    let fg = if active { pal.bg_deep } else { pal.text };
-    fill(buf, rect, bg);
-    let s = Style::new()
-        .fg(color(fg))
-        .bg(color(bg))
-        .add_modifier(if active {
-            Modifier::BOLD
-        } else {
-            Modifier::empty()
-        });
-    let _ = s;
 }
 
 fn keycap(buf: &mut Buffer, rect: Rect, pal: &Palette, label: &str) {

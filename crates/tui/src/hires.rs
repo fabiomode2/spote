@@ -23,16 +23,29 @@ struct ThumbImage {
 #[derive(Debug, Default)]
 pub struct HiResState {
     image_id: u32,
+    /// Secuencia de ids de la portada; no se reutiliza al borrar la imagen.
+    image_seq: u32,
     sent_key: String,
     sent_rect: Option<Rect>,
+    /// Hash del PNG ya transmitido: si cambia el contenido con la misma clave
+    /// y el mismo hueco hay que reenviarlo igualmente.
+    sent_hash: u64,
+    /// Wallpaper de fondo: imagen independiente, colocada con z=-1.
+    wallpaper_id: u32,
+    wallpaper_key: String,
+    wallpaper_rect: Option<Rect>,
+    wallpaper_hash: u64,
+    wallpaper_seq: u32,
     /// Una imagen por miniatura visible. Se indexa por la clave de
     /// colocación (pista + posición) para que la misma portada pueda salir
     /// dos veces en pantalla sin compartir id.
     thumbs: std::collections::HashMap<String, ThumbImage>,
     thumb_seq: u32,
-    /// Fingerprint de cada PNG de miniatura, calculado una vez. Recalcularlo
-    /// en cada frame era recorrer cientos de bytes por miniatura a 60 Hz.
-    thumb_prints: std::collections::HashMap<(String, usize), u64>,
+    /// Hash de contenido de cada PNG de miniatura, calculado una vez. La
+    /// entrada guarda también el tamaño: si cambia, se recalcula. Antes la
+    /// clave era `(String, usize)` y se asignaba una cadena nueva en cada
+    /// frame.
+    thumb_prints: std::collections::HashMap<String, (usize, u64)>,
 }
 
 impl HiResState {
@@ -50,6 +63,14 @@ impl HiResState {
         self.thumb_prints.clear();
         self.sent_key.clear();
         self.sent_rect = None;
+        self.sent_hash = 0;
+        if self.wallpaper_id != 0 {
+            let _ = delete(out, self.wallpaper_id);
+            self.wallpaper_id = 0;
+        }
+        self.wallpaper_key.clear();
+        self.wallpaper_rect = None;
+        self.wallpaper_hash = 0;
         let _ = out.flush();
     }
 }
@@ -62,10 +83,32 @@ fn kitty_enabled() -> bool {
         if std::env::var_os("SPOTE_NO_KITTY").is_some() {
             return false;
         }
-        std::env::var_os("KITTY_WINDOW_ID").is_some()
-            || std::env::var("TERM")
-                .map(|term| term.contains("kitty"))
-                .unwrap_or(false)
+        match std::env::var("SPOTE_IMAGES").as_deref() {
+            Ok("off") | Ok("none") => return false,
+            Ok("kitty") | Ok("on") => return true,
+            _ => {}
+        }
+        // Sin passthrough de tmux, mandar Kitty graphics dentro de una sesión
+        // deja basura. Se usa el fallback half-block salvo override explícito.
+        if std::env::var_os("TMUX").is_some() {
+            return false;
+        }
+        // Kitty graphics lo hablan Kitty, WezTerm, Ghostty y Konsole reciente.
+        // iTerm2 usa otro protocolo y Alacritty/foot/xterm no lo soportan.
+        if std::env::var_os("KITTY_WINDOW_ID").is_some()
+            || std::env::var_os("WEZTERM_PANE").is_some()
+            || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
+            || std::env::var_os("KONSOLE_VERSION").is_some()
+        {
+            return true;
+        }
+        match std::env::var("TERM_PROGRAM").as_deref() {
+            Ok("WezTerm") | Ok("ghostty") | Ok("konsole") => return true,
+            _ => {}
+        }
+        std::env::var("TERM")
+            .map(|term| term.contains("kitty") || term.contains("wezterm"))
+            .unwrap_or(false)
     })
 }
 
@@ -106,6 +149,7 @@ fn transmit(
     png: &[u8],
     size: (u32, u32),
     rect: Rect,
+    z: i32,
 ) -> std::io::Result<()> {
     let encoded = base64(png);
     let cols = rect.width.max(1);
@@ -119,7 +163,7 @@ fn transmit(
         if first {
             write!(
                 out,
-                "\x1b_Ga=T,f=100,i={id},s={},v={},c={cols},r={rows},C=1,z=1,q=2,m={marker};",
+                "\x1b_Ga=T,f=100,i={id},p=1,s={},v={},c={cols},r={rows},C=1,z={z},q=2,m={marker};",
                 size.0, size.1
             )?;
             first = false;
@@ -130,6 +174,20 @@ fn transmit(
         write!(out, "\x1b\\")?;
     }
     Ok(())
+}
+
+/// Coloca una imagen ya transmitida en otro hueco sin reenviar el PNG.
+/// El id de colocación `p=1` hace que el terminal mueva la colocación
+/// existente en vez de crear otra: sin él, cada recolocación dejaba un
+/// fantasma en la posición anterior.
+fn place(out: &mut impl Write, id: u32, rect: Rect, z: i32) -> std::io::Result<()> {
+    let cols = rect.width.max(1);
+    let rows = rect.height.max(1);
+    write!(out, "\x1b[{};{}H", rect.y + 1, rect.x + 1)?;
+    write!(
+        out,
+        "\x1b_Ga=p,i={id},p=1,c={cols},r={rows},C=1,z={z},q=2;\x1b\\"
+    )
 }
 
 /// Se llama después de `terminal.draw`: si cambió la portada o el hueco, borra
@@ -158,37 +216,97 @@ pub fn render(out: &mut impl Write, app: &App, state: &mut HiResState) {
             Some((rect, png, size))
         });
 
-    let same = match (&wanted, state.sent_rect) {
-        (Some((rect, _, _)), Some(last)) => {
-            *rect == last && state.sent_key == app.art_png_key && state.image_id != 0
-        }
-        (None, None) => true,
-        _ => false,
-    };
-    if !same {
-        if state.image_id != 0 {
-            let _ = delete(out, state.image_id);
-            state.image_id = 0;
+    if let Some((rect, png, size)) = wanted {
+        let hash = content_hash(png);
+        let same_image =
+            state.image_id != 0 && state.sent_key == app.art_png_key && state.sent_hash == hash;
+        if same_image {
+            // La misma imagen sigue en la terminal (el terminal no olvida los
+            // ids al redibujar texto). Si solo cambió el hueco, recolocarla es
+            // mucho más barato que reenviarla.
+            if state.sent_rect != Some(rect) && place(out, state.image_id, rect, 1).is_ok() {
+                state.sent_rect = Some(rect);
+            }
+        } else {
+            // Clave nueva, contenido nuevo o imagen perdida: se borra la vieja
+            // y se transmite la nueva.
+            if state.image_id != 0 {
+                let _ = delete(out, state.image_id);
+                state.image_id = 0;
+            }
             state.sent_rect = None;
             state.sent_key.clear();
-        }
-        if let Some((rect, png, size)) = wanted {
-            state.image_id = state.image_id.wrapping_add(1).max(1);
-            // IDs únicos por proceso: el timestamp evita reutilizar uno de otra sesión.
-            let id = std::process::id().wrapping_shl(8) ^ state.image_id;
-            state.image_id = id;
-            if transmit(out, id, png, size, rect).is_ok() {
+            state.sent_hash = 0;
+            state.image_seq = state.image_seq.wrapping_add(1).max(1);
+            // IDs únicos por proceso: el desplazamiento evita reutilizar uno de
+            // otra sesión que la terminal aún recuerde.
+            let id = std::process::id().wrapping_shl(8) ^ state.image_seq;
+            if transmit(out, id, png, size, rect, 1).is_ok() {
+                state.image_id = id;
                 state.sent_rect = Some(rect);
                 state.sent_key = app.art_png_key.clone();
+                state.sent_hash = hash;
             }
         }
+    } else if state.image_id != 0 {
+        let _ = delete(out, state.image_id);
+        state.image_id = 0;
+        state.sent_rect = None;
+        state.sent_key.clear();
+        state.sent_hash = 0;
     }
+    render_wallpaper(out, app, state);
     render_thumbs(out, app, state);
     let _ = out.flush();
 }
 
-/// Fingerprint barato para saber si la portada de una miniatura cambió.
-fn fingerprint(bytes: &[u8]) -> u64 {
+/// Wallpaper de portada a pantalla completa. Va con z=-1 para que el texto y
+/// los paneles queden por encima. Solo se envía cuando cambia la portada o el
+/// tamaño; no se reencodea por frame.
+fn render_wallpaper(out: &mut impl Write, app: &App, state: &mut HiResState) {
+    let wanted = app
+        .wallpaper_rect
+        .filter(|rect| rect.width >= 8 && rect.height >= 4)
+        .and_then(|rect| app.art_png.as_ref().map(|png| (rect, png)));
+    let Some((rect, png)) = wanted else {
+        if state.wallpaper_id != 0 {
+            let _ = delete(out, state.wallpaper_id);
+            state.wallpaper_id = 0;
+            state.wallpaper_key.clear();
+            state.wallpaper_rect = None;
+            state.wallpaper_hash = 0;
+        }
+        return;
+    };
+    let hash = content_hash(png);
+    let same = state.wallpaper_id != 0
+        && state.wallpaper_key == app.art_png_key
+        && state.wallpaper_hash == hash;
+    if same {
+        if state.wallpaper_rect != Some(rect) {
+            let _ = place(out, state.wallpaper_id, rect, -1);
+            state.wallpaper_rect = Some(rect);
+        }
+        return;
+    }
+    if state.wallpaper_id != 0 {
+        let _ = delete(out, state.wallpaper_id);
+        state.wallpaper_id = 0;
+    }
+    state.wallpaper_seq = state.wallpaper_seq.wrapping_add(1).max(1);
+    let id = std::process::id().wrapping_shl(12) ^ 0x8000_0000 ^ state.wallpaper_seq;
+    let size = app.art_png_size.unwrap_or((1, 1));
+    if transmit(out, id, png, size, rect, -1).is_ok() {
+        state.wallpaper_id = id;
+        state.wallpaper_key = app.art_png_key.clone();
+        state.wallpaper_rect = Some(rect);
+        state.wallpaper_hash = hash;
+    }
+}
+
+/// FNV-1a barato y estable sobre una muestra del PNG. Recorrer todos los bytes
+/// en cada frame costaba; alcanza para detectar que el contenido cambió.
+fn content_hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes.iter().step_by(7).take(512).chain(bytes.last()) {
         hash ^= u64::from(*byte);
@@ -199,14 +317,16 @@ fn fingerprint(bytes: &[u8]) -> u64 {
 
 impl HiResState {
     /// El mismo PNG se reutiliza en todas las miniaturas de una pista; su
-    /// fingerprint también.
+    /// hash también. Solo se asigna una cadena nueva cuando falta la entrada.
     fn print_of(&mut self, image_key: &str, png: &[u8]) -> u64 {
-        let key = (image_key.to_string(), png.len());
-        if let Some(value) = self.thumb_prints.get(&key) {
-            return *value;
+        if let Some((len, value)) = self.thumb_prints.get(image_key) {
+            if *len == png.len() {
+                return *value;
+            }
         }
-        let value = fingerprint(png);
-        self.thumb_prints.insert(key, value);
+        let value = content_hash(png);
+        self.thumb_prints
+            .insert(image_key.to_string(), (png.len(), value));
         value
     }
 }
@@ -231,30 +351,49 @@ fn render_thumbs(out: &mut impl Write, app: &App, state: &mut HiResState) {
         }
     }
 
-    // Fuera de pantalla o con arte nuevo: se borra antes de recolocar.
-    state.thumbs.retain(|key, image| {
-        let keep = visible.iter().any(|(place, image_key, rect, print)| {
-            *place == key.as_str()
-                && *image_key == image.image_key
-                && *rect == image.rect
-                && *print == image.fingerprint
-        });
-        if !keep {
-            let _ = delete(out, image.id);
-        }
-        keep
-    });
+    // Entradas que ya no se ven o cuyo contenido cambió. Se extraen con
+    // propiedad para poder reutilizar su id si la misma imagen reaparece en
+    // otra celda (scroll): recolocar es gratis, retransmitir no.
+    let mut stale: Vec<(String, ThumbImage)> = if state.thumbs.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .thumbs
+            .extract_if(|key, image| {
+                !visible.iter().any(|(place, image_key, rect, print)| {
+                    place == &key.as_str()
+                        && *image_key == image.image_key
+                        && *rect == image.rect
+                        && *print == image.fingerprint
+                })
+            })
+            .collect()
+    };
 
     for (place_key, image_key, rect, print) in visible {
         if state.thumbs.contains_key(place_key) {
             continue;
+        }
+        // La misma portada en otro hueco: se mueve el id ya transmitido.
+        if let Some(index) = stale
+            .iter()
+            .position(|(_, image)| image.image_key == image_key && image.fingerprint == print)
+        {
+            let (_, image) = stale.swap_remove(index);
+            if place(out, image.id, rect, 1).is_ok() {
+                state
+                    .thumbs
+                    .insert(place_key.to_string(), ThumbImage { rect, ..image });
+                continue;
+            }
+            let _ = delete(out, image.id);
         }
         let Some((png, size)) = app.thumb_pngs.get(image_key) else {
             continue;
         };
         state.thumb_seq = state.thumb_seq.wrapping_add(1);
         let id = std::process::id().wrapping_shl(12) ^ 0x4000_0000 ^ state.thumb_seq;
-        if transmit(out, id, png, *size, rect).is_ok() {
+        if transmit(out, id, png, *size, rect, 1).is_ok() {
             state.thumbs.insert(
                 place_key.to_string(),
                 ThumbImage {
@@ -265,5 +404,34 @@ fn render_thumbs(out: &mut impl Write, app: &App, state: &mut HiResState) {
                 },
             );
         }
+    }
+    for (_, image) in stale {
+        let _ = delete(out, image.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn place_reuses_the_id_without_a_payload() {
+        let mut out = Vec::new();
+        place(&mut out, 42, Rect::new(3, 2, 10, 5), 1).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[3;4H"), "{text:?}");
+        assert!(
+            text.contains("\x1b_Ga=p,i=42,p=1,c=10,r=5,C=1,z=1,q=2;\x1b\\"),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn content_hash_notices_when_the_png_changes() {
+        let a = vec![0u8; 4096];
+        let mut b = a.clone();
+        b[7] = 1;
+        assert_eq!(content_hash(&a), content_hash(&a));
+        assert_ne!(content_hash(&a), content_hash(&b));
     }
 }

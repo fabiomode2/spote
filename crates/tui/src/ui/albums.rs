@@ -86,6 +86,55 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
     }
     // A partir de aquí se usan las coordenadas de la lista, no las del panel.
     let inner = list;
+    if app.list_cards {
+        // Vista compacta con `z`: una fila por disco, sin tarjeta.
+        let visible = inner.height as usize;
+        let start = app
+            .album_selected
+            .saturating_sub(visible / 2)
+            .min(app.albums.len().saturating_sub(visible.min(app.albums.len())));
+        for offset in 0..visible {
+            let index = start + offset;
+            let Some(album) = app.albums.get(index).cloned() else {
+                break;
+            };
+            let y = inner.y + offset as u16;
+            let row = Rect::new(inner.x, y, inner.width, 1);
+            let selected = index == app.album_selected;
+            if selected {
+                fill(buf, row, mix(pal.surface, pal.primary, 0.20));
+                put(buf, row.x, y, "▍", color(pal.primary), None);
+            }
+            let mut title = album.album.clone();
+            let title_w = (inner.width.saturating_sub(34)).max(8);
+            truncate_chars(&mut title, title_w as usize);
+            put(buf, row.x + 2, y, &title, color(if selected { pal.text } else { pal.muted }), None);
+            let mut artist = album.artist.clone();
+            truncate_chars(&mut artist, 18);
+            put(buf, row.x + 2 + title_w + 1, y, &artist, color(pal.secondary), None);
+            let meta = format!("{}/{} · {}", album.ready_count, album.track_count, format_ms(album.duration_ms));
+            let meta_w = meta.chars().count() as u16;
+            if row.width > meta_w + 2 {
+                put(buf, row.x + row.width - meta_w - 1, y, &meta, color(pal.dim), None);
+            }
+            app.hit.add(row, Action::AlbumOpen(index));
+            app.hit.add(
+                Rect::new(row.x + 2 + title_w + 1, y, artist.chars().count() as u16, 1),
+                Action::OpenArtist(album.artist.clone()),
+            );
+        }
+        let footer = "z tarjetas · enter abre · d baja · / busca";
+        if rect.height > 4 {
+            text_at(
+                buf,
+                Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
+                footer,
+                Style::new().fg(color(pal.dim)),
+                Alignment::Left,
+            );
+        }
+        return;
+    }
     let card_h = 3u16;
     let columns = if inner.width >= 100 { 2u16 } else { 1 };
     let card_w = (inner.width.saturating_sub(columns.saturating_sub(1) * 2)) / columns;

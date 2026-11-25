@@ -434,6 +434,17 @@ pub const PRESETS: &[Preset] = &[
     },
 ];
 
+/// Rotación por defecto de la franja (`v`): los cinco presets activos de
+/// fábrica. `lcd`, `rack` y `stage` siguen disponibles a mano en `e` y en
+/// ajustes, pero no entran en la rotación.
+pub const DEFAULT_ROTATION: [&'static str; 5] = ["clean", "aurora", "bloom", "crt", "braille"];
+
+/// Índice de un preset en `PRESETS` por nombre. La rotación y los ajustes lo
+/// usan para resolver un nombre sin recorrer el catálogo a mano.
+pub fn preset_by_name(name: &str) -> Option<usize> {
+    PRESETS.iter().position(|preset| preset.name == name)
+}
+
 /// Compositor: N capas, un canvas final.
 pub struct Viz {
     pub layers: Vec<VizLayer>,
@@ -446,10 +457,7 @@ pub struct Viz {
 
 impl Viz {
     pub fn from_preset(name: &str) -> Self {
-        let index = PRESETS
-            .iter()
-            .position(|preset| preset.name == name)
-            .unwrap_or(0);
+        let index = preset_by_name(name).unwrap_or(0);
         Self::preset(index)
     }
 
@@ -557,8 +565,7 @@ impl Viz {
             let t = y as f32 / (h.max(2) - 1) as f32;
             let color = palette.ramp_at(0.10 + t * 0.06);
             for x in 0..w {
-                self.output
-                    .put(x as i32, y as i32, ' ', color, 1.0);
+                self.output.put(x as i32, y as i32, ' ', color, 1.0);
             }
         }
         if self.paused || w == 0 || h == 0 {
@@ -619,9 +626,7 @@ pub struct Rng {
 
 impl Rng {
     pub fn new(seed: u64) -> Self {
-        Self {
-            state: seed.max(1),
-        }
+        Self { state: seed.max(1) }
     }
 
     pub fn seeded() -> Self {
@@ -716,9 +721,18 @@ mod tests {
             let out = mode.blend((10, 20, 30), (200, 100, 50), 0.5);
             assert!(out.0 < 255 || mode != Blend::Normal);
         }
-        assert_eq!(Blend::Normal.blend((10, 10, 10), (200, 200, 200), 1.0), (200, 200, 200));
-        assert_eq!(Blend::Normal.blend((10, 10, 10), (200, 200, 200), 0.0), (10, 10, 10));
-        assert_eq!(Blend::Multiply.blend((255, 255, 255), (0, 0, 0), 1.0), (0, 0, 0));
+        assert_eq!(
+            Blend::Normal.blend((10, 10, 10), (200, 200, 200), 1.0),
+            (200, 200, 200)
+        );
+        assert_eq!(
+            Blend::Normal.blend((10, 10, 10), (200, 200, 200), 0.0),
+            (10, 10, 10)
+        );
+        assert_eq!(
+            Blend::Multiply.blend((255, 255, 255), (0, 0, 0), 1.0),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -751,6 +765,26 @@ mod tests {
             let viz = Viz::from_preset(name);
             assert_eq!(viz.preset_name(), name, "preset {name} no resuelve");
             assert!(!viz.layers.is_empty(), "preset {name} sin capas");
+        }
+    }
+
+    #[test]
+    fn default_rotation_and_lookup_resolve() {
+        assert_eq!(DEFAULT_ROTATION.len(), 5);
+        for name in DEFAULT_ROTATION {
+            let index = preset_by_name(name).expect("preset de rotación inexistente");
+            assert_eq!(PRESETS[index].name, name);
+            assert!(
+                Viz::STRIP.contains(&name),
+                "{name} debería seguir en la franja"
+            );
+        }
+        let clean = preset_by_name("clean").expect("clean existe");
+        assert_eq!(PRESETS[clean].name, "clean");
+        assert_eq!(preset_by_name("no-existe"), None);
+        // Fuera de la rotación, pero presentes en el catálogo.
+        for name in ["lcd", "rack", "stage"] {
+            assert!(preset_by_name(name).is_some(), "{name} desapareció");
         }
     }
 

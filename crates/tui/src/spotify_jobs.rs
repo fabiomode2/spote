@@ -448,6 +448,7 @@ fn playlist_from_catalog(catalog: spote_core::catalog::Catalog) -> spote_core::s
             provider: "spotify".into(),
             id: track.id,
             title: track.title,
+            artist_list: vec![track.artist.clone()],
             artists: track.artist,
             album: per_track_album.clone(),
             duration_ms: track.duration_ms,

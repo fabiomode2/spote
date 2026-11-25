@@ -1,6 +1,7 @@
 //! spote — TUI de música. Punto de entrada y bucle de eventos.
 
 mod app;
+mod artist_backfill;
 mod fetch;
 mod hires;
 mod mini;
@@ -22,7 +23,8 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::{cursor, execute};
 use ratatui::backend::CrosstermBackend;
@@ -124,6 +126,7 @@ fn run() -> Result<()> {
         Some("setup") => return run_setup(&args),
         Some("mini") => return run_mini(),
         Some("dedupe") => return run_dedupe(&args),
+        Some("artistas") | Some("artists") => return run_artists(&args),
         Some("doctor") => return run_doctor(),
         Some("version") => {
             println!("spote {}", env!("CARGO_PKG_VERSION"));
@@ -279,6 +282,7 @@ USO:
                                    guarda la configuración social
   spote mini                       abre el mini reproductor de escritorio
   spote dedupe [--dry-run] [--yes] fusiona pistas duplicadas (con backup)
+  spote artistas [--dry-run]       reprocesa artistas completos (features)
   spote doctor                     comprueba dependencias y rutas
   spote version | help
 
@@ -729,6 +733,58 @@ fn run_dedupe(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// `spote artistas [--dry-run]`: reprocesa las pistas antiguas para guardar
+/// todos los artistas (principal + features) y el álbum canónico.
+fn run_artists(args: &Args) -> Result<()> {
+    let lib = Library::open(&config::db_path())?;
+    let rows = lib.tracks_without_artists(10_000)?;
+    if rows.is_empty() {
+        println!("no hay pistas pendientes de artistas");
+        return Ok(());
+    }
+    println!("pistas pendientes: {}", rows.len());
+    let mut updated = 0usize;
+    for (index, row) in rows.iter().enumerate() {
+        let fallback = spote_core::library::split_artist_credit(&row.track.artist);
+        let (artists, version) =
+            match artist_backfill::find_artists(&row.track.artist, &row.track.title) {
+                Ok(list) if !list.is_empty() => (list, 2),
+                _ => (fallback, 1),
+            };
+        if args.dry_run {
+            println!(
+                "{:>3}/{}  {} — {}  →  {}",
+                index + 1,
+                rows.len(),
+                row.track.artist,
+                row.track.title,
+                artists.join(", ")
+            );
+        } else if !artists.is_empty() {
+            lib.update_artists(&row.track.key, &artists, version)?;
+            if let Some(primary) = artists.first() {
+                lib.set_album_artist(&row.track.key, primary)?;
+            }
+            updated += 1;
+            println!(
+                "{:>3}/{}  {}  →  {}",
+                index + 1,
+                rows.len(),
+                row.track.title,
+                artists.join(", ")
+            );
+        }
+        // No saturar la API anónima de Spotify.
+        std::thread::sleep(Duration::from_millis(900));
+    }
+    if args.dry_run {
+        println!("dry-run: no se ha tocado nada");
+    } else {
+        println!("pistas actualizadas: {updated}");
+    }
+    Ok(())
+}
+
 fn run_doctor() -> Result<()> {
     let tools = ToolStatus::detect();
     println!("spote {}", env!("CARGO_PKG_VERSION"));
@@ -812,6 +868,7 @@ fn run_tui(args: Args) -> Result<()> {
         .context("no se pudo crear el runtime")?;
 
     let mut app = App::new(cfg.clone())?;
+    app.start_artist_backfill();
     app.start_mpris();
     match runtime.block_on(app.connect_player()) {
         Ok(()) => {}
@@ -880,16 +937,24 @@ fn event_loop(
         app.tick(dt);
         if app.needs_redraw {
             app.needs_redraw = false;
+        }
+        if app.hard_clear {
+            app.hard_clear = false;
             terminal.clear()?;
             hires.reset(&mut stdout);
         }
         let animating = app.animating();
+        // Un solo bloque atómico para celdas + imágenes Kitty: evita el
+        // parpadeo de ver el buffer a medio pintar. Si el terminal no soporta
+        // DEC 2026, ignora las secuencias.
+        let _ = execute!(stdout, BeginSynchronizedUpdate);
         terminal.draw(|frame| {
             let area = frame.area();
             let buffer = frame.buffer_mut();
             ui::draw(app, buffer, area);
         })?;
         hires::render(&mut stdout, app, &mut hires);
+        let _ = execute!(stdout, EndSynchronizedUpdate);
         if app.should_quit {
             return Ok(());
         }
@@ -898,9 +963,9 @@ fn event_loop(
         // pausa van a ese ritmo). Antes se repintaba a 60-120 Hz siempre,
         // incluso con la UI congelada.
         let wait = if animating {
-            // El mosaico recolorea toda la pantalla; 60 fps no aportan nada y
-            // disparan el uso de CPU en terminales lentos.
-            let target = if app.cfg.ui.fx.ambient == "mosaic" {
+            // Zen/visual a pantalla completa: el efecto pinta todas las celdas;
+            // 30 fps estables se ven mejor que 60 con la terminal atascada.
+            let target = if app.zen || app.fullscreen == app::Fullscreen::Viz {
                 budget.max(Duration::from_millis(33))
             } else {
                 budget
@@ -919,7 +984,9 @@ fn event_loop(
                     }
                     Event::Mouse(mouse) => app.on_mouse(mouse),
                     Event::Resize(_, _) => {
-                        app.art_key.clear();
+                        // No se borra el arte: se mantiene la imagen anterior
+                        // escalada hasta que el worker entregue el tamaño nuevo.
+                        app.hard_clear = true;
                         app.request_redraw();
                     }
                     _ => {}

@@ -261,11 +261,45 @@ impl App {
                 self.should_quit = true;
             }
             KeyCode::Char(' ') => self.toggle_play(),
+            KeyCode::Char(c)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && c.is_ascii_digit() =>
+            {
+                if let Some(digit) = c.to_digit(10) {
+                    if digit > 0 {
+                        self.activate_doc(digit as usize - 1);
+                    }
+                }
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.duplicate_doc();
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.close_active_doc();
+            }
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cycle_doc(!key.modifiers.contains(KeyModifiers::SHIFT));
+            }
+            KeyCode::BackTab if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.cycle_doc(false);
+            }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.nav_back();
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.nav_forward();
+            }
             KeyCode::Esc => {
+                if self.nav_back() {
+                    self.fullscreen = Fullscreen::None;
+                    self.center_focus = CenterFocus::Normal;
+                    self.focus = Pane::Center;
+                    return;
+                }
                 if self.tab == Tab::Albums && self.album_open.is_some() {
                     self.close_album();
                 } else if self.tab == Tab::Albums {
-                    self.tab = Tab::Library;
+                    self.goto_section(Tab::Library);
                 }
                 self.fullscreen = Fullscreen::None;
                 self.overlay = Overlay::None;
@@ -273,18 +307,10 @@ impl App {
                 self.focus = Pane::Center;
             }
             KeyCode::Tab => {
-                self.tab = self.tab.next();
-                self.focus = Pane::Center;
-                if self.tab == Tab::Search {
-                    self.search.query.clear();
-                    self.search.results.clear();
-                }
-                self.enter_tab();
+                self.goto_section(self.tab.next());
             }
             KeyCode::BackTab => {
-                self.tab = self.tab.prev();
-                self.focus = Pane::Center;
-                self.enter_tab();
+                self.goto_section(self.tab.prev());
             }
             KeyCode::Char('/') => {
                 if self.tab == Tab::Library {
@@ -292,13 +318,19 @@ impl App {
                 } else if self.tab == Tab::Albums {
                     self.album_search_focus = true;
                 } else {
-                    self.tab = Tab::Search;
-                    self.search.results.clear();
-                    self.search.query.clear();
+                    self.goto_section(Tab::Search);
                 }
                 self.needs_redraw = true;
             }
             KeyCode::Char('?') => self.overlay = Overlay::Help,
+            KeyCode::Char('P') => {
+                self.palette_original = self.palette_variant;
+                self.palette_selected = PaletteVariant::ALL
+                    .iter()
+                    .position(|variant| *variant == self.palette_variant)
+                    .unwrap_or(0);
+                self.overlay = Overlay::Palette;
+            }
             KeyCode::Char('e') if !upper => self.overlay = Overlay::Effects,
             KeyCode::Char('A') => self.open_audio(),
             KeyCode::Char('w') if !upper => self.open_mini(),
@@ -496,7 +528,7 @@ impl App {
             }
             KeyCode::Char('v') if !upper => {
                 if self.show_viz {
-                    self.viz.next_preset();
+                    self.cycle_viz(1);
                 } else {
                     self.show_viz = true;
                 }
@@ -574,6 +606,7 @@ impl App {
             KeyCode::Char('p') => self.prev_track(),
             KeyCode::Char('S') => self.toggle_shuffle(),
             KeyCode::Char('o') if !upper => self.cycle_repeat(),
+            KeyCode::Char('O') => self.open_album_from_selection(),
             KeyCode::Char('.') => {
                 if self.center_focus == CenterFocus::Lyrics {
                     self.nudge_lyrics_offset(100);

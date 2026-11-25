@@ -55,7 +55,7 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
             put(buf, inner.x, inner.y, "▶", color(pal.primary), None);
             put(buf, inner.x + 2, inner.y, &title, color(pal.text), None);
             if two {
-                let mut artist = track.artist.clone();
+                let mut artist = app.now_artist_credit();
                 if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
                     artist.push_str(" · ");
                     artist.push_str(album);
@@ -532,7 +532,7 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     if rect.width < 4 || rect.height < 2 {
         return;
     }
-    let background_on = app.viz_background && app.show_viz;
+    let background_on = (app.viz_background || app.zen) && app.show_viz;
     if !background_on {
         // El canvas se regenera como mucho `fx_fps` veces por segundo; entre
         // medias se reutiliza el anterior. La franja no cambia de tamaño, así
@@ -664,12 +664,18 @@ pub(super) fn blit_layer(
             if src.alpha <= 0.01 {
                 continue;
             }
-            let pal_hint = (11u8, 11u8, 16u8);
-            let fg = mix(pal_hint, src.fg, src.alpha * fg_amount);
+            // Componer sobre la celda real: si `bg_amount` es 0, el fondo
+            // (mosaico, panel o gradiente) se conserva. Antes se escribía un
+            // `pal_hint` opaco y la franja tapaba el mosaico.
+            let under = match cell.bg {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => (11, 11, 16),
+            };
+            let fg = mix(under, src.fg, (src.alpha * fg_amount).clamp(0.0, 1.0));
             let bg = if bg_amount <= 0.001 {
-                pal_hint
+                under
             } else {
-                mix(pal_hint, src.fg, src.alpha * bg_amount)
+                mix(under, src.fg, (src.alpha * bg_amount).clamp(0.0, 1.0))
             };
             let mut glyph = [0u8; 4];
             cell.set_symbol(src.ch.encode_utf8(&mut glyph));

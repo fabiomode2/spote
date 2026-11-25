@@ -5,18 +5,51 @@ use super::*;
 use spote_core::library::AlbumRow;
 
 impl App {
+    /// `O`: abrir el álbum de la fila seleccionada (biblioteca, búsqueda,
+    /// discos o canción actual).
+    pub(super) fn open_album_from_selection(&mut self) {
+        if self.tab == Tab::Search {
+            if let Some(SearchEntry::Album(index)) = self.search_entry(self.search.selected) {
+                if let Some(album) = self.search.albums.get(index).cloned() {
+                    self.open_album_summary(&album);
+                    return;
+                }
+            }
+        }
+        if self.tab == Tab::Albums {
+            self.open_album_selected();
+            return;
+        }
+        if let Some(row) = self.selected_row().cloned() {
+            if let Some(album) = row.track.album.clone() {
+                let artist = row
+                    .album_artist
+                    .clone()
+                    .unwrap_or_else(|| crate::app::credits::row_primary_artist(&row));
+                self.open_album_by_name(&album, &artist);
+                return;
+            }
+        }
+        if let Some(track) = self.now.track.clone() {
+            if let Some(album) = track.album {
+                self.open_album_by_name(&album, &track.artist);
+            }
+        }
+    }
+
     pub(super) fn open_album_selected(&mut self) {
         let Some(album) = self.albums.get(self.album_selected).cloned() else {
             return;
         };
-        self.album_open = Some(album);
-        self.selected = 0;
-        self.tab = Tab::Albums;
-        self.refresh_view();
+        // La ficha se abre como página del historial, no como un estado
+        // aparte de la pestaña `discos`: así “atrás” vuelve a la lista.
+        self.open_album_by_name(&album.album, &album.artist);
     }
 
     /// Abre el álbum por nombre desde cualquier nombre clicable de la UI.
     pub(super) fn open_album_by_name(&mut self, album: &str, artist: &str) {
+        let previous = self.snapshot();
+        let title = album.to_string();
         // Se consulta la biblioteca completa: `self.albums` puede estar
         // filtrado por el buscador de discos y dejar fuera justo el que se
         // acaba de pulsar.
@@ -98,10 +131,13 @@ impl App {
             self.detail = Some(Detail::Album);
             self.overlay = Overlay::None;
         }
+        self.push_doc_page(DocKind::Album, title, previous);
     }
 
     /// Abre un álbum del catálogo remoto (resultado de búsqueda o artista).
     pub(super) fn open_album_summary(&mut self, album: &spote_core::spotify_api::AlbumSummary) {
+        let previous = self.snapshot();
+        let title = album.title.clone();
         self.album_page = Some(AlbumPage {
             provider: album.provider.clone(),
             id: album.id.clone(),
@@ -118,6 +154,7 @@ impl App {
         self.detail = Some(Detail::Album);
         self.overlay = Overlay::None;
         self.meta_worker.album(album.provider.clone(), album.id.clone());
+        self.push_doc_page(DocKind::Album, title, previous);
     }
 
     pub(super) fn open_album_info(&mut self, info: spote_core::spotify_api::AlbumInfo) {
@@ -142,6 +179,7 @@ impl App {
         self.album_page_status.clear();
         self.detail = Some(Detail::Album);
         self.overlay = Overlay::None;
+        self.save_active_page();
     }
 
     /// Reemplaza una ficha local por la del catálogo conservando las pistas
@@ -247,6 +285,11 @@ impl App {
                     .cloned()
                 {
                     self.queue_track(track, None);
+                }
+            }
+            KeyCode::Char('g') => {
+                if let Some(artist) = self.album_page.as_ref().map(|page| page.artist.clone()) {
+                    self.open_artist_by_name(&artist);
                 }
             }
             KeyCode::Char('d') => self.download_album_page(),
