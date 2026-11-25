@@ -45,3 +45,13 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Android necesita unwind para que UniFFI convierta un panic en una excepción
+# Kotlin en vez de abortar el proceso.
+[profile.android-release]
+inherits = "release"
+panic = "unwind"
+
+[profile.android-dev]
+inherits = "dev"
+panic = "unwind"

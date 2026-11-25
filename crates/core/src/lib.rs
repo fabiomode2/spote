@@ -11,17 +11,23 @@ pub mod catalog;
 pub mod config;
 pub mod discord;
 pub mod downloader;
+#[cfg(feature = "desktop")]
 pub mod harvest;
 pub mod library;
 pub mod lyrics;
+#[cfg(feature = "desktop")]
 pub mod mpris;
+#[cfg(feature = "desktop")]
 pub mod mpris_server;
 pub mod playback;
 pub mod player;
+#[cfg(feature = "desktop")]
 pub mod record;
+#[cfg(feature = "desktop")]
 pub mod spotify;
 pub mod stream;
 pub mod spotify_api;
+#[cfg(feature = "desktop")]
 pub mod system_media;
 pub mod util;
 

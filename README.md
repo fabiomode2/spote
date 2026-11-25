@@ -175,6 +175,21 @@ spoted keygen ana bea                           # genera invitación y claves
 docker compose up -d --build                    # spoted + SQLite en un volumen
 ```
 
+## Android
+
+Hay un cliente nativo en `android/`: Compose para la UI, Media3 para reproducir
+y el mismo core Rust por UniFFI para biblioteca, letras y salas. Importa audio
+del teléfono, busca y descarga de YouTube on-device, y se actualiza desde las
+releases de GitHub.
+
+```bash
+./scripts/build-android-lib.sh
+cd android && ./gradlew :app:assembleDebug
+```
+
+- `android/README.md` — build, arquitectura, modo mock y limitaciones.
+- `docs/screenshots/android/` — capturas reales de Compose (Roborazzi).
+
 ## Más
 
 - `idea.md` — producto, arquitectura y decisiones.

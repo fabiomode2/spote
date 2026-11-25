@@ -1,0 +1,837 @@
+package dev.spote.app.ui
+
+import android.app.Application
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.webkit.MimeTypeMap
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import dev.spote.app.BuildConfig
+import dev.spote.app.data.MockData
+import dev.spote.app.data.EmptySpoteRepository
+import dev.spote.app.data.MockSpoteRepository
+import dev.spote.app.data.RustSpoteRepository
+import dev.spote.app.data.SpoteRepository
+import dev.spote.app.lyrics.LyricsRepository
+import dev.spote.app.model.Album
+import dev.spote.app.model.AppUiState
+import dev.spote.app.model.DownloadStatus
+import dev.spote.app.model.DownloadUi
+import dev.spote.app.model.LibraryFilter
+import dev.spote.app.model.LyricLine
+import dev.spote.app.model.Playlist
+import dev.spote.app.model.PlayerState
+import dev.spote.app.model.RepeatMode
+import dev.spote.app.model.Tab
+import dev.spote.app.model.Track
+import dev.spote.app.playback.PlaybackConnection
+import dev.spote.app.playback.PlaybackTrack
+import dev.spote.app.playback.PlaybackUiState
+import dev.spote.app.remote.RemoteDownloader
+import dev.spote.app.remote.RemoteResolver
+import dev.spote.app.remote.RemoteTrack
+import dev.spote.app.rust.RustBridge
+import dev.spote.app.rust.coverFor
+import java.io.File
+import java.net.URI
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+class AppViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val bridge: RustBridge? =
+        if (BuildConfig.USE_MOCK_DATA) null else RustBridge.create(application).getOrNull()
+    private val repo: SpoteRepository = when {
+        BuildConfig.USE_MOCK_DATA -> MockSpoteRepository()
+        bridge != null -> RustSpoteRepository(bridge)
+        else -> EmptySpoteRepository()
+    }
+    private val playback = PlaybackConnection(application)
+    private val lyrics = LyricsRepository(application)
+    private var lyricsJob: Job? = null
+    private var lyricsKey: String? = null
+    private var remoteSearchJob: Job? = null
+    private val downloadJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
+    private val _state = MutableStateFlow(initialState())
+    val state: StateFlow<AppUiState> = _state.asStateFlow()
+
+    private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val messages: SharedFlow<String> = _messages.asSharedFlow()
+
+    init {
+        playback.connect(viewModelScope)
+        viewModelScope.launch {
+            playback.state.collect { playbackState ->
+                if (playbackState.current != null) {
+                    _state.update { ui -> ui.copy(player = playbackState.toPlayerState(ui.player)) }
+                    _state.value.player.track?.let(::requestLyrics)
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        playback.release()
+        super.onCleared()
+    }
+
+    private fun initialState(): AppUiState {
+        val home = repo.home()
+        val first = home.recent.firstOrNull()
+        return AppUiState(
+            home = home,
+            search = repo.search(""),
+            library = repo.library(),
+            player = first?.let(repo::playerFor) ?: PlayerState(),
+        )
+    }
+
+    fun setTab(tab: Tab) {
+        _state.update { it.copy(tab = tab) }
+    }
+
+    fun setQuery(query: String) {
+        remoteSearchJob?.cancel()
+        val trimmed = query.trim()
+        _state.update {
+            it.copy(
+                search = repo.search(query).copy(
+                    remoteLoading = trimmed.length >= 2,
+                    remoteError = null,
+                ),
+            )
+        }
+        if (trimmed.length < 2) return
+        remoteSearchJob = viewModelScope.launch {
+            delay(450)
+            if (_state.value.search.query.trim() != trimmed) return@launch
+            val result = runCatching { RemoteResolver.search(trimmed, 20) }
+            _state.update { current ->
+                if (current.search.query.trim() != trimmed) return@update current
+                current.copy(
+                    search = current.search.copy(
+                        remoteResults = result.getOrNull().orEmpty().map(::remoteToTrack),
+                        remoteLoading = false,
+                        remoteError = result.exceptionOrNull()?.message,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun remoteToTrack(remote: RemoteTrack): Track = Track(
+        key = remote.key,
+        title = remote.title,
+        artist = remote.artist,
+        album = remote.album,
+        durationMs = remote.durationMs,
+        cover = coverFor(remote.title, null, remote.thumbnailUrl),
+        sourceLabel = when (remote.source) {
+            RemoteTrack.SOURCE_SOUNDCLOUD -> "SoundCloud"
+            else -> "YouTube"
+        },
+        remoteUrl = remote.webUrl,
+    )
+
+    fun setFilter(filter: LibraryFilter) {
+        _state.update { it.copy(library = it.library.copy(filter = filter)) }
+    }
+
+    fun toggleGrid() {
+        _state.update { it.copy(library = it.library.copy(isGrid = !it.library.isGrid)) }
+    }
+
+    fun album(id: String): Album? = repo.album(id)
+
+    fun playlist(id: String): Playlist? = repo.playlist(id)
+
+    fun play(track: Track) {
+        if (track.remoteUrl != null && track.localPath == null) {
+            playRemote(track)
+            return
+        }
+        val next = repo.playerFor(track).copy(isPlaying = false)
+        _state.update { it.copy(player = next) }
+        val playable = next.queue.mapNotNull { it.toPlaybackTrack() }
+        if (playable.isEmpty()) {
+            viewModelScope.launch {
+                _messages.emit("Esta pista no tiene archivo local todavía")
+            }
+            return
+        }
+        val index = playable.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
+        requestLyrics(track)
+        playback.playQueue(playable, index)
+    }
+
+    /** Resuelve el stream de YouTube en el momento de reproducir (las URLs caducan). */
+    private fun playRemote(track: Track) {
+        val webUrl = track.remoteUrl ?: return
+        viewModelScope.launch {
+            _messages.emit("Resolviendo «${track.title}»…")
+            val result = runCatching { RemoteResolver.resolveUrl(webUrl) }
+            val audio = result.getOrNull()
+            if (audio == null) {
+                _messages.emit(
+                    "No se pudo reproducir: ${result.exceptionOrNull()?.message ?: "error de red"}",
+                )
+                return@launch
+            }
+            val resolved = track.copy(
+                streamUrl = audio.url,
+                streamMimeType = audio.mimeType,
+                album = audio.album ?: track.album,
+                durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
+                cover = coverFor(audio.title, null, audio.thumbnailUrl ?: track.cover.remoteUrl),
+                sourceLabel = track.sourceLabel ?: "YouTube",
+            )
+            _state.update { ui ->
+                ui.copy(
+                    player = PlayerState(
+                        track = resolved,
+                        isPlaying = true,
+                        positionMs = 0L,
+                        durationMs = resolved.durationMs,
+                        shuffle = ui.player.shuffle,
+                        repeat = ui.player.repeat,
+                        queue = listOf(resolved),
+                    ),
+                )
+            }
+            requestLyrics(resolved)
+            val playbackTrack = resolved.toPlaybackTrack()
+            if (playbackTrack == null) {
+                _messages.emit("El stream resuelto no es reproducible")
+                return@launch
+            }
+            playback.playQueue(listOf(playbackTrack), 0)
+        }
+    }
+
+    private fun requestLyrics(track: Track) {
+        if (track.key == lyricsKey) return
+        lyricsKey = track.key
+        lyricsJob?.cancel()
+        _state.update { ui ->
+            if (ui.player.track?.key == track.key) {
+                ui.copy(player = ui.player.copy(lyrics = emptyList()))
+            } else {
+                ui
+            }
+        }
+        lyricsJob = viewModelScope.launch {
+            val doc = lyrics.forTrack(
+                key = track.key,
+                title = track.title,
+                artist = track.artist,
+                album = track.album,
+                durationMs = track.durationMs,
+            )
+            val lines = doc?.lines.orEmpty().map { LyricLine(it.startMs, it.text) }
+            _state.update { ui ->
+                if (ui.player.track?.key == track.key) {
+                    ui.copy(player = ui.player.copy(lyrics = lines))
+                } else {
+                    ui
+                }
+            }
+        }
+    }
+
+    fun togglePlay() {
+        if (playback.connected.value) {
+            playback.togglePlayPause()
+        } else {
+            _state.update { it.copy(player = it.player.copy(isPlaying = !it.player.isPlaying)) }
+        }
+    }
+
+    fun next() {
+        if (playback.connected.value) {
+            playback.next()
+            return
+        }
+        _state.update { state ->
+            val player = state.player
+            val queue = player.queue
+            if (queue.isEmpty()) return@update state
+            val index = queue.indexOfFirst { it.key == player.track?.key }
+            val nextIndex = when {
+                index == -1 -> 0
+                index + 1 < queue.size -> index + 1
+                player.repeat == RepeatMode.All -> 0
+                else -> queue.lastIndex
+            }
+            val nextTrack = queue[nextIndex]
+            state.copy(
+                player = player.copy(
+                    track = nextTrack,
+                    positionMs = 0L,
+                    durationMs = nextTrack.durationMs,
+                    isPlaying = true,
+                ),
+            )
+        }
+    }
+
+    fun previous() {
+        if (playback.connected.value) {
+            playback.previous()
+            return
+        }
+        _state.update { state ->
+            val player = state.player
+            if (player.positionMs > 3_000L) {
+                return@update state.copy(player = player.copy(positionMs = 0L))
+            }
+            val queue = player.queue
+            if (queue.isEmpty()) return@update state
+            val index = queue.indexOfFirst { it.key == player.track?.key }
+            val prevIndex = if (index <= 0) queue.lastIndex else index - 1
+            val prev = queue[prevIndex]
+            state.copy(
+                player = player.copy(
+                    track = prev,
+                    positionMs = 0L,
+                    durationMs = prev.durationMs,
+                    isPlaying = true,
+                ),
+            )
+        }
+    }
+
+    fun seekTo(positionMs: Long) {
+        _state.update { state ->
+            state.copy(player = state.player.copy(positionMs = positionMs.coerceIn(0L, state.player.durationMs)))
+        }
+        if (playback.connected.value) playback.seekTo(positionMs)
+    }
+
+    fun toggleShuffle() {
+        val next = !_state.value.player.shuffle
+        _state.update { it.copy(player = it.player.copy(shuffle = next)) }
+        if (playback.connected.value) playback.setShuffle(next)
+    }
+
+    fun cycleRepeat() {
+        val next = when (_state.value.player.repeat) {
+            RepeatMode.Off -> RepeatMode.All
+            RepeatMode.All -> RepeatMode.One
+            RepeatMode.One -> RepeatMode.Off
+        }
+        _state.update { it.copy(player = it.player.copy(repeat = next)) }
+        if (playback.connected.value) playback.cycleRepeat()
+    }
+
+    fun toggleFavorite(key: String) {
+        _state.update { state -> state.mapTrack(key) { it.copy(favorite = !it.favorite) } }
+        if (bridge != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                runCatching { bridge.toggleFavorite(key) }
+                refreshFromRepo()
+            }
+        }
+    }
+
+    fun toggleDownload(key: String) {
+        val track = findTrack(key) ?: return
+        if (track.remoteUrl != null) {
+            if (track.downloaded) {
+                viewModelScope.launch { _messages.emit("«${track.title}» ya está descargada") }
+            } else {
+                downloadRemote(track)
+            }
+            return
+        }
+        viewModelScope.launch {
+            _messages.emit("«${track.title}» ya está en el dispositivo")
+        }
+    }
+
+    /** Descarga una pista remota, la indexa en el SQLite del core y refresca la UI. */
+    private fun downloadRemote(track: Track) {
+        val webUrl = track.remoteUrl ?: return
+        if (downloadJobs.containsKey(track.key)) return
+
+        fun publish(progress: Float, status: DownloadStatus, error: String? = null) {
+            _state.update { current ->
+                current.copy(
+                    downloads = current.downloads + (
+                        track.key to DownloadUi(
+                            key = track.key,
+                            title = track.title,
+                            progress = progress.coerceIn(0f, 1f),
+                            status = status,
+                            error = error,
+                        )
+                        ),
+                )
+            }
+        }
+
+        val job = viewModelScope.launch {
+            _messages.emit("Descargando «${track.title}»…")
+            publish(0f, DownloadStatus.Resolving)
+            val audio = runCatching { RemoteResolver.resolveUrl(webUrl) }
+                .getOrElse { error ->
+                    publish(0f, DownloadStatus.Failed, error.message ?: "error de red")
+                    return@launch
+                }
+            if (audio.isHls) {
+                publish(0f, DownloadStatus.Failed, "Solo está en HLS: se puede reproducir, no descargar")
+                return@launch
+            }
+            publish(0f, DownloadStatus.Downloading)
+            val dir = File(getApplication<Application>().filesDir, "media").apply { mkdirs() }
+            var lastProgress = -1f
+            val file = RemoteDownloader.download(audio, dir) { progress ->
+                if (progress - lastProgress >= 0.01f || progress >= 1f) {
+                    lastProgress = progress
+                    publish(progress, DownloadStatus.Downloading)
+                }
+            }.getOrElse { error ->
+                publish(lastProgress.coerceAtLeast(0f), DownloadStatus.Failed, error.message ?: "error de red")
+                return@launch
+            }
+            val engine = bridge
+            if (engine == null) {
+                publish(1f, DownloadStatus.Failed, "La biblioteca local no está disponible")
+                return@launch
+            }
+            publish(1f, DownloadStatus.Importing)
+            withContext(Dispatchers.IO) {
+                engine.importLocal(
+                    path = file.absolutePath,
+                    title = audio.title.ifBlank { track.title },
+                    artist = audio.artist.ifBlank { track.artist },
+                    album = audio.album ?: track.album,
+                    durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
+                    artPath = null,
+                )
+            }
+            refreshFromRepo()
+            _state.update { current ->
+                current.copy(
+                    downloads = current.downloads - track.key,
+                    search = current.search.copy(
+                        remoteResults = current.search.remoteResults.map { item ->
+                            if (item.key == track.key) item.copy(downloaded = true) else item
+                        },
+                    ),
+                )
+            }
+            val label = audio.title.ifBlank { track.title }
+            _messages.emit("Descargada «$label»")
+        }
+        downloadJobs[track.key] = job
+        job.invokeOnCompletion { downloadJobs.remove(track.key) }
+    }
+
+    fun cancelDownload(key: String) {
+        downloadJobs.remove(key)?.cancel()
+        _state.update { it.copy(downloads = it.downloads - key) }
+        viewModelScope.launch { _messages.emit("Descarga cancelada") }
+    }
+
+    fun dismissDownload(key: String) {
+        _state.update { it.copy(downloads = it.downloads - key) }
+    }
+
+    private fun findTrack(key: String): Track? {
+        val current = _state.value
+        return (current.library.tracks +
+            current.home.recent +
+            current.search.results +
+            current.search.remoteResults +
+            current.player.queue +
+            listOfNotNull(current.player.track))
+            .firstOrNull { it.key == key }
+    }
+
+    // ------------------------------------------------------------------ listas
+
+    fun playlists(): List<Playlist> = repo.playlists()
+
+    fun createPlaylist(name: String, onCreated: (String?) -> Unit = {}) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val id = withContext(Dispatchers.IO) { repo.createPlaylist(trimmed) }
+            if (id == null) {
+                _messages.emit("Las playlists necesitan la biblioteca local")
+            } else {
+                refreshFromRepo()
+                _messages.emit("Playlist «$trimmed» creada")
+            }
+            onCreated(id)
+        }
+    }
+
+    fun deletePlaylist(id: String) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { repo.deletePlaylist(id) }
+            if (ok) {
+                refreshFromRepo()
+                _messages.emit("Playlist eliminada")
+            } else {
+                _messages.emit("No se pudo eliminar la playlist")
+            }
+        }
+    }
+
+    fun addToPlaylist(id: String, key: String) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { repo.addToPlaylist(id, key) }
+            refreshFromRepo()
+            _messages.emit(if (ok) "Añadida a la playlist" else "No se pudo añadir")
+        }
+    }
+
+    fun removeFromPlaylist(id: String, key: String) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { repo.removeFromPlaylist(id, key) }
+            refreshFromRepo()
+            _messages.emit(if (ok) "Quitada de la playlist" else "No se pudo quitar")
+        }
+    }
+
+    // -------------------------------------------------------------------- cola
+
+    fun playQueueItem(index: Int) {
+        val queue = _state.value.player.queue
+        val track = queue.getOrNull(index) ?: return
+        if (playback.connected.value) {
+            playback.playAt(index)
+        }
+        _state.update {
+            it.copy(player = it.player.copy(track = track, positionMs = 0L, isPlaying = true))
+        }
+    }
+
+    fun moveQueueItem(from: Int, to: Int) {
+        val queue = _state.value.player.queue
+        if (from !in queue.indices) return
+        val target = to.coerceIn(0, queue.lastIndex)
+        if (from == target) return
+        val moved = queue.toMutableList().apply { add(target, removeAt(from)) }
+        _state.update { it.copy(player = it.player.copy(queue = moved)) }
+        if (playback.connected.value) playback.moveInQueue(from, target)
+    }
+
+    fun removeQueueItem(index: Int) {
+        val queue = _state.value.player.queue
+        if (index !in queue.indices) return
+        val removed = queue[index]
+        val remaining = queue.toMutableList().apply { removeAt(index) }
+        _state.update { current ->
+            current.copy(
+                player = current.player.copy(
+                    queue = remaining,
+                    track = if (current.player.track?.key == removed.key) {
+                        remaining.getOrNull(index)
+                    } else {
+                        current.player.track
+                    },
+                ),
+            )
+        }
+        if (playback.connected.value) playback.removeAt(index)
+    }
+
+    fun enqueue(track: Track) {
+        if (track.remoteUrl != null && track.localPath == null) {
+            viewModelScope.launch {
+                _messages.emit("Resolviendo «${track.title}»…")
+                val audio = runCatching { RemoteResolver.resolveUrl(track.remoteUrl!!) }
+                    .getOrNull()
+                if (audio == null) {
+                    _messages.emit("No se pudo resolver la pista")
+                    return@launch
+                }
+                val resolved = track.copy(
+                    streamUrl = audio.url,
+                    streamMimeType = audio.mimeType,
+                    durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
+                )
+                val playbackTrack = resolved.toPlaybackTrack()
+                if (playbackTrack == null || !playback.addToQueue(playbackTrack)) {
+                    _messages.emit("La cola no está lista todavía")
+                } else {
+                    _messages.emit("Añadida a la cola")
+                }
+            }
+            return
+        }
+        val playbackTrack = track.toPlaybackTrack()
+        if (playbackTrack == null) {
+            viewModelScope.launch { _messages.emit("Esta pista no tiene archivo reproducible") }
+            return
+        }
+        if (playback.addToQueue(playbackTrack)) {
+            viewModelScope.launch { _messages.emit("Añadida a la cola") }
+        } else {
+            viewModelScope.launch { _messages.emit("La cola no está lista todavía") }
+        }
+    }
+
+    // ------------------------------------------------------------- sala social
+
+    /** Aplica el estado de la sala: pista, posición de servidor y play/pause. */
+    fun syncWithRoom(track: Track, positionMs: Long, playing: Boolean) {
+        val sameTrack = _state.value.player.track?.key == track.key
+        if (sameTrack && playback.connected.value) {
+            playback.seekTo(positionMs)
+            playback.setPlaying(playing)
+            _state.update {
+                it.copy(player = it.player.copy(positionMs = positionMs, isPlaying = playing))
+            }
+            return
+        }
+
+        if (track.remoteUrl != null && track.localPath == null) {
+            viewModelScope.launch {
+                val audio = runCatching { RemoteResolver.resolveUrl(track.remoteUrl!!) }
+                    .getOrNull() ?: return@launch
+                val resolved = track.copy(
+                    streamUrl = audio.url,
+                    streamMimeType = audio.mimeType,
+                    album = audio.album ?: track.album,
+                    durationMs = if (audio.durationMs > 0L) audio.durationMs else track.durationMs,
+                    cover = coverFor(audio.title, null, audio.thumbnailUrl ?: track.cover.remoteUrl),
+                )
+                val playbackTrack = resolved.toPlaybackTrack() ?: return@launch
+                _state.update {
+                    it.copy(
+                        player = PlayerState(
+                            track = resolved,
+                            isPlaying = playing,
+                            positionMs = positionMs,
+                            durationMs = resolved.durationMs,
+                            queue = listOf(resolved),
+                        ),
+                    )
+                }
+                requestLyrics(resolved)
+                playback.playQueue(
+                    listOf(playbackTrack),
+                    0,
+                    positionMs,
+                    autoPlay = playing,
+                )
+            }
+            return
+        }
+
+        val next = repo.playerFor(track)
+        val playable = next.queue.mapNotNull { it.toPlaybackTrack() }
+        if (playable.isEmpty()) return
+        val index = playable.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
+        _state.update {
+            it.copy(
+                player = next.copy(
+                    isPlaying = playing,
+                    positionMs = positionMs,
+                ),
+            )
+        }
+        requestLyrics(track)
+        playback.playQueue(playable, index, positionMs, autoPlay = playing)
+    }
+
+    /**
+     * Importa audio del selector del sistema. Copia al almacenamiento privado,
+     * lee los tags con MediaMetadataRetriever y lo indexa en el SQLite del core.
+     */
+    fun importUris(uris: List<Uri>) {
+        if (uris.isEmpty() || bridge == null) return
+        viewModelScope.launch {
+            _messages.emit("Importando ${uris.size} archivo(s)…")
+            val result = withContext(Dispatchers.IO) { importBlocking(uris) }
+            refreshFromRepo()
+            val text = buildString {
+                append("Importadas ${result.first} canciones")
+                if (result.second > 0) append(" · ${result.second} con error")
+            }
+            _messages.emit(text)
+        }
+    }
+
+    private fun importBlocking(uris: List<Uri>): Pair<Int, Int> {
+        val engine = bridge ?: return 0 to uris.size
+        val context = getApplication<Application>()
+        val resolver = context.contentResolver
+        val mediaDir = File(context.filesDir, "media").apply { mkdirs() }
+        var imported = 0
+        var failed = 0
+
+        uris.forEach { uri ->
+            var target: File? = null
+            try {
+                val displayName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    }
+                    ?: "audio"
+
+                val mime = resolver.getType(uri)
+                val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)
+                    ?: displayName.substringAfterLast('.', "opus")
+
+                val id = UUID.randomUUID().toString()
+                target = File(mediaDir, "$id.$extension")
+                resolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                } ?: error("no se pudo abrir el archivo")
+
+                val retriever = MediaMetadataRetriever()
+                var title = displayName.substringBeforeLast('.')
+                var artist = "Desconocido"
+                var album: String? = null
+                var durationMs = 0L
+                var artPath: String? = null
+                try {
+                    retriever.setDataSource(context, uri)
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { title = it }
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { artist = it }
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { album = it }
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull()
+                        ?.let { durationMs = it }
+                    retriever.embeddedPicture?.let { picture ->
+                        val art = File(mediaDir, "$id.jpg")
+                        art.writeBytes(picture)
+                        artPath = art.absolutePath
+                    }
+                } finally {
+                    retriever.release()
+                }
+
+                engine.importLocal(
+                    path = target.absolutePath,
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    durationMs = durationMs,
+                    artPath = artPath,
+                )
+                imported++
+            } catch (error: Exception) {
+                failed++
+                target?.delete()
+            }
+        }
+        return imported to failed
+    }
+
+    private fun PlaybackUiState.toPlayerState(existing: PlayerState): PlayerState {
+        val known = (state.value.library.tracks + state.value.home.recent + state.value.player.queue)
+            .distinctBy { it.key }
+        fun map(pb: PlaybackTrack): Track = known.firstOrNull { it.key == pb.key } ?: Track(
+            key = pb.key,
+            title = pb.title,
+            artist = pb.artist,
+            album = pb.album,
+            durationMs = pb.durationMs,
+            cover = coverFor(pb.title, pb.artUri?.toFilePath()),
+            downloaded = true,
+            localPath = pb.uri.toFilePath(),
+        )
+        val mapped = current?.let(::map)
+        return PlayerState(
+            track = mapped,
+            isPlaying = isPlaying,
+            positionMs = positionMs,
+            durationMs = if (durationMs > 0L) durationMs else mapped?.durationMs ?: 0L,
+            shuffle = shuffle,
+            repeat = when (repeatMode) {
+                1 -> RepeatMode.All
+                2 -> RepeatMode.One
+                else -> RepeatMode.Off
+            },
+            queue = queue.map(::map),
+            lyrics = if (existing.track?.key == mapped?.key) existing.lyrics else emptyList(),
+        )
+    }
+
+    private fun refreshFromRepo() {
+        _state.update { state ->
+            val previous = state.search
+            val local = repo.search(previous.query)
+            state.copy(
+                home = repo.home(),
+                search = local.copy(
+                    remoteResults = previous.remoteResults,
+                    remoteLoading = previous.remoteLoading,
+                    remoteError = previous.remoteError,
+                ),
+                library = repo.library(),
+            )
+        }
+    }
+}
+
+private fun AppUiState.mapTrack(key: String, transform: (Track) -> Track): AppUiState {    fun List<Track>.mapTracks() = map { if (it.key == key) transform(it) else it }
+    fun List<Album>.mapAlbums() = map { album -> album.copy(tracks = album.tracks.mapTracks()) }
+
+    return copy(
+        home = home.copy(
+            recent = home.recent.mapTracks(),
+            albums = home.albums.mapAlbums(),
+            playlists = home.playlists.map { playlist -> playlist.copy(tracks = playlist.tracks.mapTracks()) },
+        ),
+        search = search.copy(
+            results = search.results.mapTracks(),
+            albums = search.albums.mapAlbums(),
+        ),
+        library = library.copy(
+            tracks = library.tracks.mapTracks(),
+            albums = library.albums.mapAlbums(),
+            playlists = library.playlists.map { playlist -> playlist.copy(tracks = playlist.tracks.mapTracks()) },
+        ),
+        player = player.copy(
+            track = player.track?.let { if (it.key == key) transform(it) else it },
+            queue = player.queue.mapTracks(),
+        ),
+    )
+}
+
+private fun Track.toPlaybackTrack(): PlaybackTrack? {
+    val resolved = localPath?.let { path ->
+        if (path.contains("://")) path else File(path).toURI().toString()
+    } ?: streamUrl ?: return null
+    return PlaybackTrack(
+        key = key,
+        uri = resolved,
+        title = title,
+        artist = artist,
+        album = album,
+        artUri = cover.localPath?.let { File(it).toURI().toString() } ?: cover.remoteUrl,
+        durationMs = durationMs,
+        mimeType = streamMimeType,
+    )
+}
+
+private fun String.toFilePath(): String? = when {
+    startsWith("file://") -> runCatching { URI(this).path }.getOrNull()
+    startsWith("/") -> this
+    else -> null
+}

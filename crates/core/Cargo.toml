@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["desktop"]
+# zbus/MPRIS solo existe en Linux/escritorio. El cliente Android compila el
+# core con `default-features = false`.
+desktop = ["dep:zbus"]
+
 [dependencies]
 spote-protocol = { path = "../protocol" }
 anyhow = { workspace = true }
@@ -20,7 +26,7 @@ uuid = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }
 rand = { workspace = true }
-zbus = { workspace = true }
+zbus = { workspace = true, optional = true }
 sha1 = "0.10"
 percent-encoding = "2"
 

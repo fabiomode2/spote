@@ -1,0 +1,25 @@
+[package]
+name = "spote-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "spote_android"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+cli = ["uniffi/cli"]
+
+[dependencies]
+spote-core = { path = "../core", default-features = false }
+spote-protocol = { path = "../protocol" }
+uniffi = "0.32.2"
+thiserror = { workspace = true }
