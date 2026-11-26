@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use spote_core::artwork::{ArtMode, CoverArt, Palette};
+use spote_core::artwork::{ArtMode, CoverArt, Palette, PaletteVariant};
 use spote_core::audio::Spectrum;
 use spote_core::audio_map::SongMap;
 use spote_core::config::{self, Config};
@@ -22,6 +22,7 @@ use spote_core::util;
 use spote_core::ToolStatus;
 use spote_protocol::{ControlAction, Presence, QueueItem, Room, RoomState, TrackRef};
 
+use crate::artist_backfill::{ArtistBackfill, ArtistJob};
 use crate::fetch::{
     ArtKind, ArtRequest, ArtResponse, ArtWorker, LyricsMsg, LyricsWorker, MetaEvent, MetaWorker,
     SearchWorker, SongMapEvent, SongMapWorker, TunebatEvent, TunebatWorker,
@@ -36,12 +37,16 @@ pub(crate) mod albums;
 mod artist;
 mod audio_ui;
 mod context;
+pub(crate) mod credits;
 mod downloads;
+mod effects;
 mod input;
 mod keymap;
 mod layout_editor;
 mod mini;
 mod mpris;
+mod nav;
+mod palette;
 mod wrapped;
 pub use keymap::help_sections;
 mod lyrics_search;
@@ -163,11 +168,58 @@ pub enum Detail {
     Album,
 }
 
+/// Tipo de documento abierto en una pestaña de navegación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    Artist,
+    Album,
+    Other,
+}
+
+/// Foto completa de la parte navegable del estado. Permite apilar páginas y
+/// volver atrás sin rehacer la vista ni perder selección/scroll.
+#[derive(Debug, Clone)]
+pub struct ViewSnapshot {
+    pub tab: Tab,
+    pub lib_filter: LibFilter,
+    pub selected: usize,
+    pub list_start: usize,
+    pub lib_query: String,
+    pub lib_search_focus: bool,
+    pub album_query: String,
+    pub album_search_focus: bool,
+    pub album_selected: usize,
+    pub detail: Option<Detail>,
+    pub artist: Option<spote_core::spotify_api::ArtistProfile>,
+    pub artist_art: Option<CoverArt>,
+    pub artist_selected: usize,
+    pub artist_album_scroll: usize,
+    pub album_page: Option<AlbumPage>,
+    pub album_open: Option<spote_core::library::AlbumRow>,
+    pub center_focus: CenterFocus,
+    pub focus: Pane,
+    pub search: SearchState,
+}
+
+/// Pestaña de documento con su propia pila de historial.
+#[derive(Debug, Clone)]
+pub struct DocTab {
+    pub kind: DocKind,
+    pub title: String,
+    /// Estado de la sección desde la que se abrió el documento.
+    pub base: ViewSnapshot,
+    /// Pila de páginas; la última es la visible.
+    pub pages: Vec<ViewSnapshot>,
+    /// Páginas recuperables con “adelante”.
+    pub forward: Vec<ViewSnapshot>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Overlay {
     None,
     Help,
     Effects,
+    Palette,
     /// Formulario de lista nueva: nombre, descripción y portada opcional.
     PlaylistForm,
     /// Importar una playlist o álbum público de Spotify pegando su URL.
@@ -245,6 +297,13 @@ impl PlaylistForm {
 #[allow(dead_code)]
 pub enum Action {
     Tab(Tab),
+    DocTab(usize),
+    DocClose(usize),
+    NavBack,
+    NavForward,
+    NavClose,
+    PaletteSelect(usize),
+    PaletteApply(bool),
     LibraryFilter(LibFilter),
     LibrarySearch,
     AlbumSearch,
@@ -269,6 +328,7 @@ pub enum Action {
     VizNext,
     VizPrev,
     VizPreset(usize),
+    VizToggleEffect(usize),
     VizLayer(usize),
     AudioBand(usize),
     AudioBandSet(usize),
@@ -606,17 +666,34 @@ pub enum SettingRow {
     ProgressInViz,
     BarWidth,
     ButtonPad,
+    PanelOpacity,
+    ChromeOpacity,
+    BottomOpacity,
+    OverlayScrim,
+    PanelBorder,
+    BorderOpacity,
+    RimReactive,
+    RimIntensity,
+    NavPosition,
+    DetailMode,
     Ambient,
     AmbientOpacity,
+    Backdrop,
+    MosaicMode,
+    MosaicOpacity,
+    MosaicAuto,
     MosaicMotion,
     MosaicSpeed,
     MosaicBeat,
+    FullscreenBackdrop,
     InstrumentBorders,
     EdgeFlame,
     BloomPlay,
     CleanSpill,
     GlitchPanels,
     LyricsSize,
+    LyricsScenario,
+    LyricsUnit,
     NormalizeTracks,
     Audio,
     Spotify,
@@ -625,7 +702,7 @@ pub enum SettingRow {
 }
 
 impl SettingRow {
-    pub const ALL: [SettingRow; 29] = [
+    pub const ALL: [SettingRow; 46] = [
         Self::Rotate,
         Self::RotateSecs,
         Self::RotateOff,
@@ -639,17 +716,34 @@ impl SettingRow {
         Self::ProgressInViz,
         Self::BarWidth,
         Self::ButtonPad,
+        Self::PanelOpacity,
+        Self::ChromeOpacity,
+        Self::BottomOpacity,
+        Self::OverlayScrim,
+        Self::PanelBorder,
+        Self::BorderOpacity,
+        Self::RimReactive,
+        Self::RimIntensity,
+        Self::NavPosition,
+        Self::DetailMode,
         Self::Ambient,
         Self::AmbientOpacity,
+        Self::Backdrop,
+        Self::MosaicMode,
+        Self::MosaicOpacity,
+        Self::MosaicAuto,
         Self::MosaicMotion,
         Self::MosaicSpeed,
         Self::MosaicBeat,
+        Self::FullscreenBackdrop,
         Self::InstrumentBorders,
         Self::EdgeFlame,
         Self::BloomPlay,
         Self::CleanSpill,
         Self::GlitchPanels,
         Self::LyricsSize,
+        Self::LyricsScenario,
+        Self::LyricsUnit,
         Self::NormalizeTracks,
         Self::Audio,
         Self::Spotify,
@@ -668,18 +762,37 @@ impl SettingRow {
             | Self::Thumb
             | Self::ProgressInViz
             | Self::BarWidth
-            | Self::ButtonPad => "interfaz",
+            | Self::ButtonPad
+            | Self::PanelOpacity
+            | Self::ChromeOpacity
+            | Self::BottomOpacity
+            | Self::OverlayScrim
+            | Self::PanelBorder
+            | Self::BorderOpacity
+            | Self::RimReactive
+            | Self::RimIntensity
+            | Self::NavPosition
+            | Self::DetailMode => "interfaz",
             Self::Ambient
             | Self::AmbientOpacity
+            | Self::Backdrop
+            | Self::MosaicMode
+            | Self::MosaicOpacity
+            | Self::MosaicAuto
             | Self::MosaicMotion
             | Self::MosaicSpeed
-            | Self::MosaicBeat => "fondo",
+            | Self::MosaicBeat
+            | Self::FullscreenBackdrop => "fondo",
             Self::InstrumentBorders
             | Self::EdgeFlame
             | Self::BloomPlay
             | Self::CleanSpill
             | Self::GlitchPanels => "efectos",
-            Self::LyricsSize | Self::NormalizeTracks | Self::Audio => "letra y audio",
+            Self::LyricsSize
+            | Self::LyricsScenario
+            | Self::LyricsUnit
+            | Self::NormalizeTracks
+            | Self::Audio => "letra y audio",
             Self::Spotify | Self::LayoutEditor => "sistema",
             Self::Save => "guardar",
         }
@@ -701,9 +814,24 @@ impl SettingRow {
             Self::ProgressInViz => "la barra de progreso vive en la franja del efecto",
             Self::BarWidth => "ancho de la barra de progreso",
             Self::ButtonPad => "tamaño de los botones del transporte",
+            Self::PanelOpacity => "opacidad de los paneles (55-100 %)",
+            Self::ChromeOpacity => "opacidad de la barra superior y navegación",
+            Self::BottomOpacity => "opacidad del pie: transporte, nowbar y hint",
+            Self::OverlayScrim => "velo oscuro detrás de los modales",
+            Self::PanelBorder => "color de portada, línea fina o sin borde",
+            Self::BorderOpacity => "opacidad del borde (0-100)",
+            Self::RimReactive => "el rim vibra con bombo y caja",
+            Self::RimIntensity => "brillo del rim (0-100)",
+            Self::NavPosition => "secciones arriba, al lado o automático",
+            Self::DetailMode => "ficha lateral, expandida o automática",
             Self::Ambient => "fondo: mosaico, aurora, glitch, letra…",
             Self::AmbientOpacity => "fuerza del fondo ambiental (5-50 %)",
-            Self::MosaicMotion => "movimiento del mosaico: deriva, filas, columnas, giro",
+            Self::Backdrop => "mosaico, wallpaper, degradado o nada",
+            Self::MosaicMode => "half, plain, dither o braille",
+            Self::MosaicOpacity => "opacidad del mosaico (5-50 %)",
+            Self::MosaicAuto => "el movimiento sigue la energía de la canción",
+            Self::FullscreenBackdrop => "mosaico o negro detrás del efecto a pantalla completa",
+            Self::MosaicMotion => "movimiento del mosaico: deriva, filas, columnas, diagonal, giro o auto",
             Self::MosaicSpeed => "velocidad del mosaico",
             Self::MosaicBeat => "el mosaico salta al compás del bombo",
             Self::InstrumentBorders => "los bordes laten con bombo, caja, charles y voz",
@@ -712,6 +840,8 @@ impl SettingRow {
             Self::CleanSpill => "la onda puede subir por encima de los paneles",
             Self::GlitchPanels => "trama de glitch dentro de los paneles",
             Self::LyricsSize => "tamaño de la letra: compacta, normal o grande",
+            Self::LyricsScenario => "lateral, centrada, capa detrás o solo fondo",
+            Self::LyricsUnit => "la letra grande sigue la línea o la palabra",
             Self::NormalizeTracks => "igualar el volumen de todas las canciones",
             Self::Audio => "ecualizador, preamp, normalizador y limitador",
             Self::Spotify => "seguir el reproductor MPRIS del sistema",
@@ -735,8 +865,23 @@ impl SettingRow {
             Self::ProgressInViz => "barra en el visualizador",
             Self::BarWidth => "ancho de la barra",
             Self::ButtonPad => "tamaño de controles",
+            Self::PanelOpacity => "opacidad de paneles",
+            Self::ChromeOpacity => "opacidad del chrome",
+            Self::BottomOpacity => "opacidad del pie",
+            Self::OverlayScrim => "velo de modales",
+            Self::PanelBorder => "borde de paneles",
+            Self::BorderOpacity => "opacidad del borde",
+            Self::RimReactive => "rim reactivo",
+            Self::RimIntensity => "intensidad del rim",
+            Self::NavPosition => "pestañas arriba/lateral",
+            Self::DetailMode => "modo de detalle",
             Self::Ambient => "fondo ambiental",
             Self::AmbientOpacity => "opacidad ambiental",
+            Self::Backdrop => "fondo base",
+            Self::MosaicMode => "modo del mosaico",
+            Self::MosaicOpacity => "opacidad del mosaico",
+            Self::MosaicAuto => "mosaico reactivo",
+            Self::FullscreenBackdrop => "fondo a pantalla completa",
             Self::MosaicMotion => "movimiento del mosaico",
             Self::MosaicSpeed => "velocidad del mosaico",
             Self::MosaicBeat => "mosaico al compás",
@@ -746,6 +891,8 @@ impl SettingRow {
             Self::CleanSpill => "clean sobre paneles",
             Self::GlitchPanels => "glitch en paneles",
             Self::LyricsSize => "tamaño de letra",
+            Self::LyricsScenario => "letra escenario",
+            Self::LyricsUnit => "unidad del escenario",
             Self::NormalizeTracks => "igualar volumen entre pistas",
             Self::Audio => "ecualizador / normalizador (A)",
             Self::Spotify => "seguir sistema (MPRIS)",
@@ -768,6 +915,19 @@ impl SettingRow {
                 | Self::Thumb
                 | Self::BarWidth
                 | Self::ButtonPad
+                | Self::PanelOpacity
+                | Self::ChromeOpacity
+                | Self::BottomOpacity
+                | Self::OverlayScrim
+                | Self::PanelBorder
+                | Self::NavPosition
+                | Self::DetailMode
+                | Self::Backdrop
+                | Self::MosaicMode
+                | Self::MosaicOpacity
+                | Self::FullscreenBackdrop
+                | Self::LyricsScenario
+                | Self::LyricsUnit
         )
     }
 
@@ -783,6 +943,8 @@ impl SettingRow {
                 | Self::Zen
                 | Self::ProgressInViz
                 | Self::MosaicBeat
+                | Self::MosaicAuto
+                | Self::RimReactive
                 | Self::InstrumentBorders
                 | Self::EdgeFlame
                 | Self::BloomPlay
@@ -948,6 +1110,7 @@ pub struct App {
     pub discord: crate::spotify_jobs::DiscordPresence,
     pub art_worker: ArtWorker,
     pub meta_worker: MetaWorker,
+    pub artist_backfill: ArtistBackfill,
     pub map_worker: SongMapWorker,
     pub song_map: Option<SongMap>,
     pub song_map_key: String,
@@ -985,6 +1148,12 @@ pub struct App {
     pub tools: ToolStatus,
 
     pub tab: Tab,
+    /// Pestañas de documentos abiertas y sus pilas de historial.
+    pub doc_tabs: Vec<DocTab>,
+    pub active_doc: Option<usize>,
+    /// Historial de cambios de sección (sin documento abierto).
+    pub section_back: Vec<ViewSnapshot>,
+    pub section_forward: Vec<ViewSnapshot>,
     pub focus: Pane,
     pub fullscreen: Fullscreen,
     pub overlay: Overlay,
@@ -995,6 +1164,8 @@ pub struct App {
     pub name: String,
     pub center_focus: CenterFocus,
     pub now: NowPlaying,
+    /// Créditos completos de la pista sonando (principal + features).
+    pub now_artists: Vec<String>,
     /// Último toggle de play/pausa: evita que el autorepeat del terminal
     /// mande pausa → play → pausa al mantener la barra espaciadora.
     pub play_toggle_at: Instant,
@@ -1131,11 +1302,15 @@ pub struct App {
     pub art_png_hint: (u16, u16),
     /// Rect que ocupa la portada en pantalla este frame; lo consume `hires`.
     pub art_visible_rect: Option<Rect>,
+    /// Rect del wallpaper Kitty cuando `backdrop = wallpaper`.
+    pub wallpaper_rect: Option<Rect>,
     /// Miniaturas por (pista, ancho, alto): una de 6x3 para la tarjeta no
     /// sirve para la cabecera de 12x7. La clave lleva el tamaño para no
     /// estirar una miniatura pequeña y que se vea pixelada.
     pub thumbs: std::collections::HashMap<(String, u16, u16), CoverArt>,
     pub thumb_requests: std::collections::HashSet<(String, u16, u16)>,
+    /// Reintento con backoff de miniaturas que fallaron.
+    pub thumb_retry: std::collections::HashMap<(String, u16, u16), Instant>,
     /// PNG normalizado por portada para el protocolo de imágenes de Kitty.
     /// Se manda una vez y se reutiliza en todas las miniaturas de esa pista.
     pub thumb_pngs: std::collections::HashMap<String, (Vec<u8>, (u32, u32))>,
@@ -1145,9 +1320,17 @@ pub struct App {
     pub art_request: Option<Instant>,
     pub art_request_key: String,
     pub art_request_size: (u16, u16),
+    /// Fuerza una nueva descarga de la portada sin borrar la anterior.
+    pub art_refresh: bool,
+    /// Backoff si la descarga de la portada falla.
+    pub art_retry_at: Option<Instant>,
     pub search_worker: SearchWorker,
     pub palette: PaletteRuntime,
     pub dominant: Palette,
+    pub palette_variant: PaletteVariant,
+    pub palette_selected: usize,
+    pub palette_original: PaletteVariant,
+    pub effects_selected: usize,
 
     pub list_cards: bool,
     pub viz_background: bool,
@@ -1177,6 +1360,10 @@ pub struct App {
     /// Reloj propio del fondo mosaico: sigue aunque el visualizador esté
     /// apagado, para que el fondo nunca se congele.
     pub mosaic_time: f32,
+    /// Evita que el salto de beat se repita en cada frame del mismo golpe.
+    pub mosaic_beat_hit: bool,
+    /// Envolvente suave del bombo: sustituye el salto bruto de celda.
+    pub mosaic_beat_env: f32,
     pub hit: HitMap,
     pub hover: Option<Action>,
     /// Shift detectado en el último evento de ratón. La biblioteca lo usa para
@@ -1218,6 +1405,9 @@ pub struct App {
     pub should_quit: bool,
     /// Fuerza un repintado completo en el siguiente frame (cambios de layout).
     pub needs_redraw: bool,
+    /// Limpieza dura del terminal y de las imágenes Kitty (arranque, resize).
+    /// Los cambios normales solo piden un frame, nunca un `clear`.
+    pub hard_clear: bool,
     pub spectrum_at: Instant,
 }
 
@@ -1250,6 +1440,7 @@ impl App {
             discord: crate::spotify_jobs::DiscordPresence::start(&cfg),
             art_worker: ArtWorker::start(),
             meta_worker: MetaWorker::start(),
+            artist_backfill: ArtistBackfill::start(),
             map_worker: SongMapWorker::start(),
             song_map: None,
             song_map_key: String::new(),
@@ -1278,6 +1469,10 @@ impl App {
             spotify_worker: None,
             tools: ToolStatus::detect(),
             tab: Tab::Now,
+            doc_tabs: Vec::new(),
+            active_doc: None,
+            section_back: Vec::new(),
+            section_forward: Vec::new(),
             focus: Pane::Center,
             fullscreen: Fullscreen::None,
             overlay: Overlay::None,
@@ -1288,6 +1483,7 @@ impl App {
                 position_at: Instant::now(),
                 ..Default::default()
             },
+            now_artists: Vec::new(),
             play_toggle_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -1390,16 +1586,26 @@ impl App {
             art_png_size: None,
             art_png_hint: (0, 0),
             art_visible_rect: None,
+            wallpaper_rect: None,
             thumbs: std::collections::HashMap::new(),
             thumb_requests: std::collections::HashSet::new(),
+            thumb_retry: std::collections::HashMap::new(),
             thumb_pngs: std::collections::HashMap::new(),
             hi_thumbs: Vec::new(),
             art_request: None,
             art_request_key: String::new(),
             art_request_size: (0, 0),
+            art_refresh: false,
+            art_retry_at: None,
             search_worker: SearchWorker::start(),
             palette: PaletteRuntime::new(Palette::dark(), cfg.ui.theme_fade_ms),
             dominant: Palette::dark(),
+            palette_variant: PaletteVariant::from_str(&cfg.ui.palette_variant)
+                .unwrap_or_default(),
+            palette_selected: 0,
+            palette_original: PaletteVariant::from_str(&cfg.ui.palette_variant)
+                .unwrap_or_default(),
+            effects_selected: 0,
             list_cards: cfg.ui.list_cards,
             viz_background: cfg.ui.viz_background,
             vcenter: cfg.ui.layout.vcenter,
@@ -1423,6 +1629,8 @@ impl App {
             pulse: Pulse::default(),
             intro: 0.0,
             mosaic_time: 0.0,
+            mosaic_beat_hit: false,
+            mosaic_beat_env: 0.0,
             hit: HitMap::default(),
             hover: None,
             shift_held: false,
@@ -1459,6 +1667,7 @@ impl App {
             spotify_warned: false,
             should_quit: false,
             needs_redraw: false,
+            hard_clear: false,
             spectrum_at: Instant::now(),
             cfg: cfg.clone(),
         };
@@ -1740,6 +1949,7 @@ impl App {
             self.trim_start_ms
         };
         self.now.track = Some(track.clone());
+        self.refresh_now_artists();
         self.now.path = Some(path.clone());
         self.now.position_ms = start_ms;
         self.now.duration_ms = track.duration_ms;
@@ -1826,6 +2036,7 @@ impl App {
             .filter(|end| *end > self.trim_start_ms + 500)
             .map(|end| end.min(duration));
         self.now.track = Some(track.clone());
+        self.refresh_now_artists();
         self.now.path = None;
         self.now.position_ms = self.trim_start_ms;
         self.now.position_seen_ms = self.trim_start_ms;
@@ -1937,6 +2148,7 @@ impl App {
                             duration_ms: track.duration_ms,
                         });
                         self.now.track = Some(track);
+        self.refresh_now_artists();
                     }
                     // El id resuelto vale también para el contexto y la cola:
                     // al volver a esta pista no se repite la búsqueda.
@@ -2584,6 +2796,7 @@ impl App {
                 }
                 self.pending_play = Some(entry.track.key.clone());
                 self.now.track = Some(entry.track.clone());
+        self.refresh_now_artists();
                 self.now.path = None;
                 self.now.position_ms = 0;
                 self.now.duration_ms = entry.track.duration_ms;
@@ -3338,10 +3551,15 @@ impl App {
         }
         self.intro = (self.intro + dt * 2.5).min(1.0);
         self.mosaic_time += dt;
+        self.mosaic_beat_env *= (-dt / 0.18).exp();
+        if self.mosaic_beat_env < 0.001 {
+            self.mosaic_beat_env = 0.0;
+        }
         let fps = self.fps.tick();
         self.frame_ms = if fps > 0.1 { 1000.0 / fps } else { 0.0 };
         self.pulse.update(dt);
         self.palette.update(dt);
+        self.poll_artist_backfill();
         self.prune_downloads();
         if self.art_fade_active {
             self.art_fade = (self.art_fade + dt / 1.1).min(1.0);
@@ -3513,7 +3731,7 @@ impl App {
 
     /// Ritmo del tinte ambiental (opacidad muy baja, detrás de todo).
     pub fn ambient_effects_hz(&self) -> f32 {
-        let hz = (self.fx_fps * 0.34).clamp(3.0, 20.0);
+        let hz = (self.fx_fps * 0.6).clamp(3.0, 36.0);
         if self.now.playing {
             hz
         } else {
@@ -3532,6 +3750,42 @@ impl App {
 
     /// Regenera el canvas del visualizador si toca o si cambió el tamaño.
     /// Devuelve si se regeneró; si no, la capa anterior sigue valiendo.
+    /// Nombres de efectos que entran en la rotación de `v`, en orden.
+    pub fn viz_rotation(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        for name in &self.cfg.ui.effects_enabled {
+            if let Some(index) = crate::viz::preset_by_name(name) {
+                let canonical = crate::viz::PRESETS[index].name;
+                if !out.contains(&canonical) {
+                    out.push(canonical);
+                }
+            }
+        }
+        if out.is_empty() {
+            out.extend(crate::viz::DEFAULT_ROTATION);
+        }
+        out
+    }
+
+    pub fn cycle_viz(&mut self, delta: i32) {
+        let names = self.viz_rotation();
+        if names.is_empty() {
+            return;
+        }
+        let current = self.viz.preset_name();
+        let index = names
+            .iter()
+            .position(|name| *name == current)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(names.len() as i32) as usize;
+        if let Some(preset) = crate::viz::preset_by_name(names[next]) {
+            self.viz.set_preset(preset);
+            self.cfg.ui.viz = names[next].to_string();
+            self.cfg.save().ok();
+            self.needs_redraw = true;
+        }
+    }
+
     pub fn pump_viz(&mut self, w: u16, h: u16, hz: f32, pal: &Palette) -> bool {
         if w == 0 || h == 0 {
             return false;
@@ -3943,12 +4197,37 @@ impl App {
 
     fn apply_art(&mut self, mut response: ArtResponse) {
         if response.kind == ArtKind::Ambient {
-            if let Some(art) = response.art {
-                self.ambient_art = Some(art);
+            let wanted = self
+                .now
+                .track
+                .as_ref()
+                .map(|track| format!("ambient:{}", track.key));
+            let wanted_mode =
+                ArtMode::from_str(&self.cfg.ui.fx.mosaic_mode).unwrap_or(ArtMode::Half);
+            if wanted.as_deref() == Some(response.key.as_str())
+                && response.mode == wanted_mode
+            {
+                if let Some(art) = response.art {
+                    self.ambient_art = Some(art);
+                }
             }
             return;
         }
         if response.kind == ArtKind::Artist {
+            // La foto de artista también puede ser una imagen Kitty real. El
+            // PNG se guarda junto a las miniaturas; `hires` lo coloca cuando
+            // la ficha registra su rectángulo en `hi_thumbs`.
+            let wanted = self
+                .artist
+                .as_ref()
+                .map(|artist| format!("artist:{}", artist.id));
+            if wanted.as_deref() != Some(response.key.as_str()) {
+                return;
+            }
+            if let Some(png) = response.png.take() {
+                let size = response.png_size.unwrap_or((192, 192));
+                self.thumb_pngs.insert(response.key.clone(), (png, size));
+            }
             if let Some(art) = response.art {
                 self.artist_art = Some(art);
             }
@@ -3960,11 +4239,13 @@ impl App {
                 let size = response.png_size.unwrap_or((192, 192));
                 self.thumb_pngs.insert(response.key.clone(), (png, size));
             }
+            let slot = (response.key.clone(), response.w, response.h);
+            self.thumb_requests.remove(&slot);
             if let Some(art) = response.art {
-                self.thumb_requests
-                    .remove(&(response.key.clone(), response.w, response.h));
-                self.thumbs
-                    .insert((response.key.clone(), response.w, response.h), art);
+                self.thumb_retry.remove(&slot);
+                self.thumbs.insert(slot, art);
+            } else {
+                self.thumb_retry.insert(slot, Instant::now());
             }
             // Si falló, la petición sigue marcada: no se reintenta en bucle
             // cada frame. `drop_thumbs` la limpia cuando cambia la portada.
@@ -3980,7 +4261,21 @@ impl App {
         // Una respuesta de un tamaño anterior (lista 30x15) llegaba después de
         // pedir la portada grande y la pisaba: se veía pequeña y sin PNG.
         if (response.w, response.h) != self.art_size_hint {
+            if response.key == self.art_request_key {
+                self.art_request_key.clear();
+                self.art_request_size = (0, 0);
+            }
             return;
+        }
+        if let Some(error) = &response.error {
+            if !error.is_empty() && response.key == self.art_request_key {
+                // Falló: abrir la puerta para reintentar cuando toque, sin
+                // borrar la portada que ya se estaba viendo.
+                self.art_request_key.clear();
+                self.art_request_size = (0, 0);
+                self.art_refresh = true;
+                self.art_retry_at = Some(Instant::now() + Duration::from_secs(5));
+            }
         }
         if response.mode == ArtMode::Plain {
             if response.png.is_some() {
@@ -3992,7 +4287,23 @@ impl App {
         }
         if let Some(palette) = response.palette {
             self.dominant = palette;
-            self.palette.go(palette);
+            // Override por álbum guardado en SQLite; si no hay, se usa el
+            // ajuste global. La paleta elegida tiñe UI, mosaico y efectos.
+            let album_key = self
+                .now
+                .track
+                .as_ref()
+                .and_then(|track| track.album.clone())
+                .unwrap_or_default();
+            let lookup = format!("album_palette:{}", spote_core::util::normalize(&album_key));
+            self.palette_variant = self
+                .lib
+                .setting(&lookup)
+                .and_then(|value| PaletteVariant::from_str(&value))
+                .or_else(|| PaletteVariant::from_str(&self.cfg.ui.palette_variant))
+                .unwrap_or_default();
+            let chosen = self.dominant.variant(self.palette_variant);
+            self.palette.go(chosen);
         }
         if let Some(art) = response.art.clone() {
             self.art_variants.insert(response.mode, art.clone());
@@ -4008,6 +4319,7 @@ impl App {
             }
             self.art = Some(art);
             self.art_key = response.key.clone();
+            self.art_retry_at = None;
             self.art_size = (response.w, response.h);
             self.art_mode_seen = response.mode;
         }
@@ -4118,14 +4430,15 @@ impl App {
                                     url: Some(url),
                                     local: None,
                                     prefer_url: true,
-                                    w: 24,
-                                    h: 12,
+                                    w: 32,
+                                    h: 16,
                                     mode: ArtMode::Plain,
                                     kind: ArtKind::Artist,
                                 });
                             }
                             self.artist = Some(profile);
                             self.artist_selected = 0;
+                            self.save_active_page();
                         }
                         Err(err) => {
                             self.artist_status = format!("{name}: {err}");
@@ -4231,7 +4544,16 @@ impl App {
                             }
                         }
                         self.drop_thumbs(&key);
-                        self.art_key.clear();
+                        // Si la miniatura estaba en backoff, la URL nueva
+                        // debe probarse ya.
+                        self.thumb_retry
+                            .retain(|(track, _, _), _| track != &key);
+                        // La portada puede haber cambiado: se pide otra sin
+                        // borrar la actual. Solo se marca para refrescar.
+                        self.art_refresh = true;
+                        self.art_retry_at = None;
+                        self.art_request_key.clear();
+                        self.art_request_size = (0, 0);
                         self.refresh_view();
                     } else if manual {
                         self.toast("Spotify no encontró la pista", ToastKind::Warn);
@@ -4607,12 +4929,65 @@ impl App {
     }
 
     // --------------------------------------------------------------- arte
+    /// Fuente de arte local/remota para una pista. Si la pista no tiene
+    /// carátula propia, hereda la del álbum agrupado. Así las pistas
+    /// descargadas de un mismo disco no se quedan sin portada.
+    pub fn art_sources_for(&self, track: &TrackRef) -> (Option<PathBuf>, Option<String>) {
+        let mut local = self
+            .lib
+            .art_path(&track.key)
+            .ok()
+            .flatten()
+            .filter(|path| path.exists());
+        if local.is_none() {
+            local = self.lib.local_path(&track.key).and_then(|path| {
+                ["jpg", "jpeg", "png", "webp"]
+                    .iter()
+                    .map(|ext| path.with_extension(ext))
+                    .find(|candidate| candidate.exists())
+            });
+        }
+        if local.is_none() && self.now.track.as_ref().map(|now| &now.key) == Some(&track.key) {
+            local = self.now.path.as_ref().and_then(|path| {
+                ["jpg", "jpeg", "png", "webp"]
+                    .iter()
+                    .map(|ext| path.with_extension(ext))
+                    .find(|candidate| candidate.exists())
+            });
+        }
+        let mut url = track
+            .art_url
+            .clone()
+            .or_else(|| self.lib.art_url(&track.key).ok().flatten());
+        if local.is_none() && url.is_none() {
+            if let Some(album) = track.album.as_deref().filter(|album| !album.is_empty()) {
+                let wanted = spote_core::util::normalize(album);
+                if let Ok(rows) = self.lib.albums() {
+                    if let Some(row) = rows.iter().find(|row| {
+                        spote_core::util::normalize(&row.album) == wanted
+                            && (row.art_path.is_some() || row.art_url.is_some())
+                    }) {
+                        local = row.art_path.clone().filter(|path| path.exists());
+                        url = row.art_url.clone();
+                    }
+                }
+            }
+        }
+        (local, url)
+    }
+
     /// Pide la portada si cambió la canción, el tamaño o el modo.
     pub fn ensure_art(&mut self) {
         let Some(track) = self.now.track.clone() else {
             self.art = None;
             return;
         };
+        if let Some(at) = self.art_retry_at {
+            if Instant::now() < at {
+                return;
+            }
+            self.art_retry_at = None;
+        }
         let mode = self.art_mode;
         if mode == ArtMode::Off {
             self.art = None;
@@ -4639,6 +5014,7 @@ impl App {
             self.art_png_key.clear();
             self.art_png_size = None;
             self.art_png_hint = (0, 0);
+            self.art_retry_at = None;
         }
         let needs_png = mode == ArtMode::Plain
             && w >= 24
@@ -4648,11 +5024,17 @@ impl App {
             && self.art_size == (w, h)
             && self.art_mode_seen == mode
             && self.art.is_some()
-            && !needs_png;
+            && !needs_png
+            && !self.art_refresh;
         if same {
             return;
         }
-        if self.art_request_key == track.key && self.art_request_size == (w, h) {
+        // La puerta solo vale si ya hay algo que enseñar. Si la petición
+        // anterior falló y dejó `art`/`art_png` vacíos, se reintenta.
+        if self.art_request_key == track.key
+            && self.art_request_size == (w, h)
+            && (self.art.is_some() || self.art_png.is_some())
+        {
             return;
         }
         if let Some(at) = self.art_request {
@@ -4661,47 +5043,84 @@ impl App {
             }
         }
         self.art_request = Some(Instant::now());
-        let local = self
-            .lib
-            .art_path(&track.key)
-            .ok()
-            .flatten()
-            .or_else(|| self.now.path.as_ref().map(|p| p.with_extension("jpg")))
-            .filter(|p| p.exists());
-        let url = track
-            .art_url
-            .clone()
-            .or_else(|| self.lib.art_url(&track.key).ok().flatten());
+        let (local, url) = self.art_sources_for(&track);
         if local.is_none() && url.is_none() && !track.artist.is_empty() {
             // Sin portada local ni remota: se busca en Spotify una sola vez.
             self.request_spotify_metadata_for_key(&track.key);
         }
-        let ambient_mode = self.cfg.ui.fx.ambient == "cover";
-        if ambient_mode && self.ambient_art_key != track.key && (local.is_some() || url.is_some()) {
-            self.ambient_art_key = track.key.clone();
+        // El mosaico necesita su propia rasterización, independiente del modo
+        // de la portada grande. `ambient_art` guarda la textura de fondo.
+        let ambient_mode = self.cfg.ui.fx.backdrop == "mosaic"
+            || self.cfg.ui.fx.mosaic_wallpaper
+            || self.cfg.ui.fx.ambient == "mosaic"
+            || self.cfg.ui.fx.ambient == "cover";
+        let mosaic_mode =
+            ArtMode::from_str(&self.cfg.ui.fx.mosaic_mode).unwrap_or(ArtMode::Half);
+        let ambient_key = format!("{}:{}", track.key, mosaic_mode.label());
+        if ambient_mode && self.ambient_art_key != ambient_key && (local.is_some() || url.is_some()) {
+            self.ambient_art_key = ambient_key;
             self.ambient_art = None;
             self.art_worker.request(ArtRequest {
                 key: format!("ambient:{}", track.key),
                 url: url.clone(),
                 local: local.clone(),
-                prefer_url: true,
-                w: 32,
-                h: 16,
-                mode: ArtMode::Braille,
+                prefer_url: local.is_none(),
+                w: 64,
+                h: 32,
+                mode: mosaic_mode,
                 kind: ArtKind::Ambient,
             });
         }
         self.art_request_key = track.key.clone();
         self.art_request_size = (w, h);
+        self.art_refresh = false;
+        let prefer_url = local.is_none();
         self.art_worker.request(ArtRequest {
             key: track.key,
             url,
             local,
-            prefer_url: true,
+            prefer_url,
             w,
             h,
             mode,
             kind: ArtKind::Main,
+        });
+    }
+
+    /// Asegura la textura del mosaico aunque la portada principal ya esté
+    /// cargada. `ensure_art` puede salir por el atajo de "misma portada" antes
+    /// de pedir el ambiente; el fondo no debe quedarse sin textura.
+    pub fn ensure_ambient_art(&mut self) {
+        let Some(track) = self.now.track.clone() else {
+            return;
+        };
+        let ambient_mode = self.cfg.ui.fx.backdrop == "mosaic"
+            || self.cfg.ui.fx.mosaic_wallpaper
+            || self.cfg.ui.fx.ambient == "mosaic"
+            || self.cfg.ui.fx.ambient == "cover";
+        if !ambient_mode {
+            return;
+        }
+        let mode = ArtMode::from_str(&self.cfg.ui.fx.mosaic_mode).unwrap_or(ArtMode::Half);
+        let key = format!("{}:{}", track.key, mode.label());
+        if self.ambient_art_key == key {
+            return;
+        }
+        let (local, url) = self.art_sources_for(&track);
+        if local.is_none() && url.is_none() {
+            return;
+        }
+        self.ambient_art_key = key;
+        self.ambient_art = None;
+        self.art_worker.request(ArtRequest {
+            key: format!("ambient:{}", track.key),
+            prefer_url: local.is_none(),
+            url,
+            local,
+            w: 64,
+            h: 32,
+            mode,
+            kind: ArtKind::Ambient,
         });
     }
 
@@ -4716,25 +5135,16 @@ impl App {
             return;
         }
         let slot = (track.key.clone(), w, h);
+        if let Some(at) = self.thumb_retry.get(&slot) {
+            if at.elapsed() < Duration::from_secs(5) {
+                return;
+            }
+            self.thumb_retry.remove(&slot);
+        }
         if self.thumbs.contains_key(&slot) || self.thumb_requests.contains(&slot) {
             return;
         }
-        let local = self
-            .lib
-            .art_path(&track.key)
-            .ok()
-            .flatten()
-            .filter(|path| path.exists())
-            .or_else(|| {
-                self.lib
-                    .local_path(&track.key)
-                    .map(|path| path.with_extension("jpg"))
-                    .filter(|path| path.exists())
-            });
-        let url = track
-            .art_url
-            .clone()
-            .or_else(|| self.lib.art_url(&track.key).ok().flatten());
+        let (local, url) = self.art_sources_for(track);
         if local.is_none() && url.is_none() {
             // Sin portada local ni remota: se busca en segundo plano y no se
             // marca la miniatura como pedida, para reintentar cuando llegue
@@ -4742,29 +5152,21 @@ impl App {
             if !track.artist.is_empty() && self.metadata_requests.len() < 3 {
                 self.request_spotify_metadata_for_key(&track.key);
             }
+            // No repetir consultas de álbum cada frame mientras no haya arte.
+            self.thumb_retry.insert(slot, Instant::now());
             return;
         }
         self.thumb_requests.insert(slot);
-        let ambient_mode = self.cfg.ui.fx.ambient == "cover";
-        if ambient_mode && self.ambient_art_key != track.key && (local.is_some() || url.is_some()) {
-            self.ambient_art_key = track.key.clone();
-            self.ambient_art = None;
-            self.art_worker.request(ArtRequest {
-                key: format!("ambient:{}", track.key),
-                url: url.clone(),
-                local: local.clone(),
-                prefer_url: true,
-                w: 32,
-                h: 16,
-                mode: ArtMode::Braille,
-                kind: ArtKind::Ambient,
-            });
-        }
+        // La textura del mosaico solo la pide la pista actual (`ensure_art` /
+        // `ensure_ambient_art`). Si cada miniatura de la lista pidiera su
+        // ambiente, la cola grande se llenaría de decodificaciones y la
+        // portada principal no llegaría nunca.
+        let prefer_url = local.is_none();
         self.art_worker.request(ArtRequest {
             key: track.key.clone(),
             url,
             local,
-            prefer_url: true,
+            prefer_url,
             w,
             h,
             mode: ArtMode::Plain,
@@ -4806,17 +5208,11 @@ impl App {
     pub fn set_art_size_hint(&mut self, w: u16, h: u16) {
         if self.art_size_hint != (w, h) {
             self.art_size_hint = (w, h);
-            self.art_key.clear();
-            self.art_variants.clear();
-            self.art_prev = None;
-            self.art_fade_active = false;
+            // La imagen y el PNG anteriores se quedan visibles y escalados
+            // hasta que llegue el tamaño nuevo. Solo se abre la puerta de la
+            // petición; borrar `art` aquí era lo que dejaba el hueco.
             self.art_request_key.clear();
             self.art_request_size = (0, 0);
-            // El PNG anterior tiene otra geometría; usarlo estirado en
-            // pantalla completa es justo lo que se veía pixelado.
-            self.art_png = None;
-            self.art_png_key.clear();
-            self.art_png_size = None;
             self.art_png_hint = (0, 0);
         }
     }
@@ -4994,6 +5390,7 @@ impl App {
                     && self.now.path.is_none()
                 {
                     self.now.track = None;
+                    self.now_artists.clear();
                     self.now.duration_ms = 0;
                     self.now.position_ms = 0;
                     self.now.position_unknown = false;

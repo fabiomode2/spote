@@ -36,22 +36,112 @@ pub(super) fn draw_art_placeholder(app: &App, buf: &mut Buffer, rect: Rect, pal:
 }
 
 /// Marco fino alrededor de la portada: la separa del fondo sin recortarla.
-pub(super) fn frame_art(buf: &mut Buffer, rect: Rect, pal: &Palette) {
+/// Color real del borde de la portada. `t` recorre el perímetro 0..1; se
+/// muestrea la celda más cercana del `CoverArt` actual, no la paleta generada.
+pub(super) fn cover_edge_color(app: &App, t: f32) -> Option<Rgb> {
+    let art = app
+        .art
+        .as_ref()
+        .filter(|art| !art.is_empty())
+        .or_else(|| app.ambient_art.as_ref().filter(|art| !art.is_empty()))?;
+    let w = art.w as f32;
+    let h = art.h as f32;
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let perimeter = 2.0 * (w + h);
+    let mut p = t.rem_euclid(1.0) * perimeter;
+    let (x, y, bottom) = if p < w {
+        (p, 0.0, false)
+    } else if p < w + h {
+        p -= w;
+        (w - 1.0, p, false)
+    } else if p < 2.0 * w + h {
+        p -= w + h;
+        (w - 1.0 - p, h - 1.0, true)
+    } else {
+        p -= 2.0 * w + h;
+        (0.0, h - 1.0 - p, false)
+    };
+    let cell = art.cell(
+        (x.round() as u16).min(art.w.saturating_sub(1)),
+        (y.round() as u16).min(art.h.saturating_sub(1)),
+    )?;
+    Some(if bottom {
+        cell.bg.unwrap_or(cell.fg)
+    } else {
+        cell.fg
+    })
+}
+
+pub(super) fn frame_art(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     if rect.width < 3 || rect.height < 2 {
         return;
     }
     let (x0, y0) = (rect.x, rect.y);
     let (x1, y1) = (rect.x + rect.width - 1, rect.y + rect.height - 1);
+    if app.cfg.ui.panel_border == "none" {
+        return;
+    }
+    if matches!(app.cfg.ui.panel_border.as_str(), "rim" | "color") {
+        let time = app.mosaic_time;
+        let strength = app.cfg.ui.rim_intensity.clamp(0, 100) as f32 / 100.0;
+        let reactive = app.cfg.ui.rim_reactive;
+        let amount = if reactive {
+            (0.35 + app.audio.kick_pulse * 0.65).clamp(0.0, 1.0)
+        } else {
+            0.55
+        };
+        let border_opacity = app.cfg.ui.border_opacity.clamp(0, 100) as f32 / 100.0;
+        let perimeter = 2 * (rect.width as usize + rect.height as usize).max(1);
+        let mut index = 0usize;
+        let mut paint = |x: u16, y: u16| {
+            let t = index as f32 / perimeter as f32;
+            let wave = (t * std::f32::consts::TAU * 3.0 + time * 1.9).sin() * 0.5 + 0.5;
+            let base = cover_edge_color(app, t)
+                .unwrap_or_else(|| mix(pal.primary, pal.secondary, wave));
+            let lit = mix(
+                pal.bg_deep,
+                base,
+                (0.65 + amount * 0.35) * strength.clamp(0.15, 1.0),
+            );
+            let lit = mix(pal.bg_deep, lit, border_opacity);
+            put(buf, x, y, "█", color(lit), None);
+            index += 1;
+        };
+        for x in x0..=x1 {
+            paint(x, y0);
+        }
+        for y in (y0 + 1)..=y1 {
+            paint(x1, y);
+        }
+        if y1 > y0 {
+            for x in (x0..x1).rev() {
+                paint(x, y1);
+            }
+        }
+        if x1 > x0 {
+            for y in ((y0 + 1)..y1).rev() {
+                paint(x0, y);
+            }
+        }
+        return;
+    }
+    let fg = color(mix(
+        pal.bg_deep,
+        pal.border,
+        app.cfg.ui.border_opacity.clamp(0, 100) as f32 / 100.0,
+    ));
     for x in x0..=x1 {
-        put(buf, x, y0, "─", color(pal.border), None);
-        put(buf, x, y1, "─", color(pal.border), None);
+        put(buf, x, y0, "─", fg, None);
+        put(buf, x, y1, "─", fg, None);
     }
     for y in y0..=y1 {
-        put(buf, x0, y, "│", color(pal.border), None);
-        put(buf, x1, y, "│", color(pal.border), None);
+        put(buf, x0, y, "│", fg, None);
+        put(buf, x1, y, "│", fg, None);
     }
     for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")] {
-        put(buf, x, y, glyph, color(pal.border), None);
+        put(buf, x, y, glyph, fg, None);
     }
 }
 

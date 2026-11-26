@@ -1,6 +1,15 @@
 //! Ajustes: filas, valores y persistencia.
 use super::*;
 
+fn cycle_name(current: &str, names: &[&str], delta: i32) -> String {
+    let index = names
+        .iter()
+        .position(|name| *name == current)
+        .unwrap_or(0) as i32;
+    let next = (index + delta).rem_euclid(names.len() as i32) as usize;
+    names[next].to_string()
+}
+
 impl App {
     pub fn settings_rows(&self) -> Vec<(&'static str, String)> {
         SettingRow::ALL
@@ -30,10 +39,78 @@ impl App {
                 _ => "normal".to_string(),
             },
             SettingRow::NormalizeTracks => onoff(self.cfg.audio.normalize_tracks),
+            SettingRow::PanelOpacity => format!("{}%", self.cfg.ui.panel_opacity.clamp(55, 100)),
+            SettingRow::ChromeOpacity => format!("{}%", self.cfg.ui.chrome_opacity.clamp(0, 100)),
+            SettingRow::BottomOpacity => format!("{}%", self.cfg.ui.bottom_opacity.clamp(0, 100)),
+            SettingRow::OverlayScrim => format!("{}%", self.cfg.ui.overlay_scrim.clamp(0, 95)),
+            SettingRow::PanelBorder => match self.cfg.ui.panel_border.as_str() {
+                "none" => "sin borde",
+                "color" | "rim" => "color de portada",
+                _ => "línea fina",
+            }
+            .to_string(),
+            SettingRow::BorderOpacity => {
+                format!("{}%", self.cfg.ui.border_opacity.clamp(0, 100))
+            }
+            SettingRow::RimReactive => onoff(self.cfg.ui.rim_reactive),
+            SettingRow::RimIntensity => {
+                format!("{}%", self.cfg.ui.rim_intensity.clamp(0, 100))
+            }
+            SettingRow::NavPosition => match self.cfg.ui.nav_position.as_str() {
+                "top" => "arriba",
+                "side" => "lateral",
+                "both" => "arriba + lateral",
+                _ => "auto",
+            }
+            .to_string(),
+            SettingRow::DetailMode => match self.cfg.ui.detail_mode.as_str() {
+                "expand" => "expandido",
+                "auto" => "auto",
+                _ => "lateral",
+            }
+            .to_string(),
+            SettingRow::Backdrop => match self.cfg.ui.fx.backdrop.as_str() {
+                "wallpaper" => "wallpaper",
+                "gradient" => "degradado",
+                "off" => "sin fondo",
+                _ => "mosaico",
+            }
+            .to_string(),
+            SettingRow::MosaicMode => match self.cfg.ui.fx.mosaic_mode.as_str() {
+                "plain" => "plain",
+                "dither" => "pixel",
+                "braille" => "braille",
+                _ => "half",
+            }
+            .to_string(),
+            SettingRow::MosaicOpacity => {
+                format!("{}%", self.cfg.ui.fx.mosaic_opacity.clamp(5, 50))
+            }
+            SettingRow::MosaicAuto => onoff(self.cfg.ui.fx.mosaic_auto),
+            SettingRow::FullscreenBackdrop => match self.cfg.ui.fx.fullscreen_backdrop.as_str() {
+                "black" => "negro",
+                _ => "mosaico",
+            }
+            .to_string(),
+            SettingRow::LyricsScenario => match self.cfg.ui.lyrics_scenario.as_str() {
+                "centered" => "centrada",
+                "behind" => "capa detrás",
+                "mosaic" => "solo fondo",
+                "off" => "normal",
+                _ => "lateral",
+            }
+            .to_string(),
+            SettingRow::LyricsUnit => match self.cfg.ui.lyrics_scenario_unit.as_str() {
+                "word" => "palabra",
+                _ => "línea",
+            }
+            .to_string(),
             SettingRow::MosaicMotion => match self.cfg.ui.fx.mosaic_motion.as_str() {
                 "rows" => "filas",
                 "columns" => "columnas",
+                "diagonal" => "diagonal",
                 "rotate" => "giro",
+                "auto" => "auto",
                 _ => "deriva",
             }
             .to_string(),
@@ -138,9 +215,9 @@ impl App {
             }
             SettingRow::VizPreset => {
                 if delta > 0 {
-                    self.viz.next_preset();
+                    self.cycle_viz(1);
                 } else {
-                    self.viz.prev_preset();
+                    self.cycle_viz(-1);
                 }
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
             }
@@ -160,11 +237,74 @@ impl App {
                 self.cfg.ui.fx.ambient_opacity =
                     (self.cfg.ui.fx.ambient_opacity as i32 + delta * 2).clamp(5, 50) as u8;
             }
+            SettingRow::PanelOpacity => {
+                self.cfg.ui.panel_opacity =
+                    (self.cfg.ui.panel_opacity as i32 + delta * 2).clamp(55, 100) as u8;
+            }
+            SettingRow::ChromeOpacity => {
+                self.cfg.ui.chrome_opacity =
+                    (self.cfg.ui.chrome_opacity as i32 + delta * 2).clamp(0, 100) as u8;
+            }
+            SettingRow::BottomOpacity => {
+                self.cfg.ui.bottom_opacity =
+                    (self.cfg.ui.bottom_opacity as i32 + delta * 2).clamp(0, 100) as u8;
+            }
+            SettingRow::OverlayScrim => {
+                self.cfg.ui.overlay_scrim =
+                    (self.cfg.ui.overlay_scrim as i32 + delta * 5).clamp(0, 95) as u8;
+            }
+            SettingRow::BorderOpacity => {
+                self.cfg.ui.border_opacity =
+                    (self.cfg.ui.border_opacity as i32 + delta * 5).clamp(0, 100) as u8;
+            }
+            SettingRow::RimIntensity => {
+                self.cfg.ui.rim_intensity =
+                    (self.cfg.ui.rim_intensity as i32 + delta * 5).clamp(0, 100) as u8;
+            }
+            SettingRow::MosaicOpacity => {
+                self.cfg.ui.fx.mosaic_opacity =
+                    (self.cfg.ui.fx.mosaic_opacity as i32 + delta * 2).clamp(5, 50) as u8;
+            }
+            SettingRow::PanelBorder => {
+                const BORDERS: [&str; 3] = ["line", "color", "none"];
+                self.cfg.ui.panel_border = cycle_name(&self.cfg.ui.panel_border, &BORDERS, delta);
+            }
+            SettingRow::NavPosition => {
+                const POSITIONS: [&str; 4] = ["auto", "side", "top", "both"];
+                self.cfg.ui.nav_position = cycle_name(&self.cfg.ui.nav_position, &POSITIONS, delta);
+            }
+            SettingRow::DetailMode => {
+                const MODES: [&str; 3] = ["docked", "expand", "auto"];
+                self.cfg.ui.detail_mode = cycle_name(&self.cfg.ui.detail_mode, &MODES, delta);
+            }
+            SettingRow::Backdrop => {
+                const BACKDROPS: [&str; 3] = ["mosaic", "gradient", "off"];
+                self.cfg.ui.fx.backdrop = cycle_name(&self.cfg.ui.fx.backdrop, &BACKDROPS, delta);
+            }
+            SettingRow::MosaicMode => {
+                const MODES: [&str; 4] = ["half", "plain", "dither", "braille"];
+                self.cfg.ui.fx.mosaic_mode = cycle_name(&self.cfg.ui.fx.mosaic_mode, &MODES, delta);
+            }
+            SettingRow::FullscreenBackdrop => {
+                const MODES: [&str; 2] = ["mosaic", "black"];
+                self.cfg.ui.fx.fullscreen_backdrop =
+                    cycle_name(&self.cfg.ui.fx.fullscreen_backdrop, &MODES, delta);
+            }
+            SettingRow::LyricsScenario => {
+                const MODES: [&str; 5] = ["off", "lateral", "centered", "behind", "mosaic"];
+                self.cfg.ui.lyrics_scenario =
+                    cycle_name(&self.cfg.ui.lyrics_scenario, &MODES, delta);
+            }
+            SettingRow::LyricsUnit => {
+                const UNITS: [&str; 2] = ["line", "word"];
+                self.cfg.ui.lyrics_scenario_unit =
+                    cycle_name(&self.cfg.ui.lyrics_scenario_unit, &UNITS, delta);
+            }
             SettingRow::LyricsSize => {
                 self.adjust_lyrics_size(delta);
             }
             SettingRow::MosaicMotion => {
-                const MOTIONS: [&str; 4] = ["drift", "rows", "columns", "rotate"];
+                const MOTIONS: [&str; 6] = ["auto", "drift", "rows", "columns", "diagonal", "rotate"];
                 let current = MOTIONS
                     .iter()
                     .position(|name| *name == self.cfg.ui.fx.mosaic_motion)
@@ -241,6 +381,8 @@ impl App {
                 self.cfg.ui.fx.glitch_panels = !self.cfg.ui.fx.glitch_panels
             }
             SettingRow::MosaicBeat => self.cfg.ui.fx.mosaic_beat = !self.cfg.ui.fx.mosaic_beat,
+            SettingRow::MosaicAuto => self.cfg.ui.fx.mosaic_auto = !self.cfg.ui.fx.mosaic_auto,
+            SettingRow::RimReactive => self.cfg.ui.rim_reactive = !self.cfg.ui.rim_reactive,
             SettingRow::NormalizeTracks => {
                 self.cfg.audio.normalize_tracks = !self.cfg.audio.normalize_tracks;
                 self.apply_audio_fx();

@@ -5,7 +5,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     let rect = content_rect(app, layout);
     if app.now.track.is_some() && layout.art.width > 0 {
         draw_art(app, buf, layout.art, pal, 0.85);
-        frame_art(buf, layout.art, pal);
+        frame_art(app, buf, layout.art, pal);
     }
     let title = match app.lib_filter {
         crate::app::LibFilter::All => "librería".to_string(),
@@ -34,13 +34,50 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         rect.width.saturating_sub(4),
         rect.height.saturating_sub(3),
     );
+    // Chips de sub-vista. Se seleccionan con `[`/`]` o con clic; la lista de
+    // playlists vive en el lateral, así que aquí solo van los filtros fijos.
+    let filters: [(&str, LibFilter); 4] = [
+        ("todo", LibFilter::All),
+        ("♥ fav", LibFilter::Favorites),
+        ("↓ desc", LibFilter::Downloaded),
+        ("↻ rec", LibFilter::Recent),
+    ];
+    let mut filter_x = inner.x;
+    for (label, filter) in filters {
+        let width = label.chars().count() as u16 + 2;
+        if filter_x + width >= inner.x + inner.width {
+            break;
+        }
+        let chip = Rect::new(filter_x, inner.y, width, 1);
+        let active = app.lib_filter == filter;
+        fill(
+            buf,
+            chip,
+            if active {
+                mix(pal.surface, pal.primary, 0.30)
+            } else if app.hover == Some(Action::LibraryFilter(filter)) {
+                pal.surface_alt
+            } else {
+                pal.surface
+            },
+        );
+        text_at(
+            buf,
+            chip,
+            label,
+            Style::new().fg(color(if active { pal.text } else { pal.muted })),
+            Alignment::Center,
+        );
+        app.hit.add(chip, Action::LibraryFilter(filter));
+        filter_x += width + 1;
+    }
     // Chips de gestión de listas, arriba a la derecha del panel.
     let mut chip_right = inner.x + inner.width;
     let in_playlist = matches!(app.lib_filter, crate::app::LibFilter::Playlist(_));
     let mut chips: Vec<(&str, Action, bool)> = vec![
         ("N lista", Action::NewPlaylist, false),
-        ("I importar", Action::ImportPlaylist, false),
-        ("l añadir", Action::AddToPlaylist, false),
+        ("I imp", Action::ImportPlaylist, false),
+        ("l +", Action::AddToPlaylist, false),
     ];
     if let crate::app::LibFilter::Playlist(id) = app.lib_filter {
         chips.push(("d borrar", Action::DeletePlaylist(id), true));
@@ -290,11 +327,12 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             pal.muted
         };
         put(buf, g.text_x, y, &title, color(title_color), None);
-        let mut artist = row.track.artist.clone();
+        let mut artist = crate::app::credits::row_artist_credit(row);
         truncate_chars(&mut artist, g.title_w as usize);
         let artist_draw_w = artist.chars().count() as u16;
+        let primary = crate::app::credits::row_primary_artist(row);
         if !artist.is_empty() {
-            let hover = app.hover == Some(Action::OpenArtist(row.track.artist.clone()));
+            let hover = app.hover == Some(Action::OpenArtist(primary.clone()));
             link_at(
                 buf,
                 g.text_x,
@@ -308,7 +346,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             );
             app.hit.add(
                 Rect::new(g.text_x, y + 1, artist_draw_w.min(g.title_w), 1),
-                Action::OpenArtist(row.track.artist.clone()),
+                Action::OpenArtist(primary.clone()),
             );
         }
         if g.album_w > 6 {
@@ -317,7 +355,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
                 truncate_chars(&mut shown, g.album_w as usize);
                 let album_draw_w = shown.chars().count() as u16;
                 let hover =
-                    app.hover == Some(Action::OpenAlbum(album.to_string(), row.track.artist.clone()));
+                    app.hover == Some(Action::OpenAlbum(album.to_string(), primary.clone()));
                 link_at(
                     buf,
                     g.album_x,
@@ -332,7 +370,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
                 if album_draw_w > 0 {
                     app.hit.add(
                         Rect::new(g.album_x, y, album_draw_w.min(g.album_w), 1),
-                        Action::OpenAlbum(album.to_string(), row.track.artist.clone()),
+                        Action::OpenAlbum(album.to_string(), primary.clone()),
                     );
                 }
             }
@@ -528,7 +566,7 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             color(if selected { pal.text } else { pal.muted }),
             None,
         );
-        let mut artist = row.track.artist.clone();
+        let mut artist = crate::app::credits::row_artist_credit(row);
         truncate_chars(&mut artist, text_w as usize);
         let artist_w = artist.chars().count() as u16;
         let mut album = row
@@ -558,8 +596,9 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             .unwrap_or(0);
         let meta_x = text_x;
         let meta_end = text_x + text_w;
+        let primary = crate::app::credits::row_primary_artist(row);
         if artist_w > 0 && meta_x < meta_end {
-            let hover = app.hover == Some(Action::OpenArtist(row.track.artist.clone()));
+            let hover = app.hover == Some(Action::OpenArtist(primary.clone()));
             link_at(
                 buf,
                 meta_x,
@@ -573,7 +612,7 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             );
             app.hit.add(
                 Rect::new(meta_x, y + 1, artist_w.min(text_w), 1),
-                Action::OpenArtist(row.track.artist.clone()),
+                Action::OpenArtist(primary.clone()),
             );
         }
         if let Some(album) = album {
@@ -581,7 +620,7 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             put(buf, sep_x, y + 1, sep, color(pal.dim), None);
             let album_x = sep_x + sep_w;
             let hover =
-                app.hover == Some(Action::OpenAlbum(album.clone(), row.track.artist.clone()));
+                app.hover == Some(Action::OpenAlbum(album.clone(), primary.clone()));
             let drawn = link_at(
                 buf,
                 album_x,
@@ -596,7 +635,7 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             if drawn > 1 {
                 app.hit.add(
                     Rect::new(album_x, y + 1, drawn, 1),
-                    Action::OpenAlbum(album, row.track.artist.clone()),
+                    Action::OpenAlbum(album, primary.clone()),
                 );
             }
         }
@@ -657,7 +696,7 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     let rect = content_rect(app, layout);
     if app.now.track.is_some() && layout.art.width > 0 {
         draw_art(app, buf, layout.art, pal, 0.85);
-        frame_art(buf, layout.art, pal);
+        frame_art(app, buf, layout.art, pal);
     }
     panel(Some(app), buf, rect, pal, true, 0.78, Some("buscar"), app.audio.kick_pulse);
     let inner = Rect::new(
@@ -1030,7 +1069,7 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
     let rect = content_rect(app, layout);
     if app.now.track.is_some() {
         draw_art(app, buf, layout.art, pal, 0.82);
-        frame_art(buf, layout.art, pal);
+        frame_art(app, buf, layout.art, pal);
     }
     panel(
         Some(app),

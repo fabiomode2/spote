@@ -53,6 +53,12 @@ pub struct TrackRow {
     pub art_path: Option<PathBuf>,
     /// Alta en la biblioteca (ms desde epoch), para la columna «añadida».
     pub added_at: i64,
+    /// Artistas acreditados, ya separadas las colaboraciones. Vacío mientras
+    /// la fila no se haya enriquecido.
+    pub artists: Vec<String>,
+    /// Artista del álbum: agrupa las pistas aunque cada una acredite a un
+    /// colaborador distinto.
+    pub album_artist: Option<String>,
 }
 
 impl TrackRow {
@@ -248,7 +254,10 @@ impl Library {
               favorite    INTEGER NOT NULL DEFAULT 0,
               play_count  INTEGER NOT NULL DEFAULT 0,
               last_played INTEGER,
-              hidden      INTEGER NOT NULL DEFAULT 0
+              hidden      INTEGER NOT NULL DEFAULT 0,
+              artists_json    TEXT,
+              artists_version INTEGER NOT NULL DEFAULT 0,
+              album_artist    TEXT
             );
             CREATE TABLE IF NOT EXISTS source(
               id          INTEGER PRIMARY KEY,
@@ -348,6 +357,26 @@ impl Library {
                 "ALTER TABLE track ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
+        }
+        // Multiarista: la lista de artistas se cachea en JSON. NULL significa
+        // «sin enriquecer»; la versión permite invalidar cálculos antiguos.
+        for (column, ddl) in [
+            (
+                "artists_json",
+                "ALTER TABLE track ADD COLUMN artists_json TEXT",
+            ),
+            (
+                "artists_version",
+                "ALTER TABLE track ADD COLUMN artists_version INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "album_artist",
+                "ALTER TABLE track ADD COLUMN album_artist TEXT",
+            ),
+        ] {
+            if !existing.contains(column) {
+                self.conn.execute(ddl, [])?;
+            }
         }
         Ok(())
     }
@@ -476,6 +505,44 @@ impl Library {
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    /// Guarda los artistas ya separados y la versión del cálculo. UPDATE
+    /// directo a propósito: `upsert_track` toca columnas de metadatos y no
+    /// debe pisar un enriquecimiento que ya estaba hecho.
+    pub fn update_artists(&self, key: &str, artists: &[String], version: i64) -> Result<()> {
+        let encoded = encode_artists_json(artists);
+        self.conn.execute(
+            "UPDATE track SET artists_json = ?1, artists_version = ?2 WHERE key = ?3",
+            params![encoded, version, key],
+        )?;
+        Ok(())
+    }
+
+    /// Artista del álbum, independiente del crédito de cada pista.
+    pub fn set_album_artist(&self, key: &str, album_artist: &str) -> Result<()> {
+        let value = album_artist.trim();
+        let value = (!value.is_empty()).then_some(value);
+        self.conn.execute(
+            "UPDATE track SET album_artist = ?1 WHERE key = ?2",
+            params![value, key],
+        )?;
+        Ok(())
+    }
+
+    /// Pistas pendientes de separar colaboraciones: nunca enriquecidas o con
+    /// una versión antigua del cálculo.
+    pub fn tracks_without_artists(&self, limit: usize) -> Result<Vec<TrackRow>> {
+        let sql = format!(
+            "{SELECT_TRACK}
+             WHERE (t.artists_json IS NULL OR t.artists_version = 0) AND t.hidden = 0
+             ORDER BY t.added_at DESC, t.id DESC LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![limit as i64], row_to_track)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Registra una fuente (fichero local o remota) para una canción.
@@ -802,6 +869,27 @@ impl Library {
              SELECT ?1, start_ms, end_ms FROM track_trim WHERE track_id = ?2",
             params![keep, drop],
         )?;
+        // Unión de artistas de ambas filas. La versión más alta gana y el
+        // álbum se queda con el primer `album_artist` no vacío.
+        let (keep_json, keep_version, keep_album_artist): (Option<String>, i64, Option<String>) =
+            tx.query_row(
+                "SELECT artists_json, artists_version, album_artist FROM track WHERE id = ?1",
+                params![keep],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let (drop_json, drop_version, drop_album_artist): (Option<String>, i64, Option<String>) =
+            tx.query_row(
+                "SELECT artists_json, artists_version, album_artist FROM track WHERE id = ?1",
+                params![drop],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let mut artists = parse_artists_json(keep_json.as_deref());
+        for artist in parse_artists_json(drop_json.as_deref()) {
+            push_unique_artist(&mut artists, &artist);
+        }
+        let album_artist = keep_album_artist
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| drop_album_artist.filter(|value| !value.trim().is_empty()));
         tx.execute(
             "UPDATE track SET
                album = coalesce(album, (SELECT album FROM track WHERE id = ?2)),
@@ -813,9 +901,18 @@ impl Library {
                  coalesce(last_played, 0),
                  coalesce((SELECT last_played FROM track WHERE id = ?2), 0)
                ), 0),
-               added_at = min(added_at, (SELECT added_at FROM track WHERE id = ?2))
+               added_at = min(added_at, (SELECT added_at FROM track WHERE id = ?2)),
+               artists_json = ?3,
+               artists_version = ?4,
+               album_artist = ?5
              WHERE id = ?1",
-            params![keep, drop],
+            params![
+                keep,
+                drop,
+                encode_artists_json(&artists),
+                keep_version.max(drop_version),
+                album_artist
+            ],
         )?;
         // Las tablas hijas restantes caen por ON DELETE CASCADE.
         tx.execute("DELETE FROM track WHERE id = ?1", params![drop])?;
@@ -901,7 +998,9 @@ impl Library {
     /// cuántas pistas hay descargadas. Es la base de la pantalla de álbumes.
     pub fn albums(&self) -> Result<Vec<AlbumRow>> {
         let sql = r#"
-            SELECT t.album, t.artist, count(*),
+            SELECT t.album,
+                   coalesce(nullif(t.album_artist, ''), t.artist) AS artist,
+                   count(*),
                    sum(CASE WHEN s.status = 'ready' THEN 1 ELSE 0 END),
                    sum(t.duration_ms),
                    max(coalesce(t.art_path, '')),
@@ -912,8 +1011,8 @@ impl Library {
               AND s.id = (SELECT id FROM source x WHERE x.track_id = t.id
                           ORDER BY (x.status = 'ready') DESC, x.id DESC LIMIT 1)
             WHERE t.album IS NOT NULL AND t.album <> '' AND t.hidden = 0
-            GROUP BY t.album, t.artist
-            ORDER BY t.artist COLLATE NOCASE, t.album COLLATE NOCASE
+            GROUP BY t.album, coalesce(nullif(t.album_artist, ''), t.artist)
+            ORDER BY artist COLLATE NOCASE, t.album COLLATE NOCASE
         "#;
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt
@@ -938,7 +1037,9 @@ impl Library {
     /// Pistas de un álbum concreto, en orden de inserción.
     pub fn album_tracks(&self, album: &str, artist: &str) -> Result<Vec<TrackRow>> {
         let sql = format!(
-            "{SELECT_TRACK} WHERE t.album = ?1 AND t.artist = ?2 AND t.hidden = 0 ORDER BY t.id"
+            "{SELECT_TRACK} WHERE t.album = ?1
+               AND coalesce(nullif(t.album_artist, ''), t.artist) = ?2
+               AND t.hidden = 0 ORDER BY t.id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
@@ -1722,7 +1823,8 @@ impl Library {
 
 const SELECT_TRACK: &str = r#"
 SELECT t.id, t.key, t.title, t.artist, t.album, t.duration_ms, t.art_url, t.art_path,
-       s.path, s.status, s.provider, t.favorite, t.play_count, t.added_at
+       s.path, s.status, s.provider, t.favorite, t.play_count, t.added_at,
+       t.artists_json, t.album_artist
 FROM track t
 LEFT JOIN source s ON s.track_id = t.id
   AND s.id = (SELECT id FROM source x WHERE x.track_id = t.id
@@ -1733,6 +1835,8 @@ fn row_to_track(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
     let art_path: Option<String> = row.get(7)?;
     let path: Option<String> = row.get(8)?;
     let status: Option<String> = row.get(9)?;
+    let artists_json: Option<String> = row.get(14)?;
+    let album_artist: Option<String> = row.get(15)?;
     Ok(TrackRow {
         id: row.get(0)?,
         track: TrackRef {
@@ -1751,7 +1855,85 @@ fn row_to_track(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
         play_count: row.get::<_, i64>(12)?.max(0) as u32,
         art_path: art_path.map(PathBuf::from),
         added_at: row.get::<_, i64>(13).unwrap_or(0),
+        artists: parse_artists_json(artists_json.as_deref()),
+        album_artist: album_artist.filter(|value| !value.trim().is_empty()),
     })
+}
+
+/// Separa un crédito de artista en artistas individuales. Solo reconoce
+/// marcadores explícitos de colaboración (`feat.`, `ft.`, `featuring`) y el
+/// punto y coma; nunca comas, `&` ni «and», que forman parte de muchos
+/// nombres («Earth, Wind & Fire», «Tyler, The Creator»). Conserva el orden y
+/// elimina duplicados sin distinguir mayúsculas.
+pub fn split_artist_credit(artist: &str) -> Vec<String> {
+    const MARKERS: [&str; 5] = [" feat. ", " feat ", " ft. ", " ft ", " featuring "];
+    let source = artist.trim();
+    if source.is_empty() {
+        return Vec::new();
+    }
+    let bytes = source.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let rest = &source[index..];
+        let mut cut = None;
+        for marker in MARKERS {
+            if let Some(head) = rest.get(..marker.len()) {
+                if head.eq_ignore_ascii_case(marker) {
+                    cut = Some(index + marker.len());
+                    break;
+                }
+            }
+        }
+        if cut.is_none() && bytes[index] == b';' {
+            cut = Some(index + 1);
+        }
+        match cut {
+            Some(after) => {
+                push_unique_artist(&mut parts, &source[start..index]);
+                start = after;
+                index = after;
+            }
+            None => {
+                index += source[index..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .unwrap_or(1);
+            }
+        }
+    }
+    push_unique_artist(&mut parts, &source[start..]);
+    parts
+}
+
+fn push_unique_artist(artists: &mut Vec<String>, artist: &str) {
+    let artist = artist.trim();
+    if artist.is_empty() {
+        return;
+    }
+    let folded = artist.to_lowercase();
+    if artists.iter().any(|known| known.to_lowercase() == folded) {
+        return;
+    }
+    artists.push(artist.to_string());
+}
+
+/// Lee la lista de artistas cacheada en JSON. Una fila sin enriquecer (NULL)
+/// o un JSON corrupto devuelven una lista vacía.
+pub fn parse_artists_json(s: Option<&str>) -> Vec<String> {
+    let Some(s) = s else { return Vec::new() };
+    serde_json::from_str(s).unwrap_or_default()
+}
+
+/// Serializa la lista de artistas. Una lista vacía se guarda como NULL para
+/// que la fila siga contando como pendiente de enriquecer.
+pub fn encode_artists_json(artists: &[String]) -> Option<String> {
+    if artists.is_empty() {
+        return None;
+    }
+    serde_json::to_string(artists).ok()
 }
 
 pub fn now_ms() -> i64 {
@@ -2231,5 +2413,175 @@ mod tests {
         assert_eq!(lib.setting("viz").as_deref(), Some("aurora"));
         lib.set_setting("viz", "void").unwrap();
         assert_eq!(lib.setting("viz").as_deref(), Some("void"));
+    }
+
+    #[test]
+    fn migrations_add_artist_columns_to_old_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE track(
+                  id          INTEGER PRIMARY KEY,
+                  key         TEXT NOT NULL UNIQUE,
+                  title       TEXT NOT NULL,
+                  artist      TEXT NOT NULL,
+                  album       TEXT,
+                  duration_ms INTEGER NOT NULL DEFAULT 0,
+                  art_url     TEXT,
+                  art_path    TEXT,
+                  added_at    INTEGER NOT NULL,
+                  favorite    INTEGER NOT NULL DEFAULT 0,
+                  play_count  INTEGER NOT NULL DEFAULT 0,
+                  last_played INTEGER,
+                  hidden      INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO track(key, title, artist, album, added_at)
+                VALUES ('old:1', 'Vieja', 'Artista', 'Álbum', 1234);
+                "#,
+            )
+            .unwrap();
+        }
+        let lib = Library::open(&path).unwrap();
+        let mut stmt = lib.conn.prepare("PRAGMA table_info(track)").unwrap();
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        for column in ["artists_json", "artists_version", "album_artist", "hidden"] {
+            assert!(columns.iter().any(|name| name == column), "falta {column}");
+        }
+        let row = lib.track_by_key("old:1").unwrap().unwrap();
+        assert_eq!(row.id, 1);
+        assert_eq!(row.track.key, "old:1");
+        assert!(row.artists.is_empty());
+        assert!(row.album_artist.is_none());
+        let hidden: i64 = lib
+            .conn
+            .query_row("SELECT hidden FROM track WHERE key = 'old:1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(hidden, 0);
+    }
+
+    #[test]
+    fn split_artist_credit_only_cuts_explicit_markers() {
+        assert_eq!(split_artist_credit("A feat. B"), vec!["A", "B"]);
+        assert_eq!(split_artist_credit("A FEAT B"), vec!["A", "B"]);
+        assert_eq!(split_artist_credit("A ft. B; C"), vec!["A", "B", "C"]);
+        assert_eq!(split_artist_credit("A featuring B feat. a"), vec!["A", "B"]);
+        // Comas, «&» y «and» forman parte del nombre: no se tocan.
+        assert_eq!(
+            split_artist_credit("Tyler, The Creator"),
+            vec!["Tyler, The Creator"]
+        );
+        assert_eq!(
+            split_artist_credit("Earth, Wind & Fire"),
+            vec!["Earth, Wind & Fire"]
+        );
+        assert!(split_artist_credit("   ").is_empty());
+    }
+
+    #[test]
+    fn update_artists_roundtrips_and_is_idempotent() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&track("k", "Song", "A feat. B")).unwrap();
+        let artists = vec!["A".to_string(), "B".to_string()];
+        lib.update_artists("k", &artists, 1).unwrap();
+        let row = lib.track_by_key("k").unwrap().unwrap();
+        assert_eq!(row.artists, artists);
+        assert_eq!(
+            lib.tracks_without_artists(10)
+                .unwrap()
+                .iter()
+                .filter(|row| row.track.key == "k")
+                .count(),
+            0
+        );
+        lib.update_artists("k", &artists, 1).unwrap();
+        let row = lib.track_by_key("k").unwrap().unwrap();
+        assert_eq!(row.artists, artists);
+        let version: i64 = lib
+            .conn
+            .query_row(
+                "SELECT artists_version FROM track WHERE key = 'k'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn upsert_does_not_wipe_enriched_artists() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&track("k", "Song", "A feat. B")).unwrap();
+        let artists = vec!["A".to_string(), "B".to_string()];
+        lib.update_artists("k", &artists, 3).unwrap();
+        lib.set_album_artist("k", "A").unwrap();
+        lib.upsert_track(&track("k", "Song (Remaster)", "A feat. B"))
+            .unwrap();
+        let row = lib.track_by_key("k").unwrap().unwrap();
+        assert_eq!(row.track.title, "Song (Remaster)");
+        assert_eq!(row.artists, artists);
+        assert_eq!(row.album_artist.as_deref(), Some("A"));
+        let version: i64 = lib
+            .conn
+            .query_row(
+                "SELECT artists_version FROM track WHERE key = 'k'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn albums_group_by_album_artist() {
+        let mut lib = Library::open_in_memory().unwrap();
+        for (key, title, artist) in [
+            ("k1", "One", "Main Artist feat. Guest A"),
+            ("k2", "Two", "Main Artist feat. Guest B"),
+        ] {
+            let mut item = track(key, title, artist);
+            item.album = Some("Joint".into());
+            lib.upsert_track(&item).unwrap();
+            lib.set_album_artist(key, "Main Artist").unwrap();
+        }
+        let albums = lib.albums().unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].album, "Joint");
+        assert_eq!(albums[0].artist, "Main Artist");
+        assert_eq!(albums[0].track_count, 2);
+        assert_eq!(lib.album_tracks("Joint", "Main Artist").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_track_unions_artists_and_keeps_album_artist() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let keep = lib.upsert_track(&track("k1", "Song", "A feat. B")).unwrap();
+        let drop = lib.upsert_track(&track("k2", "Song", "A feat. C")).unwrap();
+        lib.update_artists("k1", &["A".into(), "B".into()], 1)
+            .unwrap();
+        lib.update_artists("k2", &["a".into(), "C".into()], 2)
+            .unwrap();
+        lib.set_album_artist("k2", "A").unwrap();
+        lib.merge_track(keep, drop).unwrap();
+        let row = lib.track_by_id(keep).unwrap().unwrap();
+        assert_eq!(row.artists, vec!["A", "B", "C"]);
+        assert_eq!(row.album_artist.as_deref(), Some("A"));
+        let version: i64 = lib
+            .conn
+            .query_row(
+                "SELECT artists_version FROM track WHERE id = ?1",
+                [keep],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
     }
 }

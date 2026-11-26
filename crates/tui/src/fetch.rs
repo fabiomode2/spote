@@ -1,7 +1,7 @@
 //! Trabajos en segundo plano que nunca deben bloquear el render: portada,
 //! letra y sondeo de MPRIS.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -75,6 +75,7 @@ pub struct ArtRequest {
     pub local: Option<PathBuf>,
     /// Prefiere la portada remota (Spotify) sobre la miniatura local de
     /// yt-dlp. Si la remota falla, cae al fichero local.
+    #[allow(dead_code)]
     pub prefer_url: bool,
     pub w: u16,
     pub h: u16,
@@ -98,6 +99,63 @@ pub struct ArtResponse {
     pub error: Option<String>,
 }
 
+#[derive(Clone)]
+struct SourceEntry {
+    image: Arc<image::DynamicImage>,
+    palette: Palette,
+    path: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct ArtCache {
+    sources: HashMap<String, SourceEntry>,
+    renders: HashMap<(String, ArtMode, u16, u16), CoverArt>,
+    pngs: HashMap<(String, String, u16, u16), Vec<u8>>,
+}
+
+impl ArtCache {
+    fn source(&self, key: &str) -> Option<SourceEntry> {
+        self.sources.get(key).cloned()
+    }
+
+    fn put_source(
+        &mut self,
+        key: String,
+        image: Arc<image::DynamicImage>,
+        palette: Palette,
+        path: Option<PathBuf>,
+    ) {
+        self.sources.insert(
+            key,
+            SourceEntry {
+                image,
+                palette,
+                path,
+            },
+        );
+    }
+
+    fn render(&self, key: &str, mode: ArtMode, w: u16, h: u16) -> Option<CoverArt> {
+        self.renders.get(&(key.to_string(), mode, w, h)).cloned()
+    }
+
+    fn put_render(&mut self, key: &str, mode: ArtMode, w: u16, h: u16, art: CoverArt) {
+        self.renders
+            .insert((key.to_string(), mode, w, h), art);
+    }
+
+    fn png(&self, kind: &str, key: &str, w: u16, h: u16) -> Option<Vec<u8>> {
+        self.pngs
+            .get(&(kind.to_string(), key.to_string(), w, h))
+            .cloned()
+    }
+
+    fn put_png(&mut self, kind: &str, key: &str, w: u16, h: u16, png: Vec<u8>) {
+        self.pngs
+            .insert((kind.to_string(), key.to_string(), w, h), png);
+    }
+}
+
 pub struct ArtWorker {
     big: Sender<ArtRequest>,
     thumbs: Sender<ArtRequest>,
@@ -109,35 +167,9 @@ impl ArtWorker {
         let (big_tx, big_rx) = std::sync::mpsc::channel::<ArtRequest>();
         let (thumb_tx, thumb_rx) = std::sync::mpsc::channel::<ArtRequest>();
         let (response_tx, response_rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name("spote-art".into())
-            .spawn(move || {
-                let client = reqwest::blocking::Client::builder()
-                    .user_agent(concat!("spote/", env!("CARGO_PKG_VERSION")))
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .ok();
-                // Dos colas: la portada grande manda. Antes, una lista en
-                // tarjetas encolaba 8 miniaturas y la portada de la canción
-                // nueva llegaba segundos tarde (o no llegaba).
-                loop {
-                    let request = match big_rx.recv_timeout(std::time::Duration::from_millis(20)) {
-                        Ok(request) => request,
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            match thumb_rx.try_recv() {
-                                Ok(request) => request,
-                                Err(_) => continue,
-                            }
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                    };
-                    let response = process(&request, client.as_ref());
-                    if response_tx.send(response).is_err() {
-                        return;
-                    }
-                }
-            })
-            .ok();
+        let cache = Arc::new(Mutex::new(ArtCache::default()));
+        spawn_art_thread("spote-art-main", big_rx, cache.clone(), response_tx.clone());
+        spawn_art_thread("spote-art-thumbs", thumb_rx, cache, response_tx);
         Self {
             big: big_tx,
             thumbs: thumb_tx,
@@ -146,7 +178,8 @@ impl ArtWorker {
     }
 
     pub fn request(&self, request: ArtRequest) {
-        if request.kind == ArtKind::Thumb {
+        // Las miniaturas y el ambiente no deben retrasar la portada principal.
+        if matches!(request.kind, ArtKind::Thumb | ArtKind::Ambient) {
             let _ = self.thumbs.send(request);
         } else {
             let _ = self.big.send(request);
@@ -161,7 +194,109 @@ impl ArtWorker {
     }
 }
 
-fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> ArtResponse {
+fn spawn_art_thread(
+    name: &str,
+    rx: Receiver<ArtRequest>,
+    cache: Arc<Mutex<ArtCache>>,
+    responses: Sender<ArtResponse>,
+) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let client = reqwest::blocking::Client::builder()
+                .user_agent(concat!("spote/", env!("CARGO_PKG_VERSION")))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .ok();
+            while let Ok(request) = rx.recv() {
+                let response = process(&request, client.as_ref(), &cache);
+                if responses.send(response).is_err() {
+                    return;
+                }
+            }
+        })
+        .ok();
+}
+
+fn source_key(request: &ArtRequest) -> String {
+    request
+        .local
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(|| request.url.clone())
+        .unwrap_or_else(|| request.key.clone())
+}
+
+/// Fuente decodificada y paleta, cacheadas por ruta/URL. El mismo cover se
+/// reutiliza para la portada, la textura del mosaico y todas las miniaturas.
+fn load_source(
+    request: &ArtRequest,
+    client: Option<&reqwest::blocking::Client>,
+    cache: &Arc<Mutex<ArtCache>>,
+) -> Option<(String, SourceEntry, Option<PathBuf>)> {
+    let key = source_key(request);
+    if let Ok(cache) = cache.lock() {
+        if let Some(source) = cache.source(&key) {
+            return Some((key, source.clone(), source.path.clone()));
+        }
+    }
+
+    let mut art_path = request.local.clone();
+    let mut image = request
+        .local
+        .as_ref()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| decode_image(&bytes).ok());
+    if image.is_none() {
+        if let Some(url) = request.url.as_deref() {
+            let path = cache_art_path(&request.key, url);
+            if path.exists() {
+                image = std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| decode_image(&bytes).ok());
+                if image.is_some() {
+                    art_path = Some(path.clone());
+                }
+            }
+            if image.is_none() {
+                if let Some(client) = client {
+                    if let Ok(bytes) = download(client, url) {
+                        let _ = std::fs::create_dir_all(
+                            path.parent().unwrap_or(Path::new("/tmp")),
+                        );
+                        let _ = std::fs::write(&path, &bytes);
+                        image = decode_image(&bytes).ok();
+                        if image.is_some() {
+                            art_path = Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let image = image?;
+    let palette = Palette::from_image(&image);
+    let entry = SourceEntry {
+        image: Arc::new(image),
+        palette,
+        path: art_path.clone(),
+    };
+    if let Ok(mut cache) = cache.lock() {
+        cache.put_source(key.clone(), entry.image.clone(), entry.palette, art_path.clone());
+    }
+    Some((key, entry, art_path))
+}
+
+fn scaled_size(w: u32, h: u32, max: u32) -> (u32, u32) {
+    if w <= max && h <= max {
+        (w.max(1), h.max(1))
+    } else {
+        let scale = max as f32 / w.max(h) as f32;
+        (((w as f32 * scale).round() as u32).max(1), ((h as f32 * scale).round() as u32).max(1))
+    }
+}
+
+fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>, cache: &Arc<Mutex<ArtCache>>) -> ArtResponse {
     let mut response = ArtResponse {
         key: request.key.clone(),
         palette: None,
@@ -176,95 +311,63 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
         error: None,
     };
 
-    let local_image = request
-        .local
-        .as_ref()
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| decode_image(&bytes).ok());
-
-    let mut image = if request.prefer_url {
-        None
-    } else {
-        local_image.clone()
-    };
-
-    if image.is_none() {
-        if let Some(url) = request.url.as_deref() {
-            let path = cache_art_path(&request.key, url);
-            if path.exists() {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    image = decode_image(&bytes).ok();
-                    response.art_path = Some(path.clone());
-                }
-            }
-            if image.is_none() {
-                if let Some(client) = client {
-                    match download(client, url) {
-                        Ok(bytes) => {
-                            let _ =
-                                std::fs::create_dir_all(path.parent().unwrap_or(Path::new("/tmp")));
-                            let _ = std::fs::write(&path, &bytes);
-                            image = decode_image(&bytes).ok();
-                            response.art_path = Some(path.clone());
-                        }
-                        Err(err) => response.error = Some(err),
-                    }
-                }
-            }
-            if response.art_path.is_none() && path.exists() {
-                response.art_path = Some(path);
-            }
-        }
-    }
-    // Red caída o URL rota: la miniatura local sigue sirviendo.
-    if image.is_none() {
-        image = local_image;
-        if image.is_some() {
-            response.art_path = request.local.clone();
-            response.error = None;
-        }
-    }
-
-    let Some(image) = image else {
+    let Some((source_key, source, art_path)) = load_source(request, client, cache) else {
         if response.error.is_none() {
             response.error = Some("sin portada".into());
         }
         return response;
     };
-
-    // La paleta del tema solo la necesita la portada grande; calcularla por
-    // cada miniatura era trabajo tirado en el hilo de arte.
-    if request.kind != ArtKind::Thumb {
-        response.palette = Some(Palette::from_image(&image));
+    response.art_path = art_path;
+    if request.kind == ArtKind::Main {
+        response.palette = Some(source.palette);
     }
-    let palette = match response.palette {
-        Some(palette) => palette,
-        // Las miniaturas se piden en `Plain`: no necesitan la paleta.
-        None if request.mode == ArtMode::Plain => Palette::default(),
-        None => Palette::from_image(&image),
-    };
     if request.mode != ArtMode::Off && request.w > 2 && request.h > 1 {
-        response.art = Some(render_cover(
-            &image,
-            request.w,
-            request.h,
-            request.mode,
-            &palette,
-            0.0,
-        ));
+        let cached = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.render(&source_key, request.mode, request.w, request.h));
+        let art = match cached {
+            Some(art) => art,
+            None => {
+                let art = render_cover(
+                    &source.image,
+                    request.w,
+                    request.h,
+                    request.mode,
+                    &source.palette,
+                    0.0,
+                );
+                if let Ok(mut cache) = cache.lock() {
+                    cache.put_render(&source_key, request.mode, request.w, request.h, art.clone());
+                }
+                art
+            }
+        };
+        response.art = Some(art);
     }
-    // La imagen original solo interesa para la portada grande en Kitty. Se
-    // convierte a PNG una vez por cambio, no por frame.
-    // Miniaturas para Kitty: se manda una versión normalizada (la terminal la
-    // escala al hueco) y así una tarjeta de 6x3 se ve como la portada real,
-    // no como un bloque de 6x3.
+
+    // PNGs cacheados por fuente. Antes cada miniatura decodificaba y
+    // reencodeaba la imagen completa; con 10 filas visibles eso eran segundos.
     if request.kind == ArtKind::Thumb && request.mode == ArtMode::Plain {
-        let thumb = image.resize_to_fill(192, 192, image::imageops::FilterType::Lanczos3);
-        let mut png = Vec::new();
-        if thumb
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .is_ok()
-        {
+        let cached = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.png("thumb", &source_key, 192, 192));
+        let png = match cached {
+            Some(png) => Some(png),
+            None => {
+                let thumb = source
+                    .image
+                    .resize_to_fill(192, 192, image::imageops::FilterType::Lanczos3);
+                encode_png(&thumb).map(|png| {
+                    if let Ok(mut cache) = cache.lock() {
+                        cache.put_png("thumb", &source_key, 192, 192, png.clone());
+                    }
+                    png
+                })
+            }
+        };
+        if let Some(png) = png {
             response.png_size = Some((192, 192));
             response.png = Some(png);
         }
@@ -274,16 +377,97 @@ fn process(request: &ArtRequest, client: Option<&reqwest::blocking::Client>) -> 
         && request.w >= 24
         && request.h >= 12
     {
-        let mut png = Vec::new();
-        if image
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .is_ok()
-        {
-            response.png_size = Some((image.width(), image.height()));
+        let cached = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.png("main", &source_key, 0, 0));
+        if let Some(png) = cached {
+            response.png_size = Some(scaled_size(source.image.width(), source.image.height(), 720));
+            response.png = Some(png);
+        } else {
+            // No hace falta mandar 1000×1000 a la terminal: 720 px ya es más
+            // que suficiente para cualquier celda y encodea mucho más rápido.
+            let png_image = if source.image.width() > 720 || source.image.height() > 720 {
+                source
+                    .image
+                    .resize(720, 720, image::imageops::FilterType::Lanczos3)
+            } else {
+                (*source.image).clone()
+            };
+            let size = scaled_size(source.image.width(), source.image.height(), 720);
+            if let Some(png) = encode_png(&png_image) {
+                if let Ok(mut cache) = cache.lock() {
+                    cache.put_png("main", &source_key, 0, 0, png.clone());
+                }
+                response.png_size = Some(size);
+                response.png = Some(png);
+            }
+        }
+    }
+    // Retrato de artista: PNG al tamaño del hueco, con recorte central para
+    // llenarlo sin deformar la cara. El arte half-block anterior queda de
+    // respaldo para terminales sin imágenes.
+    if request.kind == ArtKind::Artist
+        && request.mode == ArtMode::Plain
+        && request.w >= 12
+        && request.h >= 6
+    {
+        let cached = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.png("artist", &source_key, request.w, request.h));
+        let png = match cached {
+            Some(png) => Some(png),
+            None => {
+                let (fitted, target) = resize_to_fit(&source.image, request.w, request.h);
+                encode_png(&fitted).map(|png| {
+                    if let Ok(mut cache) = cache.lock() {
+                        cache.put_png(
+                            "artist",
+                            &source_key,
+                            request.w,
+                            request.h,
+                            png.clone(),
+                        );
+                    }
+                    let _ = target;
+                    png
+                })
+            }
+        };
+        if let Some(png) = png {
+            let (_, target) = resize_to_fit(&source.image, request.w, request.h);
+            response.png_size = Some(target);
             response.png = Some(png);
         }
     }
     response
+}
+
+/// Resolución asumida de una celda de terminal: alto doble que ancho. Enviar
+/// el PNG a un píxel por celda (`w` x `2h`) lo dejaba borroso al escalarlo la
+/// terminal; 8x16 por celda conserva el encuadre con detalle real.
+const CELL_PX: (u32, u32) = (8, 16);
+
+/// Escala la imagen al hueco de `w`x`h` celdas recortando por el centro
+/// (object-fit: cover). Devuelve la imagen y el tamaño en píxeles del PNG.
+fn resize_to_fit(image: &image::DynamicImage, w: u16, h: u16) -> (image::DynamicImage, (u32, u32)) {
+    let target = (
+        u32::from(w.max(1)) * CELL_PX.0,
+        u32::from(h.max(1)) * CELL_PX.1,
+    );
+    (
+        image.resize_to_fill(target.0, target.1, image::imageops::FilterType::Lanczos3),
+        target,
+    )
+}
+
+fn encode_png(image: &image::DynamicImage) -> Option<Vec<u8>> {
+    let mut png = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
 }
 
 fn download(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>, String> {
@@ -668,6 +852,81 @@ mod tests {
         let reloaded = spote_core::lyrics::parse_lrc(&text);
         assert!(reloaded.lines[0].words_exact);
         assert_eq!(reloaded.lines[0].words[0].start_ms, 10_000);
+    }
+
+    /// PNG de prueba en disco: una imagen de 64x40 que no cabe en el hueco.
+    fn test_image_file(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("spote-{name}-{}.png", std::process::id()));
+        let img = image::RgbImage::from_fn(64, 40, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 5) as u8, 0x80])
+        });
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, png).unwrap();
+        path
+    }
+
+    #[test]
+    fn artist_request_builds_png_at_cell_resolution() {
+        let path = test_image_file("artist-png");
+        let cache = Arc::new(Mutex::new(ArtCache::default()));
+        let response = process(
+            &ArtRequest {
+                key: "artist:test".into(),
+                url: None,
+                local: Some(path.clone()),
+                prefer_url: false,
+                w: 24,
+                h: 12,
+                mode: ArtMode::Plain,
+                kind: ArtKind::Artist,
+            },
+            None,
+            &cache,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(response.error.is_none(), "{:?}", response.error);
+        // 8x16 px por celda: 24x12 celdas -> 192x192 px, recorte central.
+        assert_eq!(response.png_size, Some((192, 192)));
+        let png = response.png.expect("sin PNG de artista");
+        let decoded = decode_image(&png).expect("PNG inválido");
+        assert_eq!((decoded.width(), decoded.height()), (192, 192));
+        assert!(
+            response.palette.is_none(),
+            "la ficha de artista no debe tocar el tema"
+        );
+        let art = response.art.expect("sin fallback half-block");
+        assert_eq!((art.w, art.h), (24, 12));
+    }
+
+    #[test]
+    fn prefer_url_falls_back_to_local_when_remote_fails() {
+        let path = test_image_file("prefer-url");
+        let cache = Arc::new(Mutex::new(ArtCache::default()));
+        let response = process(
+            &ArtRequest {
+                key: "prefer-url".into(),
+                url: Some("file:///nonexistent/spote-cover.png".into()),
+                local: Some(path.clone()),
+                prefer_url: true,
+                w: 24,
+                h: 12,
+                mode: ArtMode::Plain,
+                kind: ArtKind::Artist,
+            },
+            None,
+            &cache,
+        );
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            response.png.is_some(),
+            "sin respaldo local: {:?}",
+            response.error
+        );
+        assert_eq!(response.art_path.as_deref(), Some(path.as_path()));
+        assert!(response.error.is_none());
     }
 
     #[test]

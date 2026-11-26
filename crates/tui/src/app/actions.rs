@@ -335,19 +335,32 @@ impl App {
             Action::SettingsToggle(row) => self.toggle_setting(row),
             Action::ToggleZen => self.set_zen(!self.zen),
             Action::Tab(tab) => {
-                self.tab = tab;
                 self.lib_search_focus = false;
                 self.album_search_focus = false;
                 self.settings_search_focus = false;
-                self.needs_redraw = true;
-                if tab != Tab::Library {
-                    self.lib_filter = LibFilter::All;
-                }
-                self.refresh_view();
-                if tab == Tab::Search {
-                    self.search.query.clear();
-                    self.search.results.clear();
-                }
+                self.goto_section(tab);
+            }
+            Action::DocTab(index) => {
+                self.activate_doc(index);
+            }
+            Action::DocClose(index) => {
+                self.close_doc(index);
+            }
+            Action::NavBack => {
+                self.nav_back();
+            }
+            Action::NavForward => {
+                self.nav_forward();
+            }
+            Action::NavClose => {
+                self.close_active_doc();
+            }
+            Action::PaletteSelect(index) => {
+                self.palette_selected = index.min(PaletteVariant::ALL.len() - 1);
+                self.palette_preview();
+            }
+            Action::PaletteApply(album) => {
+                self.palette_apply(album);
             }
             Action::PlayPause => self.toggle_play(),
             Action::Next => self.next_track(),
@@ -378,13 +391,13 @@ impl App {
             Action::Mute => self.toggle_mute(),
             Action::VizNext => {
                 self.show_viz = true;
-                self.viz.next_preset();
+                self.cycle_viz(1);
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
                 self.cfg.save().ok();
             }
             Action::VizPrev => {
                 self.show_viz = true;
-                self.viz.prev_preset();
+                self.cycle_viz(-1);
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
                 self.cfg.save().ok();
             }
@@ -400,9 +413,15 @@ impl App {
             | Action::AudioNormalize => self.handle_audio_action(action),
             Action::VizPreset(index) => {
                 self.show_viz = true;
+                self.effects_selected = index.min(crate::viz::PRESETS.len().saturating_sub(1));
                 self.viz.set_preset(index);
                 self.cfg.ui.viz = self.viz.preset_name().to_string();
                 self.cfg.save().ok();
+            }
+            Action::VizToggleEffect(index) => {
+                if let Some(preset) = crate::viz::PRESETS.get(index) {
+                    self.toggle_effect_enabled(preset.name);
+                }
             }
             Action::VizLayer(index) => self.viz.toggle_layer(index),
             Action::VizFullscreen => {

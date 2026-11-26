@@ -43,6 +43,9 @@ pub struct SpotifyTrack {
     pub title: String,
     /// Artistas separados por coma, en orden.
     pub artists: String,
+    /// La misma lista, estructurada; es la fuente para `artists_json`.
+    #[serde(default)]
+    pub artist_list: Vec<String>,
     pub album: String,
     pub duration_ms: u64,
     pub art_url: Option<String>,
@@ -307,17 +310,22 @@ fn search_spotify(query: &str, limit: usize) -> Result<Vec<SpotifyTrack>> {
     Err(last_error.unwrap_or_else(|| anyhow!("spotify search")))
 }
 
-/// Artistas de un objeto de Spotify, unidos por coma en el orden original.
-fn join_artists(node: &Value) -> String {
+/// Artistas de un objeto de Spotify, en el orden original.
+fn artist_list(node: &Value) -> Vec<String> {
     node.get("artists")
         .and_then(Value::as_array)
         .map(|list| {
             list.iter()
                 .filter_map(|artist| artist.get("name").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join(", ")
+                .map(str::to_string)
+                .collect()
         })
         .unwrap_or_default()
+}
+
+/// Artistas de un objeto de Spotify, unidos por coma en el orden original.
+fn join_artists(node: &Value) -> String {
+    artist_list(node).join(", ")
 }
 
 /// Portada de mayor resolución de un objeto con `images[]` (álbum, lista...).
@@ -357,6 +365,7 @@ fn spotify_track(node: &Value) -> Option<SpotifyTrack> {
         id,
         title,
         artists: join_artists(node),
+        artist_list: artist_list(node),
         album,
         duration_ms,
         art_url,
@@ -426,6 +435,7 @@ fn deezer_search_track(item: &Value) -> Option<SpotifyTrack> {
         provider: "deezer".into(),
         id,
         title,
+        artist_list: if artists.is_empty() { Vec::new() } else { vec![artists.clone()] },
         artists,
         album,
         duration_ms,
@@ -932,6 +942,7 @@ fn deezer_artist_track(item: &Value) -> Option<SpotifyTrack> {
         provider: "deezer".into(),
         id,
         title,
+        artist_list: if artists.is_empty() { Vec::new() } else { vec![artists.clone()] },
         artists,
         album,
         duration_ms,
@@ -1948,6 +1959,7 @@ mod tests {
             id: "x".into(),
             title: "Untitled".into(),
             artists: String::new(),
+            artist_list: Vec::new(),
             album: String::new(),
             duration_ms: 0,
             art_url: None,

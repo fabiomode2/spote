@@ -14,7 +14,10 @@ git clone https://github.com/fabiomode2/spote && cd spote
 spote
 ```
 
-Hacen falta Rust 1.82+ para la TUI (1.85+ si compilas `spote-mini`), `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`. El instalador
+Hacen falta Rust 1.82+ para la TUI (1.85+ si compilas `spote-mini`), `mpv`, `ffmpeg` y `yt-dlp` en el `PATH`.
+En Kitty, WezTerm, Ghostty y Konsole reciente las portadas y fotos de artista
+se dibujan como imágenes reales; en el resto hay fallback half-block.
+`SPOTE_IMAGES=off` fuerza el fallback y `SPOTE_IMAGES=kitty` lo activa a mano. El instalador
 deja los binarios en `~/.local/bin`, crea el venv con `faster-whisper` y copia
 los scripts. Las letras no necesitan nada más: LRCLIB, Genius, captions de
 YouTube y ASR van dentro.
@@ -26,8 +29,10 @@ la propia TUI.
 
 - **Arte**: portada en half-block, dither, braille o imagen real en Kitty. La
   paleta del tema sale de la carátula.
-- **Visuales**: `clean`, `aurora`, `bloom`, `inferno`, `crt`, `lcd`, `rack`,
-  `braille` y `stage`; `v` cicla y `V` los pone a pantalla completa.
+- **Visuales**: catálogo `clean`, `aurora`, `bloom`, `inferno`, `crt`, `lcd`,
+  `rack`, `braille` y `stage`. La rotación de `v` se elige en `e` (por defecto
+  `clean`, `aurora`, `bloom`, `crt` y `braille`; `lcd/rack/stage` quedan a
+  mano). `V` los pone a pantalla completa.
 - **Letras**: Genius es la referencia de texto. LRCLIB, lrcmux y las captions
   de YouTube solo aportan tiempos cuando su letra coincide. Si no hay una
   fuente fiable, se muestra “sin letra verificada”. El chip `inv` (o `G` en el
@@ -39,15 +44,23 @@ la propia TUI.
   descarta la caché y busca otra letra.
 - **Karaoke**: palabra a palabra, frases largas en dos filas y la última palabra
   se llena antes de cambiar de línea.
-- **Ficha de artista y álbum**: se abren en un panel fijo a la derecha, no en
-  un popup. El artista muestra su discografía en una tira horizontal
-  scrolleable y sus canciones populares; el álbum, portada, ficha y tracklist.
-  Se cierran solo con `‹ volver`/`esc`.
-- **Barra de canción actual**: portada, título, artista, álbum, corazón de
-  favorita y estado de reproducción, siempre encima del transporte.
-- **Fondo mosaico**: la portada de la pista actual repetida en mosaico detrás
-  de toda la interfaz, con opacidad de 5–50 %, movimiento en deriva, filas,
-  columnas o giro, velocidad ajustable y saltos al compás del bombo.
+- **Ficha de artista y álbum**: se abren como páginas con historial, en una
+  columna lateral redimensionable o a todo el ancho (`modo de detalle`). El
+  artista muestra su discografía en una tira horizontal y sus canciones
+  populares; el álbum, portada, ficha y tracklist. `esc` vuelve a la página
+  anterior y la × cierra el documento.
+- **Pestañas e historial**: secciones fijas en el lateral y pestañas de
+  documentos arriba. Abrir artista/álbum apila una página; `esc` vuelve,
+  `alt+←/→` recorre el historial, `ctrl+w` cierra y `ctrl+tab` cambia de
+  pestaña.
+- **Barra de canción actual**: portada, título, todos los artistas (principal
+  y features), álbum, corazón de favorita y estado de reproducción.
+- **Fondo mosaico**: la portada de la pista actual detrás de **toda** la
+  interfaz, incluidos el chrome, el transporte y la franja de efectos. Modo
+  `half` con paleta por defecto (`plain`, `dither` y `braille` también),
+  opacidad propia, movimiento en deriva, filas, columnas, diagonal o auto
+  reactivo (calma/build/drop) y saltos al bombo. Los paneles tienen
+  transparencia real y borde configurable (línea o color reactivo); ambos ajustables.
 - **Búsqueda y reproducción**: Spotify y Deezer como catálogo, sin cuenta. El
   audio sale de `yt-dlp`. Si una pista no está descargada, se resuelve una URL
   y suena al momento mientras se guarda la copia local. Los títulos simbólicos
@@ -56,14 +69,22 @@ la propia TUI.
 - **Cola y listas**: encolar, reordenar, descargar, favoritas y playlists
   locales. `z` alterna tarjetas con portada y lista compacta. `/` en la
   biblioteca abre un filtro inline por título, artista o álbum.
-- **Discos guardados**: pestaña `discos` con todos los álbumes de la
-  biblioteca agrupados por artista, portadas y un buscador propio (`/`).
+- **Discos guardados**: pestaña `discos` con portadas, orden por artista y
+  buscador (`/`); `z` alterna tarjetas y lista compacta. Abrir un disco lo
+  apila en el historial.
   `X` o ⇧clic en la × oculta una pista de la biblioteca sin borrar el audio
   ni su historial; en favoritas quita el corazón. `d` sobre una lista y `X`
   sobre un disco piden confirmación y quitan **todas sus canciones** de la
-  biblioteca (el audio sigue en disco); en la lista, `t` permite conservarlas.
-  `spote dedupe` fusiona duplicados de forma explícita, con `--dry-run` y
-  backup previo.
+  biblioteca (el audio sigue en disco). En la lista se conservan por defecto y
+  `t` permite quitarlas también. `spote dedupe` fusiona duplicados de forma
+  explícita, con `--dry-run` y backup previo.
+- **Artistas completos**: las pistas guardan todos los artistas de Spotify
+  (principal + features) y `album_artist` para no fragmentar discos. Las
+  pistas antiguas se reprocesan en segundo plano; `spote artistas` lo relanza
+  a mano.
+- **Paletas**: `P` abre el laboratorio de paletas derivadas de la portada
+  (vibrante, pastel, complementaria, analógica, mono, duotone y contraste),
+  con preview y override por álbum.
 - **Wrapped**: `W` abre un resumen de escucha con horas, reproducciones,
   artistas, canciones, discos y actividad por meses. `a` alterna entre el
   año actual y todo el tiempo. Manteniendo `shift` aparece una `×` en cada
@@ -112,8 +133,10 @@ YouTube no entrega ningún formato.
 | `u` | bucle de la pista | `F` | portada a pantalla completa |
 | `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
-| `E` | editor de diseño | `Esc` | limpiar búsqueda |
+| `E` | editor de diseño | `Esc` | atrás |
 | `A` | pestaña de audio | `w` | mini reproductor |
+| `P` | menú de paletas | `O` | abrir álbum de la fila |
+| `ctrl+w` | cerrar documento | `ctrl+tab` | cambiar de pestaña |
 | `X` | quitar de la biblioteca | `t` | seguir el sistema (MPRIS) |
 | `q` | salir de spote | `?` | ayuda |
 
@@ -144,10 +167,25 @@ viz = "clean"          # clean | aurora | bloom | inferno | crt | lcd | rack | b
 fps = 60               # frames de la UI (20-60)
 fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
 
+panel_opacity = 72     # 55-100; transparencia real de paneles
+chrome_opacity = 40    # 0-100; barra superior y navegación
+bottom_opacity = 92    # 0-100; transporte, nowbar y hint (sólido por defecto)
+zen_viz_pct = 55       # altura del efecto en zen (30-100)
+panel_border = "line"  # line | color | none
+border_opacity = 70    # 0-100, independiente del relleno
+nav_position = "auto"  # auto | side | top | both
+detail_mode = "docked" # docked | expand | auto
+lyrics_scenario = "off" # off | lateral | centered | behind | mosaic
+effects_enabled = ["clean", "aurora", "bloom", "crt", "braille"]
+
 [ui.fx]
-ambient = "mosaic"     # off | void | aurora | neural | glitch | lyrics | cover | mosaic
-ambient_opacity = 35   # 0-50 %
-mosaic_motion = "drift" # drift | rows | columns | rotate
+ambient = "cover"      # capa extra: off | void | aurora | neural | glitch | lyrics
+ambient_opacity = 16   # 0-50 %
+backdrop = "mosaic"    # mosaic | gradient | off
+mosaic_mode = "half"   # half | plain | dither | braille
+mosaic_opacity = 22    # 5-50 %
+mosaic_motion = "auto" # auto | drift | rows | columns | diagonal | rotate
+mosaic_auto = true     # reacciona a la energía de la canción
 mosaic_speed = 4       # 1-10
 mosaic_beat = true     # salta con el bombo
 

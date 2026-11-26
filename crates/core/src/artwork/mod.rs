@@ -3,7 +3,7 @@
 mod palette;
 mod render;
 
-pub use palette::{extract_palette, Palette};
+pub use palette::{extract_palette, Palette, PaletteVariant};
 pub use render::render_cover;
 
 use image::DynamicImage;

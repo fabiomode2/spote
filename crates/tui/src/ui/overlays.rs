@@ -14,9 +14,9 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         return;
     }
     if overlay != Overlay::None {
-        // Velo de fondo sólido: los overlays antiguos dejaban traslucir la
-        // lista de debajo en terminales con celdas de fondo incompletas.
-        fill_soft(buf, layout.full, pal.bg_deep, 0.88, pal.bg_deep);
+        // Velo configurable: oscurece lo de abajo sin ocultar el mosaico.
+        let scrim = app.cfg.ui.overlay_scrim.clamp(0, 95) as f32 / 100.0;
+        fill_soft(buf, layout.full, pal.bg_deep, scrim, pal.bg_deep);
         // Un modal captura todo el ratón: sin esto, un clic fuera del panel
         // podía activar la lista o el transporte que quedaban debajo.
         app.hit.clear();
@@ -25,6 +25,7 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::None => {}
         Overlay::Help => draw_help(app, buf, layout, pal),
         Overlay::Effects => draw_effects(app, buf, layout, pal),
+        Overlay::Palette => draw_palette(app, buf, layout, pal),
         Overlay::Audio => draw_audio_overlay(app, buf, layout, pal),
         Overlay::Wrapped => draw_wrapped(app, buf, layout, pal),
         Overlay::PlaylistForm => draw_playlist_form(app, buf, layout, pal),
@@ -324,8 +325,6 @@ pub(super) fn overlay_frame(layout: &Layout, pal: &Palette, buf: &mut Buffer, wi
     );
     fill(buf, shadow, pal.bg_deep);
     fill(buf, rect, mix(pal.bg, pal.surface, 1.0));
-    mark_redraw(buf, shadow);
-    mark_redraw(buf, rect);
     panel(None, buf, rect, pal, true, 0.0, Some(title), 0.0);
     // La capa interior vuelve a rellenarse por si el borde dejó huecos.
     let inner = Rect::new(
@@ -335,23 +334,7 @@ pub(super) fn overlay_frame(layout: &Layout, pal: &Palette, buf: &mut Buffer, wi
         rect.height.saturating_sub(2),
     );
     fill(buf, inner, mix(pal.bg, pal.surface, 1.0));
-    mark_redraw(buf, inner);
     rect
-}
-
-/// Fuerza a que el terminal reescriba estas celdas: al abrir menús/overlays,
-/// el diff incremental puede dejar restos del contenido anterior en algunas
-/// terminales con gráficos Kitty.
-fn mark_redraw(buf: &mut Buffer, rect: Rect) {
-    let area = *buf.area();
-    let clip = rect.intersection(area);
-    let width = area.width as usize;
-    for y in clip.y..clip.y + clip.height {
-        let start = (y - area.y) as usize * width + (clip.x - area.x) as usize;
-        for cell in &mut buf.content[start..start + clip.width as usize] {
-            cell.diff_option = ratatui::buffer::CellDiffOption::AlwaysUpdate;
-        }
-    }
 }
 
 pub(super) fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
@@ -410,6 +393,62 @@ pub(super) fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
     app.hit.add(rect, Action::CloseOverlay);
 }
 
+pub(super) fn draw_palette(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let height = (PaletteVariant::ALL.len() as u16 + 7).min(layout.full.height.saturating_sub(2));
+    let rect = overlay_frame(layout, pal, buf, 64, height, "paletas de la portada");
+    let inner = inset(rect, 3, 2);
+    for (index, variant) in PaletteVariant::ALL.iter().enumerate() {
+        let y = inner.y + 1 + index as u16;
+        if y >= inner.y + inner.height.saturating_sub(2) {
+            break;
+        }
+        let selected = index == app.palette_selected;
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        if selected {
+            fill(buf, row, mix(pal.surface, pal.primary, 0.24));
+            put(buf, row.x, y, "▍", color(pal.primary), None);
+        }
+        let preview = app.dominant.variant(*variant);
+        let marker = if *variant == app.palette_variant { "●" } else { " " };
+        put(
+            buf,
+            row.x + 2,
+            y,
+            &format!("{marker} {:<15}", variant.label()),
+            color(if selected { pal.text } else { pal.muted }),
+            None,
+        );
+        let swatches = [
+            preview.bg_deep,
+            preview.surface,
+            preview.primary,
+            preview.secondary,
+            preview.text,
+        ];
+        let mut x = row.x + 21;
+        for swatch in swatches {
+            if x + 1 >= row.x + row.width {
+                break;
+            }
+            put(buf, x, y, "█", color(swatch), None);
+            x += 2;
+        }
+        app.hit.add(row, Action::PaletteSelect(index));
+    }
+    let footer = if app.now.track.is_some() {
+        "↑↓ previsualizar · enter aplicar · s guardar por álbum · esc cancelar"
+    } else {
+        "sin pista: la paleta base es la del tema"
+    };
+    text_at(
+        buf,
+        Rect::new(inner.x, rect.y + rect.height.saturating_sub(2), inner.width, 1),
+        footer,
+        Style::new().fg(color(pal.dim)),
+        Alignment::Center,
+    );
+}
+
 pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
     let rect = overlay_frame(layout, pal, buf, 74, 22, "visualizaciones · capas y presets");
     // El cierre se registra primero: el HitMap se queda con la última acción
@@ -422,7 +461,7 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     text_at(
         buf,
         Rect::new(inner.x, y, inner.width, 1),
-        "presets  ·  v cicla  ·  V pantalla completa",
+        "presets · ↑↓ elegir · espacio activar · enter usar · v cicla · V fullscreen",
         Style::new().fg(color(pal.primary)).add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
@@ -435,20 +474,41 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         let x = inner.x + column as u16 * (inner.width / per_row as u16);
         let py = y + row as u16;
         let active = i == app.viz.preset_index;
-        let label = format!("{} {}", if active { "▸" } else { "·" }, preset.name);
+        let selected = i == app.effects_selected;
+        let enabled = app.effect_enabled(preset.name);
+        let marker = if active {
+            "▸"
+        } else if enabled {
+            "●"
+        } else {
+            "○"
+        };
+        let label = format!("{marker} {}", preset.name);
         let width = label.chars().count() as u16 + 2;
         let chip_rect = Rect::new(x, py, width.min(inner.width), 1);
-        if active {
-            fill(buf, chip_rect, mix(pal.surface, pal.primary, 0.25));
+        if active || selected {
+            fill(
+                buf,
+                chip_rect,
+                mix(pal.surface, pal.primary, if active { 0.25 } else { 0.12 }),
+            );
         }
         text_at(
             buf,
             chip_rect,
             label,
-            Style::new().fg(color(if active { pal.text } else { pal.muted })),
+            Style::new().fg(color(if active {
+                pal.text
+            } else if enabled {
+                pal.muted
+            } else {
+                pal.dim
+            })),
             Alignment::Left,
         );
         app.hit.add(chip_rect, Action::VizPreset(i));
+        let check = Rect::new(chip_rect.x, py, 2, 1);
+        app.hit.add(check, Action::VizToggleEffect(i));
     }
     y += ((presets.len() + per_row - 1) / per_row + 1) as u16;
 

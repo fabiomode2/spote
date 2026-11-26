@@ -309,8 +309,17 @@ fn draw_artist(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
             .bio
             .as_deref()
             .is_some_and(|bio| !bio.trim().is_empty());
+    let image_w = if show_image {
+        if area.width >= 52 {
+            18
+        } else {
+            12
+        }
+    } else {
+        0
+    };
     let text_rows = 2 + u16::from(show_popularity) + u16::from(show_bio);
-    let image_h = if show_image { 6 } else { 0 };
+    let image_h = if show_image { image_w / 2 } else { 0 };
     let hero_h = image_h.max(text_rows).min(area.height);
 
     if hero_h >= 2 {
@@ -323,7 +332,6 @@ fn draw_artist(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
         );
     }
 
-    let image_w = if show_image { 12 } else { 0 };
     if show_image {
         let image = Rect::new(area.x, area.y, image_w, image_h);
         if let Some(art) = app.artist_art.as_ref().filter(|art| !art.is_empty()) {
@@ -331,7 +339,21 @@ fn draw_artist(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
         } else {
             art_placeholder(buf, image, pal, &profile.name);
         }
-        frame_art(buf, image, pal);
+        // Si el worker generó un PNG (Kitty), se coloca como imagen real. El
+        // fallback half-block queda debajo y se ve en terminales sin soporte.
+        let artist_key = format!("artist:{}", profile.id);
+        let image_inner = Rect::new(
+            image.x + 1,
+            image.y + 1,
+            image.width.saturating_sub(2),
+            image.height.saturating_sub(2),
+        );
+        app.hi_thumbs.push((
+            format!("{artist_key}@{}:{}", image_inner.x, image_inner.y),
+            artist_key,
+            image_inner,
+        ));
+        frame_art(app, buf, image, pal);
     }
 
     let text_x = area.x + if show_image { image_w + 2 } else { 0 };
@@ -429,7 +451,7 @@ fn draw_artist(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
     let remaining = bottom.saturating_sub(y);
     // La discografía solo entra si después queda al menos la cabecera del top
     // y una pista. En paneles bajos se prefiere el top completo.
-    if !profile.albums.is_empty() && remaining >= 1 + card_h + 1 + 2 {
+    if !profile.albums.is_empty() && remaining >= 1 + card_h + 1 + 5 {
         draw_artist_albums(
             app,
             buf,
@@ -569,7 +591,7 @@ fn draw_artist_albums(
             source_hint: None,
         };
         draw_thumb(app, buf, cover, &thumb_track, pal);
-        frame_art(buf, cover, pal);
+        frame_art(app, buf, cover, pal);
         if hover {
             for offset_x in 0..cover.width {
                 put(
@@ -860,7 +882,7 @@ fn draw_album(app: &mut App, buf: &mut Buffer, area: Rect, pal: &Palette) {
             source_hint: None,
         };
         draw_thumb(app, buf, cover, &thumb_track, pal);
-        frame_art(buf, cover, pal);
+        frame_art(app, buf, cover, pal);
     }
 
     let text_x = area.x + if show_image { cover_w + 2 } else { 0 };

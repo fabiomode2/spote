@@ -59,7 +59,7 @@ impl App {
                 MiniCommand::CycleViz => {
                     self.show_viz = true;
                     self.viz.paused = false;
-                    self.viz.next_preset();
+                    self.cycle_viz(1);
                     self.cfg.ui.viz = self.viz.preset_name().to_string();
                     self.cfg.save().ok();
                     self.needs_redraw = true;
