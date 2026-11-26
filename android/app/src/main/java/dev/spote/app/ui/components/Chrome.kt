@@ -292,7 +292,7 @@ fun Avatar(
             )
 
             !imageUri.isNullOrBlank() -> coil3.compose.AsyncImage(
-                model = imageUri,
+                model = if (imageUri.startsWith("/")) java.io.File(imageUri) else imageUri,
                 contentDescription = null,
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                 modifier = Modifier.matchParentSize(),

@@ -150,6 +150,8 @@ fun SpoteApp(
         state.search.remoteResults,
         state.library.albums,
         state.library.tracks,
+        state.albumDetails,
+        state.artistDetails,
         backStackEntry,
     ) {
         when {

@@ -637,7 +637,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) {
                     val engine = bridge ?: error("catálogo no disponible")
                     val dto = if (provider != null && providerId != null) {
-                        withCatalog { engine.artistProfileById(provider, providerId) }
+                        try {
+                            withCatalog { engine.artistProfileById(provider, providerId) }
+                        } catch (_: Exception) {
+                            withCatalog { engine.artistProfile(name) }
+                        }
                     } else {
                         withCatalog { engine.artistProfile(name) }
                     }
