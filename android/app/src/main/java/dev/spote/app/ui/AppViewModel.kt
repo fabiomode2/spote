@@ -10,6 +10,8 @@ import androidx.lifecycle.viewModelScope
 import dev.spote.app.BuildConfig
 import dev.spote.app.artwork.ArtworkResolver
 import dev.spote.app.artwork.CoverPalettes
+import dev.spote.app.data.CatalogClient
+import dev.spote.app.data.CatalogSnapshot
 import dev.spote.app.data.FavoriteStore
 import dev.spote.app.data.MockData
 import dev.spote.app.data.EmptySpoteRepository
@@ -44,7 +46,6 @@ import dev.spote.app.remote.RemoteTrack
 import dev.spote.app.remote.ResolvedAudio
 import dev.spote.app.rust.RustBridge
 import dev.spote.app.rust.coverFor
-import dev.spote.app.rust.toModel
 import java.io.File
 import java.net.URI
 import java.util.Locale
@@ -93,17 +94,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val player: PlayerState,
     )
 
-    private data class RemoteCatalog(
-        val tracks: List<Track> = emptyList(),
-        val albums: List<Album> = emptyList(),
-        val artists: List<Artist> = emptyList(),
-    )
-
-    private suspend fun <T> withCatalog(block: () -> T): T =
+    private suspend fun <T> withCatalog(block: suspend () -> T): T =
         withContext(Dispatchers.IO) { catalogMutex.withLock { block() } }
 
-    private val remoteCache = object : LinkedHashMap<String, RemoteCatalog>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RemoteCatalog>): Boolean =
+    private val remoteCache = object : LinkedHashMap<String, CatalogSnapshot>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CatalogSnapshot>): Boolean =
             size > 40
     }
 
@@ -255,18 +250,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         remoteSearchJob = viewModelScope.launch {
             delay(350)
             if (_state.value.search.query.trim() != trimmed) return@launch
-            val engine = bridge
-            if (engine == null) {
-                _state.update { it.copy(search = it.search.copy(remoteLoading = false)) }
-                return@launch
-            }
             _state.update { it.copy(search = it.search.copy(remoteLoading = true)) }
             val startedAt = System.currentTimeMillis()
             val result = runCatching {
-                withCatalog { engine.searchCatalog(trimmed, 20) }
-                    .toRemoteCatalog()
+                withCatalog { CatalogClient.search(trimmed, 20) }
             }
-            val catalog = withFavorites(result.getOrDefault(RemoteCatalog()))
+            val catalog = withFavorites(result.getOrDefault(CatalogSnapshot()))
             if (result.isSuccess) remoteCache[normalized] = catalog
             ActionLog.log(
                 "search.catalog",
@@ -292,76 +281,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun dev.spote.rust.CatalogSearchDto.toRemoteCatalog(): RemoteCatalog {
-        val mappedAlbums = albums.map { it.toModel() }
-        val extraAlbums = mutableListOf<Album>()
-        val mappedArtists = artists.map { it.toModel() }.toMutableList()
-
-        // Deezer/Spotify devuelven álbumes y artistas por búsqueda textual; si
-        // una pista trae un álbum que no salió en esa lista, se añade una
-        // ficha "lookup" para que el perfil se pueda abrir igualmente.
-        tracks.forEach { dto ->
-            val title = dto.album?.trim().orEmpty()
-            if (title.isNotEmpty()) {
-                val artist = dto.artistList.firstOrNull().orEmpty().ifBlank { dto.artists }
-                val exists = (extraAlbums + mappedAlbums).any { album ->
-                    val a = normalizeName(album.artist)
-                    val b = normalizeName(artist)
-                    normalizeName(album.title) == normalizeName(title) &&
-                        (a == b || a.contains(b) || b.contains(a))
-                }
-                if (!exists) {
-                    extraAlbums += Album(
-                        id = "lookup:${Uri.encode(title)}|${Uri.encode(artist)}",
-                        title = title,
-                        artist = artist,
-                        year = 0,
-                        cover = coverFor(title, null, dto.artUrl),
-                        tracks = emptyList(),
-                        provider = dto.provider,
-                        trackCount = 0,
-                    )
-                }
-            }
-            val names = dto.artistList.ifEmpty { listOf(dto.artists) }
-            names.forEach { name ->
-                if (name.isNotBlank() && mappedArtists.none { normalizeName(it.name) == normalizeName(name) }) {
-                    mappedArtists += Artist(
-                        id = "name:${normalizeName(name)}",
-                        name = name,
-                    )
-                }
-            }
-        }
-
-        val allAlbums = (extraAlbums + mappedAlbums).distinctBy { it.id }
-        val albumByKey = allAlbums.associateBy {
-            normalizeName(it.title) to normalizeName(it.artist)
-        }
-        val artistByName = mappedArtists.associateBy { normalizeName(it.name) }
-        val mappedTracks = tracks.map { dto ->
-            val model = dto.toModel()
-            val album = albumByKey[normalizeName(model.album.orEmpty()) to normalizeName(model.artist)]
-                ?: allAlbums.firstOrNull {
-                    normalizeName(it.title) == normalizeName(model.album.orEmpty())
-                }
-            val artistName = dto.artistList.firstOrNull().orEmpty().ifBlank { model.artist }
-            val artist = artistByName[normalizeName(artistName)]
-            model.copy(
-                albumProvider = album?.provider,
-                albumProviderId = album?.providerId,
-                artistProvider = artist?.provider,
-                artistProviderId = artist?.providerId,
-            )
-        }
-        return RemoteCatalog(
-            tracks = mappedTracks,
-            albums = allAlbums,
-            artists = mappedArtists.distinctBy { normalizeName(it.name) },
-        )
-    }
-
-    private fun withFavorites(catalog: RemoteCatalog): RemoteCatalog {
+    private fun withFavorites(catalog: CatalogSnapshot): CatalogSnapshot {
         if (catalog.tracks.isEmpty()) return catalog
         val tracks = catalog.tracks.map { track ->
             track.copy(favorite = FavoriteStore.isFavorite(track.key))
@@ -472,13 +392,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val title = Uri.decode(parts[0])
             val artist = Uri.decode(parts[1])
             val current = _state.value
-            val dto = bridge?.let { engine ->
-                runCatching {
-                    withCatalog { engine.findAlbum(title, artist) }
-                }.getOrNull()
-            }
-            if (dto != null) {
-                val album = dto.toModel()
+            val album = runCatching {
+                withCatalog { CatalogClient.findAlbum(title, artist) }
+            }.getOrNull()
+            if (album != null) {
                 return album.copy(
                     tracks = album.tracks.map { localizeTrack(it) },
                     trackCount = album.tracks.size,
@@ -499,9 +416,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (id.startsWith("catalog:")) {
             val parts = id.removePrefix("catalog:").split(":", limit = 2)
             require(parts.size == 2 && parts.all { it.isNotBlank() }) { "álbum de catálogo inválido" }
-            val engine = bridge ?: error("catálogo no disponible")
-            val dto = withCatalog { engine.albumInfo(parts[0], parts[1]) }
-            val album = dto.toModel()
+            val album = withCatalog { CatalogClient.album(parts[0], parts[1]) }
             return album.copy(
                 tracks = album.tracks.map { localizeTrack(it) },
                 trackCount = album.tracks.size,
@@ -530,11 +445,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             tracks = localTracks,
             trackCount = localTracks.size.coerceAtLeast(known.trackCount),
         )
-        val catalog = bridge?.let { engine ->
-            runCatching {
-                withCatalog { engine.findAlbum(local.title, local.artist) }
-            }.getOrNull()
-        }?.toModel()
+        val catalog = runCatching {
+            withCatalog { CatalogClient.findAlbum(local.title, local.artist) }
+        }.getOrNull()
         return mergeAlbum(local, catalog)
     }
 
@@ -635,17 +548,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    val engine = bridge ?: error("catálogo no disponible")
-                    val dto = if (provider != null && providerId != null) {
+                    val profile = if (provider != null && providerId != null) {
                         try {
-                            withCatalog { engine.artistProfileById(provider, providerId) }
+                            withCatalog { CatalogClient.artistById(provider, providerId) }
                         } catch (_: Exception) {
-                            withCatalog { engine.artistProfile(name) }
+                            withCatalog { CatalogClient.artist(name) }
                         }
                     } else {
-                        withCatalog { engine.artistProfile(name) }
+                        withCatalog { CatalogClient.artist(name) }
                     }
-                    val profile = dto.toModel()
                     profile.copy(
                         topTracks = profile.topTracks.map { localizeTrack(it) },
                         albums = profile.albums.map { album ->
