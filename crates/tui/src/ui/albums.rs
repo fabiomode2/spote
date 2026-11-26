@@ -137,13 +137,25 @@ fn draw_album_list(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palet
         );
         let mut artist = album.artist.clone();
         truncate_chars(&mut artist, text_w as usize);
-        put(buf, text_x, y + 1, &artist, color(pal.secondary), None);
+        let artist_w = artist.chars().count() as u16;
+        let hover_artist = app.hover == Some(Action::OpenArtist(album.artist.clone()));
         // La tarjeta se registra antes que el nombre del artista: en el
         // HitMap gana el último, así el clic en el artista abre el artista y
         // el resto de la tarjeta sigue abriendo el álbum.
         app.hit.add(card, Action::AlbumOpen(index));
+        link_at(
+            buf,
+            text_x,
+            y + 1,
+            artist_w,
+            &artist,
+            pal,
+            pal.secondary,
+            hover_artist,
+            app.ui_time(),
+        );
         app.hit.add(
-            Rect::new(text_x, y + 1, artist.chars().count() as u16, 1),
+            Rect::new(text_x, y + 1, artist_w, 1),
             Action::OpenArtist(album.artist.clone()),
         );
         let mut meta = format!(
@@ -201,18 +213,23 @@ fn draw_album_detail(
     let track = App::album_thumb_track(album);
     draw_thumb(app, buf, thumb, &track, pal);
     let text_x = thumb.x + thumb.width + 2;
-    let _text_w = (inner.x + inner.width).saturating_sub(text_x);
+    let text_w = (inner.x + inner.width).saturating_sub(text_x);
     put(buf, text_x, inner.y, &album.album, color(pal.text), None);
-    put(
+    let artist_w = (album.artist.chars().count() as u16).min(text_w);
+    let hover_artist = app.hover == Some(Action::OpenArtist(album.artist.clone()));
+    link_at(
         buf,
         text_x,
         inner.y + 1,
+        artist_w,
         &album.artist,
-        color(pal.secondary),
-        None,
+        pal,
+        pal.secondary,
+        hover_artist,
+        app.ui_time(),
     );
     app.hit.add(
-        Rect::new(text_x, inner.y + 1, album.artist.chars().count() as u16, 1),
+        Rect::new(text_x, inner.y + 1, artist_w, 1),
         Action::OpenArtist(album.artist.clone()),
     );
     put(

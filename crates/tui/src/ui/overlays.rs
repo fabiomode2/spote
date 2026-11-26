@@ -987,10 +987,22 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
     );
     let mut artist = page.artist.clone();
     truncate_chars(&mut artist, text_w as usize);
-    put(buf, text_x, inner.y + 1, &artist, color(pal.secondary), None);
-    if !artist.is_empty() {
+    let artist_w = artist.chars().count() as u16;
+    if artist_w > 0 {
+        let hover = app.hover == Some(Action::OpenArtist(page.artist.clone()));
+        link_at(
+            buf,
+            text_x,
+            inner.y + 1,
+            artist_w,
+            &artist,
+            pal,
+            pal.secondary,
+            hover,
+            app.ui_time(),
+        );
         app.hit.add(
-            Rect::new(text_x, inner.y + 1, artist.chars().count() as u16, 1),
+            Rect::new(text_x, inner.y + 1, artist_w, 1),
             Action::OpenArtist(page.artist.clone()),
         );
     }

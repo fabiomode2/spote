@@ -521,6 +521,60 @@ fn text_at(buf: &mut Buffer, rect: Rect, text: impl Into<String>, s: Style, alig
     line_at(buf, rect, vec![Span::styled(text.into(), s)], align);
 }
 
+/// Texto clicable con una pista visual permanente (subrayado tenue) y un
+/// resaltado animado al pasar el ratón: la luz recorre las letras de izquierda
+/// a derecha mientras el fondo pulsa con la paleta. Devuelve el ancho pintado
+/// para que el llamante registre el hitbox exacto.
+#[allow(clippy::too_many_arguments)]
+fn link_at(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    max_w: u16,
+    text: &str,
+    pal: &Palette,
+    base: Rgb,
+    hovered: bool,
+    time: f32,
+) -> u16 {
+    if max_w == 0 || text.is_empty() {
+        return 0;
+    }
+    let width = text.chars().count().min(max_w as usize) as u16;
+    if !hovered {
+        let label: String = text.chars().take(width as usize).collect();
+        text_at(
+            buf,
+            Rect::new(x, y, width, 1),
+            label,
+            Style::new()
+                .fg(color(base))
+                .add_modifier(Modifier::UNDERLINED),
+            Alignment::Left,
+        );
+        return width;
+    }
+
+    // Hover: onda de color que recorre el texto + fondo con brillo viajero.
+    let backdrop = mix(pal.surface, pal.bg, 0.35);
+    for (index, ch) in text.chars().take(width as usize).enumerate() {
+        let phase = (time * 3.2 - index as f32 * 0.55).rem_euclid(std::f32::consts::TAU);
+        let wave = 0.5 + 0.5 * phase.sin();
+        let fg = mix_oklab(mix_oklab(pal.primary, pal.secondary, wave), pal.text, 0.22);
+        let bg = mix_oklab(backdrop, pal.primary, 0.10 + wave * 0.18);
+        let mut glyph = [0u8; 4];
+        let symbol = ch.encode_utf8(&mut glyph);
+        if let Some(cell) = buf.cell_mut((x + index as u16, y)) {
+            cell.set_symbol(symbol);
+            cell.set_fg(color(fg));
+            cell.set_bg(color(bg));
+            cell.modifier
+                .insert(Modifier::BOLD | Modifier::UNDERLINED);
+        }
+    }
+    width
+}
+
 /// Portada en mosaico detrás de toda la interfaz. Cada celda muestrea la
 /// portada repetida; la opacidad, el movimiento y el salto al bombo salen de
 /// `[ui.fx]`. Se pinta antes de los paneles, así que cualquier texto sigue
@@ -971,6 +1025,42 @@ mod tests {
         put(&mut buf, 2, 0, "hola", Color::Red, None);
         assert_eq!(buf[(2, 0)].symbol(), "h");
         assert_eq!(buf[(3, 0)].symbol(), "o");
+    }
+
+    #[test]
+    fn link_marks_clickable_text_and_highlights_on_hover() {
+        let pal = Palette::dark();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+        let width = link_at(
+            &mut buf,
+            1,
+            0,
+            8,
+            "Biberon",
+            &pal,
+            pal.secondary,
+            false,
+            0.0,
+        );
+        assert_eq!(width, 7);
+        assert_eq!(buf[(1, 0)].symbol(), "B");
+        assert!(buf[(1, 0)].modifier.contains(Modifier::UNDERLINED));
+        assert!(!buf[(1, 0)].modifier.contains(Modifier::BOLD));
+
+        let width = link_at(
+            &mut buf,
+            1,
+            0,
+            8,
+            "Biberon",
+            &pal,
+            pal.secondary,
+            true,
+            0.4,
+        );
+        assert_eq!(width, 7);
+        assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
+        assert!(matches!(buf[(1, 0)].bg, Color::Rgb(..)));
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod service;
+pub mod setup;
 pub mod state;
 pub mod sync;
 pub mod ws;

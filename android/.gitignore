@@ -1,0 +1,10 @@
+.gradle/
+local.properties
+build/
+# Generadas por scripts/build-android-lib.sh
+app/src/main/jniLibs/
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+.idea/

@@ -410,6 +410,16 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Guarda o borra el avatar. Devuelve `false` si el usuario no existe.
+    pub fn set_avatar(&self, user_id: &str, avatar: Option<&str>) -> Result<bool, AppError> {
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE users SET avatar = ?1 WHERE id = ?2",
+            params![avatar, user_id],
+        )?;
+        Ok(updated > 0)
+    }
+
     /// Amistad mutua aceptada (sin flujo de peticiones: cuatro amigos).
     pub fn add_friend(&self, user_id: &str, target_id: &str) -> Result<User, AppError> {
         if user_id == target_id {

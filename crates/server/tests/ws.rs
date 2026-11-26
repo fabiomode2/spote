@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use spote_protocol::{ClientMsg, ServerMsg};
-use spote_server::{config::Config, router, state::AppState};
+use spote_server::{config::Config, router, service, state::AppState};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 type Ws =
@@ -147,6 +147,72 @@ async fn ws_requires_client_key_and_bearer_then_works() {
     let rejected =
         tokio_tungstenite::connect_async(ws_request(&url, Some("nope"), Some(KEY_A))).await;
     assert!(rejected.is_err(), "token inválido rechaza el handshake");
+
+    let _ = ws.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn avatar_update_broadcasts_presence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let fp = state.config.client_key_fingerprint(KEY_A).expect("huella");
+    let (user, token) = state
+        .db
+        .login("ana", &fp, service_now() + 60_000)
+        .expect("login");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let addr = listener.local_addr().expect("addr");
+    let server_state = state.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, router(server_state)).await;
+    });
+
+    let url = format!("ws://{addr}/api/v1/ws");
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_request(&url, Some(&token), Some(KEY_A)))
+        .await
+        .expect("handshake");
+
+    send(
+        &mut ws,
+        ClientMsg::Hello {
+            device: "test".to_string(),
+            now_playing: None,
+        },
+    )
+    .await;
+    loop {
+        match next_server_msg(&mut ws).await {
+            ServerMsg::Welcome { .. } => break,
+            ServerMsg::Error { message } => panic!("error del servidor: {message}"),
+            _ => {}
+        }
+    }
+
+    let avatar = format!("data:image/png;base64,{}", "A".repeat(64));
+    service::set_avatar(&state, &user, Some(avatar.clone())).expect("avatar");
+
+    let presences = loop {
+        match next_server_msg(&mut ws).await {
+            ServerMsg::Presence { presences }
+                if presences
+                    .iter()
+                    .any(|presence| presence.user.avatar.is_some()) =>
+            {
+                break presences;
+            }
+            ServerMsg::Error { message } => panic!("error del servidor: {message}"),
+            _ => {}
+        }
+    };
+    let ana = presences
+        .iter()
+        .find(|presence| presence.user.id == user.id)
+        .expect("ana en presencia");
+    assert_eq!(ana.user.avatar.as_deref(), Some(avatar.as_str()));
 
     let _ = ws.close(None).await;
     server.abort();

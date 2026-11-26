@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">spote</string>
+
+    <string name="update_checking">Buscando actualizaciones…</string>
+    <string name="update_up_to_date">Estás al día</string>
+    <string name="update_available">Hay una versión nueva</string>
+    <string name="update_download">Descargar</string>
+    <string name="update_install">Instalar</string>
+    <string name="update_error">No se pudo comprobar la actualización</string>
+</resources>

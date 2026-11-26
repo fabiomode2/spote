@@ -221,6 +221,102 @@ fn chat_and_track_metadata_reject_terminal_control_characters() {
 }
 
 #[test]
+fn avatar_is_validated_persisted_and_reflected_in_presence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+    let user = login(&state, "ana").user;
+    assert!(user.avatar.is_none());
+
+    let jpeg = format!("data:image/jpeg;base64,{}", "A".repeat(64));
+    let updated = service::set_avatar(&state, &user, Some(jpeg.clone())).expect("avatar");
+    assert_eq!(updated.avatar.as_deref(), Some(jpeg.as_str()));
+    assert_eq!(
+        state
+            .db
+            .user_by_id(&user.id)
+            .expect("consulta")
+            .expect("usuario")
+            .avatar
+            .as_deref(),
+        Some(jpeg.as_str())
+    );
+    let presence = state.hub.presence_of(&user.id).expect("presencia");
+    assert_eq!(presence.user.avatar.as_deref(), Some(jpeg.as_str()));
+
+    // Una conexión WS abierta antes del cambio lleva el usuario cacheado; su
+    // siguiente latido de presencia no debe revertir el avatar.
+    service::touch_presence(&state, &user, None, false, true).expect("presencia");
+    assert_eq!(
+        state
+            .hub
+            .presence_of(&user.id)
+            .expect("presencia")
+            .user
+            .avatar
+            .as_deref(),
+        Some(jpeg.as_str())
+    );
+
+    let cleared = service::set_avatar(&state, &user, None).expect("borrar avatar");
+    assert!(cleared.avatar.is_none());
+    assert!(state
+        .db
+        .user_by_id(&user.id)
+        .expect("consulta")
+        .expect("usuario")
+        .avatar
+        .is_none());
+    assert!(state
+        .hub
+        .presence_of(&user.id)
+        .expect("presencia")
+        .user
+        .avatar
+        .is_none());
+
+    let missing = service::set_avatar(
+        &state,
+        &spote_protocol::User {
+            id: "no-existe".to_string(),
+            name: "ghost".to_string(),
+            avatar: None,
+        },
+        None,
+    );
+    assert_eq!(
+        missing.expect_err("usuario inexistente").status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[test]
+fn avatar_rejects_unsupported_types_empty_and_oversized_payloads() {
+    let prefix = "data:image/png;base64,";
+    let near_limit = (service::MAX_AVATAR_CHARS - prefix.len()) / 4 * 4;
+    let accepted = format!("{prefix}{}", "A".repeat(near_limit));
+    service::validate_avatar(&accepted).expect("cerca del límite");
+
+    let oversized = format!("{prefix}{}", "A".repeat(service::MAX_AVATAR_CHARS));
+    let rejected = [
+        String::new(),
+        "https://spote.example.com/ana.jpg".to_string(),
+        "data:image/gif;base64,R0lGODlhAQABAAAAACw=".to_string(),
+        "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=".to_string(),
+        prefix.to_string(),
+        format!("{prefix}AAA"),
+        format!("{prefix}AAAA===="),
+        format!("{prefix}AAA=AAAA"),
+        format!("{prefix}AA AA"),
+        format!("{prefix}AAAA\n"),
+        oversized,
+    ];
+    for avatar in rejected {
+        let error = service::validate_avatar(&avatar).expect_err("avatar inválido");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[test]
 fn expired_sessions_are_rejected() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = test_state(&dir);

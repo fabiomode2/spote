@@ -1,6 +1,8 @@
 //! Punto de entrada del binario `spoted`.
 //!
 //! `spoted keygen [etiqueta…]` imprime secretos listos para pegar en `.env`.
+//! `spoted qr <url> <clave> <invitación> [nombre]` imprime el enlace
+//! `spote://setup` y su QR para configurar un cliente.
 
 use anyhow::Context;
 use spote_server::{config::random_secret, AppState, Config};
@@ -16,6 +18,10 @@ async fn main() -> anyhow::Result<()> {
 
     if std::env::args().nth(1).as_deref() == Some("keygen") {
         print_keygen();
+        return Ok(());
+    }
+    if std::env::args().nth(1).as_deref() == Some("qr") {
+        print_qr()?;
         return Ok(());
     }
 
@@ -56,6 +62,22 @@ fn print_keygen() {
     println!("SPOTE_INVITE={}", random_secret(24));
     println!("# Una clave por persona; cada usuario queda atado a la suya");
     println!("SPOTE_CLIENT_KEYS={keys}");
+}
+
+fn print_qr() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let (server, key, invite, name) = match args.as_slice() {
+        [server, key, invite] => (server.as_str(), key.as_str(), invite.as_str(), None),
+        [server, key, invite, name] => (
+            server.as_str(),
+            key.as_str(),
+            invite.as_str(),
+            Some(name.as_str()),
+        ),
+        _ => anyhow::bail!("uso: spoted qr <url-publica> <client-key> <invite> [nombre]"),
+    };
+    let link = spote_server::setup::SetupLink::new(server, key, invite, name)?;
+    spote_server::setup::print_link(&link)
 }
 
 fn init_tracing() {
