@@ -430,6 +430,10 @@ impl App {
                 } else {
                     Fullscreen::Viz
                 };
+                if self.fullscreen == Fullscreen::Viz {
+                    self.show_viz = true;
+                    self.viz.paused = false;
+                }
                 self.needs_redraw = true;
             }
             Action::VizToggle => {
@@ -547,6 +551,20 @@ impl App {
             }
             Action::JoinRoom(index) => self.join_room(index),
             Action::LeaveRoom => self.leave_room(),
+            Action::NewRoom => self.open_create_room(),
+            Action::AddFriendPicker => self.open_social_people(SocialPeopleMode::Friend),
+            Action::InvitePicker => self.open_social_people(SocialPeopleMode::Invite),
+            Action::KickPicker => self.open_social_people(SocialPeopleMode::Kick),
+            Action::OpenChat => self.open_chat(),
+            Action::SocialPick(index) => {
+                if let Overlay::SocialPeople { mode, .. } = self.overlay.clone() {
+                    self.overlay = Overlay::SocialPeople {
+                        mode,
+                        selected: index,
+                    };
+                    self.commit_social_pick();
+                }
+            }
             Action::StartSearch => {
                 self.tab = Tab::Search;
                 self.search.query.clear();

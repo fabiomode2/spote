@@ -62,6 +62,27 @@ fn control(
 }
 
 #[test]
+fn friends_are_mutual_and_listed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state(&dir);
+
+    let ana = login(&state, "ana");
+    let bea = login_with(&state, "bea", KEY_B);
+    assert!(service::friends(&state, &ana.user.id)
+        .expect("amigos")
+        .is_empty());
+
+    let added = service::add_friend(&state, &ana.user.id, &bea.user.id).expect("añadir amigo");
+    assert_eq!(added.id, bea.user.id);
+
+    for (owner, friend) in [(&ana, &bea), (&bea, &ana)] {
+        let friends = service::friends(&state, &owner.user.id).expect("amigos");
+        assert_eq!(friends.len(), 1);
+        assert_eq!(friends[0].id, friend.user.id);
+    }
+}
+
+#[test]
 fn login_creates_user_and_is_idempotent_by_name() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = test_state(&dir);

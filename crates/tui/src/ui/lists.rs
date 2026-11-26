@@ -90,11 +90,7 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         chip_right -= width;
         let chip = Rect::new(chip_right, inner.y, width, 1);
         let hover = app.hover == Some(action.clone());
-        fill(
-            buf,
-            chip,
-            if hover { pal.surface_alt } else { pal.surface },
-        );
+        fill(buf, chip, if hover { pal.surface_alt } else { pal.surface });
         text_at(
             buf,
             chip,
@@ -109,7 +105,15 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     // Buscador inline de la biblioteca. Comparte la fila con nada más para
     // que el texto respire; la lista empieza en `inner.y + 3`.
     let search_rect = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-    fill(buf, search_rect, if app.lib_search_focus { pal.surface_alt } else { pal.surface });
+    fill(
+        buf,
+        search_rect,
+        if app.lib_search_focus {
+            pal.surface_alt
+        } else {
+            pal.surface
+        },
+    );
     let mut search_text = if app.lib_query.is_empty() {
         "buscar en la biblioteca…  ( / )".to_string()
     } else {
@@ -118,7 +122,10 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     if app.lib_search_focus {
         search_text.push('▏');
     }
-    truncate_chars(&mut search_text, search_rect.width.saturating_sub(1) as usize);
+    truncate_chars(
+        &mut search_text,
+        search_rect.width.saturating_sub(1) as usize,
+    );
     text_at(
         buf,
         search_rect,
@@ -184,7 +191,11 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
                 text_x,
                 header.y,
                 &desc,
-                color(if list.description.is_empty() { pal.dim } else { pal.muted }),
+                color(if list.description.is_empty() {
+                    pal.dim
+                } else {
+                    pal.muted
+                }),
                 None,
             );
             put(
@@ -276,13 +287,8 @@ pub(super) fn draw_library(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     // debajo, álbum, fecha de alta y duración. El ancho decide qué columnas
     // caben; nunca se pisan. Se copian las filas visibles porque el dibujo de
     // miniaturas pide prestado `App` entero.
-    let visible: Vec<spote_core::library::TrackRow> = app
-        .view
-        .iter()
-        .skip(start)
-        .take(rows)
-        .cloned()
-        .collect();
+    let visible: Vec<spote_core::library::TrackRow> =
+        app.view.iter().skip(start).take(rows).cloned().collect();
     for (offset, row) in visible.iter().enumerate() {
         let index = start + offset;
         let y = inner.y + y_offset + offset as u16 * row_h;
@@ -619,8 +625,7 @@ pub(super) fn draw_cards(app: &mut App, buf: &mut Buffer, inner: Rect, pal: &Pal
             let sep_x = meta_x + artist_w;
             put(buf, sep_x, y + 1, sep, color(pal.dim), None);
             let album_x = sep_x + sep_w;
-            let hover =
-                app.hover == Some(Action::OpenAlbum(album.clone(), primary.clone()));
+            let hover = app.hover == Some(Action::OpenAlbum(album.clone(), primary.clone()));
             let drawn = link_at(
                 buf,
                 album_x,
@@ -698,7 +703,16 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
         draw_art(app, buf, layout.art, pal, 0.85);
         frame_art(app, buf, layout.art, pal);
     }
-    panel(Some(app), buf, rect, pal, true, 0.78, Some("buscar"), app.audio.kick_pulse);
+    panel(
+        Some(app),
+        buf,
+        rect,
+        pal,
+        true,
+        0.78,
+        Some("buscar"),
+        app.audio.kick_pulse,
+    );
     let inner = Rect::new(
         rect.x + 2,
         rect.y + 2,
@@ -713,7 +727,14 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     for x in input_rect.x..input_rect.x + input_rect.width {
         put_bg(buf, x, input_rect.y, pal.bg_deep);
     }
-    put(buf, input_rect.x + 1, input_rect.y, "/", color(pal.primary), None);
+    put(
+        buf,
+        input_rect.x + 1,
+        input_rect.y,
+        "/",
+        color(pal.primary),
+        None,
+    );
     let empty = app.search.query.is_empty();
     let query = if empty {
         "canciones, artistas y álbumes…".to_string()
@@ -792,9 +813,9 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     let selected_flat = app.search.selected;
     let selected_row = rows
         .iter()
-        .position(|row| {
-            matches!(row, Row::Entry(entry) if entry_flat(app, *entry) == selected_flat)
-        })
+        .position(
+            |row| matches!(row, Row::Entry(entry) if entry_flat(app, *entry) == selected_flat),
+        )
         .unwrap_or(0);
     let available = (inner.y + inner.height).saturating_sub(y) as usize;
     let row_h = if app.list_cards { 2 } else { 1 };
@@ -850,7 +871,10 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
                 let (title, meta, right, provider, _) = search_entry_view(app, *entry);
                 let right_w = right.chars().count() as u16 + provider.chars().count() as u16 + 3;
                 let mut title = format!("{title}  ·  {meta}");
-                truncate_chars(&mut title, row_rect.width.saturating_sub(right_w + 4) as usize);
+                truncate_chars(
+                    &mut title,
+                    row_rect.width.saturating_sub(right_w + 4) as usize,
+                );
                 put(
                     buf,
                     row_rect.x + 2,
@@ -886,8 +910,8 @@ pub(super) fn draw_search(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
                 let text_x = thumb.x + thumb.width + 1;
                 let right_w = right.chars().count() as u16;
                 let provider_w = provider.chars().count() as u16 + 2;
-                let text_w = (row_rect.x + row_rect.width)
-                    .saturating_sub(text_x + right_w + provider_w + 3);
+                let text_w =
+                    (row_rect.x + row_rect.width).saturating_sub(text_x + right_w + provider_w + 3);
                 let mut title = title;
                 truncate_chars(&mut title, text_w as usize);
                 put(
@@ -954,7 +978,9 @@ fn entry_flat(app: &App, entry: crate::app::SearchEntry) -> usize {
     match entry {
         crate::app::SearchEntry::Track(i) => i,
         crate::app::SearchEntry::Artist(i) => app.search.results.len() + i,
-        crate::app::SearchEntry::Album(i) => app.search.results.len() + app.search.artists.len() + i,
+        crate::app::SearchEntry::Album(i) => {
+            app.search.results.len() + app.search.artists.len() + i
+        }
     }
 }
 
@@ -965,7 +991,13 @@ fn search_entry_view(
     match entry {
         crate::app::SearchEntry::Artist(index) => {
             let Some(artist) = app.search.artists.get(index) else {
-                return (String::new(), String::new(), String::new(), String::new(), empty_track());
+                return (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    empty_track(),
+                );
             };
             let meta = if artist.followers > 0 {
                 format!("artista · {} fans", artist.followers)
@@ -990,7 +1022,13 @@ fn search_entry_view(
         }
         crate::app::SearchEntry::Album(index) => {
             let Some(album) = app.search.albums.get(index) else {
-                return (String::new(), String::new(), String::new(), String::new(), empty_track());
+                return (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    empty_track(),
+                );
             };
             let mut meta = album.artist.clone();
             if let Some(year) = album.release_year {
@@ -1017,7 +1055,13 @@ fn search_entry_view(
         }
         crate::app::SearchEntry::Track(index) => {
             let Some(item) = app.search.results.get(index) else {
-                return (String::new(), String::new(), String::new(), String::new(), empty_track());
+                return (
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    empty_track(),
+                );
             };
             let mut meta = item.artist.clone();
             if let Some(album) = item.album.as_deref().filter(|album| !album.is_empty()) {
@@ -1038,7 +1082,11 @@ fn search_entry_view(
 fn search_entry_album(app: &App, entry: crate::app::SearchEntry) -> Option<String> {
     match entry {
         crate::app::SearchEntry::Artist(_) => None,
-        crate::app::SearchEntry::Album(index) => app.search.albums.get(index).map(|album| album.title.clone()),
+        crate::app::SearchEntry::Album(index) => app
+            .search
+            .albums
+            .get(index)
+            .map(|album| album.title.clone()),
         crate::app::SearchEntry::Track(index) => app
             .search
             .results
@@ -1050,9 +1098,11 @@ fn search_entry_album(app: &App, entry: crate::app::SearchEntry) -> Option<Strin
 fn search_entry_artist(app: &App, entry: crate::app::SearchEntry) -> Option<String> {
     match entry {
         crate::app::SearchEntry::Artist(_) => None,
-        crate::app::SearchEntry::Album(index) => {
-            app.search.albums.get(index).map(|album| album.artist.clone())
-        }
+        crate::app::SearchEntry::Album(index) => app
+            .search
+            .albums
+            .get(index)
+            .map(|album| album.artist.clone()),
         crate::app::SearchEntry::Track(index) => app
             .search
             .results
@@ -1115,6 +1165,27 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
     );
     y += 2;
 
+    let online = app
+        .presence
+        .iter()
+        .filter(|presence| presence.online)
+        .count();
+    let mut summary = format!(
+        "{} amigos · {} en línea · {} salas",
+        app.friends.len(),
+        online,
+        app.rooms.len()
+    );
+    truncate_chars(&mut summary, inner.width as usize);
+    text_at(
+        buf,
+        Rect::new(inner.x, y, inner.width, 1),
+        summary,
+        Style::new().fg(color(pal.muted)),
+        Alignment::Left,
+    );
+    y += 1;
+
     // Salas disponibles.
     text_at(
         buf,
@@ -1130,26 +1201,37 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            "ninguna sala · crea una o espera a que te inviten",
+            "ninguna sala · n crea una o espera a que te inviten",
             Style::new().fg(color(pal.dim)),
             Alignment::Left,
         );
         y += 1;
     }
     let max_rooms = 5usize;
-    for (index, room) in app.rooms.iter().take(max_rooms).enumerate() {
+    let start = keep_visible(0, app.room_selected, max_rooms, app.rooms.len());
+    for (index, room) in app
+        .rooms
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(max_rooms)
+    {
         let row = Rect::new(inner.x, y, inner.width, 1);
         let active = index == app.room_selected;
-        let joined = app.room.as_ref().is_some_and(|current| current.id == room.id);
+        let joined = app
+            .room
+            .as_ref()
+            .is_some_and(|current| current.id == room.id);
         if active {
             fill(buf, row, mix(pal.surface, pal.primary, 0.22));
             put(buf, row.x, y, "▍", color(pal.primary), None);
         }
         let label = format!(
-            "{} {}  ·  {} miembros{}",
+            "{} {}  ·  {} miembros{}{}",
             if joined { "◉" } else { "○" },
             app.room_label(&room.id),
             room.members.len(),
+            if room.is_public { "" } else { "  ·  privada" },
             if joined { "  ·  dentro" } else { "" }
         );
         let mut label = label;
@@ -1165,7 +1247,75 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         app.hit.add(row, Action::JoinRoom(index));
         y += 1;
     }
-    y += 1;
+    // Acciones de la lista de salas.
+    let new_label = "n nueva sala";
+    put(buf, inner.x, y, new_label, color(pal.primary), None);
+    app.hit.add(
+        Rect::new(inner.x, y, new_label.len() as u16, 1),
+        Action::NewRoom,
+    );
+    let friend_label = "a añadir amigo";
+    let friend_x = inner.x + new_label.len() as u16 + 3;
+    put(buf, friend_x, y, friend_label, color(pal.secondary), None);
+    app.hit.add(
+        Rect::new(friend_x, y, friend_label.len() as u16, 1),
+        Action::AddFriendPicker,
+    );
+    y += 2;
+
+    // Gente del servidor: amigos primero y luego quien está online.
+    if !app.presence.is_empty() {
+        text_at(
+            buf,
+            Rect::new(inner.x, y, inner.width, 1),
+            "GENTE",
+            Style::new()
+                .fg(color(pal.primary))
+                .add_modifier(Modifier::BOLD),
+            Alignment::Left,
+        );
+        y += 1;
+        let me = app.social_user_id.as_str();
+        let mut people: Vec<&spote_protocol::Presence> = app
+            .presence
+            .iter()
+            .filter(|presence| presence.user.id != me)
+            .collect();
+        people.sort_by_key(|presence| {
+            (
+                !app.is_friend(&presence.user.id),
+                !presence.online,
+                presence.user.name.to_lowercase(),
+            )
+        });
+        for presence in people.iter().take(4) {
+            let mut label = format!(
+                "{} {}{}",
+                if presence.online { "●" } else { "○" },
+                presence.user.name,
+                if app.is_friend(&presence.user.id) {
+                    " ★"
+                } else {
+                    ""
+                }
+            );
+            if let Some(track) = &presence.now_playing {
+                label.push_str("  ♪ ");
+                label.push_str(&track.title);
+            }
+            truncate_chars(&mut label, inner.width as usize);
+            put(
+                buf,
+                inner.x,
+                y,
+                &label,
+                color(if presence.online { pal.muted } else { pal.dim }),
+                None,
+            );
+            y += 1;
+        }
+        y += 1;
+    }
 
     // Sala actual.
     if let Some(state) = &app.room_state {
@@ -1199,6 +1349,52 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             Alignment::Left,
         );
         y += 1;
+        // Acciones de la sala. Se dibujan como enlaces: cada trozo registra
+        // su rect para que el ratón haga lo mismo que la tecla.
+        let mut ax = inner.x;
+        if app.is_room_host() {
+            let invite = "i invitar";
+            put(buf, ax, y, invite, color(pal.secondary), None);
+            app.hit.add(
+                Rect::new(ax, y, invite.len() as u16, 1),
+                Action::InvitePicker,
+            );
+            ax += invite.len() as u16 + 2;
+            let kick = "x expulsar";
+            put(buf, ax, y, kick, color(pal.warn), None);
+            app.hit
+                .add(Rect::new(ax, y, kick.len() as u16, 1), Action::KickPicker);
+            ax += kick.len() as u16 + 2;
+        }
+        let chat = "t chat";
+        put(buf, ax, y, chat, color(pal.primary), None);
+        app.hit
+            .add(Rect::new(ax, y, chat.len() as u16, 1), Action::OpenChat);
+        ax += chat.len() as u16 + 2;
+        let leave = "L salir";
+        put(buf, ax, y, leave, color(pal.dim), None);
+        app.hit
+            .add(Rect::new(ax, y, leave.len() as u16, 1), Action::LeaveRoom);
+        y += 1;
+        if let Some(room) = &app.room {
+            if let Some(last) = app
+                .chat
+                .iter()
+                .rev()
+                .find(|message| message.room_id == room.id)
+            {
+                let mut line = format!("chat · {}: {}", last.user_name, last.text);
+                truncate_chars(&mut line, inner.width as usize);
+                text_at(
+                    buf,
+                    Rect::new(inner.x, y, inner.width, 1),
+                    line,
+                    Style::new().fg(color(pal.dim)),
+                    Alignment::Left,
+                );
+                y += 1;
+            }
+        }
         if let Some(room) = &app.room {
             for member in room.members.iter().take(6) {
                 let presence = app
@@ -1248,7 +1444,12 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             );
             y += 1;
             for item in app.room_queue.iter().take(4) {
-                let mut label = format!("{:>2} · {}  ·  {}", item.position + 1, item.track.title, item.track.artist);
+                let mut label = format!(
+                    "{:>2} · {}  ·  {}",
+                    item.position + 1,
+                    item.track.title,
+                    item.track.artist
+                );
                 truncate_chars(&mut label, inner.width as usize);
                 text_at(
                     buf,
@@ -1309,7 +1510,11 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             inner.x,
             rect.y + rect.height - 2,
             &tools,
-            color(if app.tools.missing().is_empty() { pal.dim } else { pal.warn }),
+            color(if app.tools.missing().is_empty() {
+                pal.dim
+            } else {
+                pal.warn
+            }),
             None,
         );
     }
@@ -1318,7 +1523,6 @@ pub(super) fn draw_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
 // ---------------------------------------------------------------------------
 // Panel lateral
 // ---------------------------------------------------------------------------
-
 
 /// Ajusta la primera fila visible para que la selección esté dentro de la
 /// página. Solo desplaza cuando el cursor cruza un borde: así no hay dos

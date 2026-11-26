@@ -3,6 +3,9 @@ use super::*;
 
 impl App {
     pub(super) fn handle_overlay_key(&mut self, key: KeyEvent) {
+        if self.handle_social_overlay_key(key) {
+            return;
+        }
         match self.overlay.clone() {
             Overlay::None => {}
             Overlay::Context => self.handle_context_key(key),
@@ -74,6 +77,7 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::CreateRoom | Overlay::SocialPeople { .. } | Overlay::Chat => {}
             Overlay::PlaylistForm => match key.code {
                 KeyCode::Esc => self.overlay = Overlay::None,
                 KeyCode::Tab | KeyCode::BackTab => {

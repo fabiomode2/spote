@@ -246,6 +246,7 @@ POST /api/v1/auth/login      {name, invite}        → {token, user, invite}
 POST /api/v1/auth/logout                            → {ok}
 GET  /api/v1/me                                     → user
 GET  /api/v1/users                                  → presencia
+GET  /api/v1/friends                                → amigos aceptados
 POST /api/v1/friends/{id}
 GET  /api/v1/sync/snapshot                          → biblioteca personal
 GET  /api/v1/sync/pull?since=…                      → cambios desde revisión
@@ -270,6 +271,26 @@ Mensajes cliente→servidor: `hello`, `ping`, `join`, `leave`, `control`,
 `queue_add`, `queue_remove`, `ready`, `presence`, `chat`. Servidor→cliente:
 `welcome`, `pong`, `room_state`, `queue`, `start_at`, `presence`, `chat`,
 `error`.
+
+## Salas en la TUI
+
+La pestaña **sala** (tecla `s`) es el centro social:
+
+| tecla | acción |
+| --- | --- |
+| `↑` `↓` | elegir sala |
+| `enter` | entrar en la sala |
+| `n` | crear sala; `tab` alterna pública/privada |
+| `a` | añadir amigo desde la lista de gente |
+| `i` | invitar a alguien a la sala actual (solo host) |
+| `x` | expulsar a un miembro (solo host) |
+| `t` | abrir el chat de la sala |
+| `L` | salir de la sala |
+| `s` | refrescar salas, amigos y presencia |
+
+La lista **GENTE** marca con `★` a los amigos y ordena primero a quienes están
+online. El panel lateral de amigos usa la misma marca. El chat carga los
+últimos mensajes al entrar y se actualiza por WebSocket.
 
 ## Operación
 
@@ -321,9 +342,7 @@ y que el nombre no esté atado a otra clave.
 
 - SQLite y una única conexión protegida por mutex: suficiente para un grupo
   pequeño, no para miles de usuarios concurrentes.
-- La presencia se difunde a todos los usuarios autenticados; no hay lista de
-  amigos filtrada por privacidad.
+- La presencia se difunde a todos los usuarios autenticados; la lista de
+  amigos (`/friends`) sí está filtrada, pero la presencia sigue siendo global.
 - El host no puede borrar una sala desde la API todavía; se puede hacer por
   SQLite o añadir el endpoint.
-- La TUI aún no tiene formulario para crear salas privadas ni para añadir
-  miembros; se hace por REST.

@@ -982,14 +982,10 @@ fn event_loop(
         // pausa van a ese ritmo). Antes se repintaba a 60-120 Hz siempre,
         // incluso con la UI congelada.
         let wait = if animating {
-            // Zen/visual a pantalla completa: el efecto pinta todas las celdas;
-            // 30 fps estables se ven mejor que 60 con la terminal atascada.
-            let target = if app.zen || app.fullscreen == app::Fullscreen::Viz {
-                budget.max(Duration::from_millis(33))
-            } else {
-                budget
-            };
-            target.saturating_sub(last.elapsed())
+            // El reloj de efectos decide cuándo cambia el canvas; el bucle solo
+            // tiene que llegar a tiempo para no perder ese frame. El tope de
+            // 30 fps que había aquí hacía que V y zen fueran a tirones.
+            budget.saturating_sub(last.elapsed())
         } else {
             IDLE_POLL
         };

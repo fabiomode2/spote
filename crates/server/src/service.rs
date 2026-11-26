@@ -120,6 +120,12 @@ pub fn add_friend(state: &AppState, user_id: &str, target_id: &str) -> Result<Us
     state.db.add_friend(user_id, target_id)
 }
 
+/// Amigos aceptados de un usuario. El cliente los usa para marcar y filtrar
+/// personas; la amistad es mutua al añadirla.
+pub fn friends(state: &AppState, user_id: &str) -> Result<Vec<User>, AppError> {
+    state.db.friend_users(user_id)
+}
+
 /// Valida un avatar que llega como data URL. Solo JPEG, PNG o WebP en base64,
 /// con un límite de tamaño y sin caracteres de control.
 pub fn validate_avatar(avatar: &str) -> Result<(), AppError> {

@@ -37,8 +37,8 @@ impl Spring {
             self.velocity = 0.0;
             return;
         }
-        let acceleration = (self.target - self.value) * self.stiffness
-            - self.velocity * self.damping;
+        let acceleration =
+            (self.target - self.value) * self.stiffness - self.velocity * self.damping;
         self.velocity += acceleration * dt;
         self.value += self.velocity * dt;
     }
@@ -93,7 +93,10 @@ impl FxClock {
     pub fn due(&mut self, now: Instant) -> Option<f32> {
         let interval = 1.0 / self.hz;
         let elapsed = now.saturating_duration_since(self.last).as_secs_f32();
-        if elapsed + 1e-4 < interval {
+        // Tolerancia de 3/4 del intervalo: si el bucle y el efecto van a la
+        // misma frecuencia, el jitter hacía que se saltara un frame y el
+        // efecto real cayera a la mitad (30 fps con todo a 60).
+        if elapsed < interval * 0.75 {
             return None;
         }
         self.last = now;
@@ -205,7 +208,6 @@ impl FpsMeter {
     pub fn value(&self) -> f32 {
         self.smoothed
     }
-
 }
 
 impl Default for FpsMeter {

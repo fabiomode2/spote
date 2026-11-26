@@ -420,6 +420,20 @@ impl Db {
         Ok(updated > 0)
     }
 
+    /// Amigos aceptados de un usuario, ordenados por nombre.
+    pub fn friend_users(&self, user_id: &str) -> Result<Vec<User>, AppError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT u.id, u.name, u.avatar
+             FROM friends f
+             JOIN users u ON u.id = f.target_id
+             WHERE f.user_id = ?1 AND f.accepted = 1
+             ORDER BY u.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([user_id], map_user)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Amistad mutua aceptada (sin flujo de peticiones: cuatro amigos).
     pub fn add_friend(&self, user_id: &str, target_id: &str) -> Result<User, AppError> {
         if user_id == target_id {

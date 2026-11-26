@@ -10,7 +10,9 @@ use ratatui::widgets::{Paragraph, Widget};
 use spote_core::artwork::{ArtMode, CoverArt, Palette, PaletteVariant, Rgb};
 use spote_core::util::{format_ms, luma, mix, mix_oklab, scale};
 
-use crate::app::{Action, App, LibFilter, Overlay, Pane, Tab, ThumbMode, ToastKind};
+use crate::app::{
+    Action, App, LibFilter, Overlay, Pane, SocialPeopleMode, Tab, ThumbMode, ToastKind,
+};
 use crate::theme::ease_out_cubic;
 use crate::viz::Blend;
 
@@ -97,9 +99,10 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
     let zen = app.zen && app.show_viz;
     // Con el visualizador a pantalla completa, el fondo ambiental queda detrás
     // de una capa opaca: no se regenera (era el doble de trabajo por frame).
-    let viz_fullscreen = (app.viz_background || zen || app.fullscreen == crate::app::Fullscreen::Viz)
-        && app.show_viz
-        && layout.main.height > 2;
+    let viz_fullscreen =
+        (app.viz_background || zen || app.fullscreen == crate::app::Fullscreen::Viz)
+            && app.show_viz
+            && layout.main.height > 2;
 
     // Con mosaico, el fondo base no debe latir: si cambia cada frame, el
     // mosaico mezcla contra colores nuevos y la terminal acaba repintando
@@ -110,14 +113,26 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         area,
         &pal,
         app.intro,
-        if reactive_background { app.audio.bass } else { 0.0 },
-        if reactive_background { app.audio.kick_pulse } else { 0.0 },
-        if reactive_background { app.song_intensity } else { 0.0 },
+        if reactive_background {
+            app.audio.bass
+        } else {
+            0.0
+        },
+        if reactive_background {
+            app.audio.kick_pulse
+        } else {
+            0.0
+        },
+        if reactive_background {
+            app.song_intensity
+        } else {
+            0.0
+        },
     );
     // Mosaico de portada: va detrás de absolutamente todo. Se pinta antes que
     // los paneles para que estos solo lo dejen entrever con su transparencia.
-    let black_fullscreen = app.fullscreen == crate::app::Fullscreen::Viz
-        && app.cfg.ui.fx.fullscreen_backdrop == "black";
+    let fullscreen_viz = app.fullscreen == crate::app::Fullscreen::Viz && viz_fullscreen;
+    let black_fullscreen = fullscreen_viz && app.cfg.ui.fx.fullscreen_backdrop == "black";
     if !black_fullscreen
         && (app.cfg.ui.fx.backdrop == "mosaic" || app.cfg.ui.fx.ambient == "mosaic")
     {
@@ -164,13 +179,18 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
             None
         };
         let viz_rect = zen_viz.unwrap_or(layout.full);
-        app.pump_viz(
-            viz_rect.width.max(20),
-            viz_rect.height.max(6),
-            hz,
-            &pal,
-        );
-        if zen || app.fullscreen == crate::app::Fullscreen::Viz {
+        app.pump_viz(viz_rect.width.max(20), viz_rect.height.max(6), hz, &pal);
+        if fullscreen_viz {
+            // A pantalla completa manda el fondo propio del efecto: las celdas
+            // vacías del canvas llevan el gradiente de la paleta. Si el ajuste
+            // pide mosaico se deja asomar un poco; en negro, manda el efecto.
+            let bg_amount = if app.cfg.ui.fx.fullscreen_backdrop == "black" {
+                1.0
+            } else {
+                0.82
+            };
+            blit_viz_cover(app, buf, viz_rect, 0, bg_amount, VIZ_SCALE);
+        } else if zen {
             blit_viz(app, buf, viz_rect, 0, 0.95, 0.0, VIZ_SCALE);
         } else {
             blit_viz(app, buf, viz_rect, 0, 0.32, 0.10, VIZ_SCALE);
@@ -202,17 +222,12 @@ pub fn draw(app: &mut App, buf: &mut Buffer, area: Rect) {
         return;
     }
 
-    // Visualizador a pantalla completa: el efecto manda. Si se sigue pintando
-    // la vista "ahora" detrás, la portada se queda en half-block (la imagen
-    // Kitty está desactivada en este modo) y parece pixelada.
+    // Visualizador a pantalla completa: el efecto manda. Nada de transporte
+    // gigante ni hint: solo una línea de progreso, como en zen.
     if app.fullscreen == crate::app::Fullscreen::Viz {
-        if layout.transport.height > 0 {
-            draw_transport(app, buf, &layout, &pal);
-        }
-        if layout.hint.height > 0 {
-            draw_hint(app, buf, &layout, &pal);
-        }
+        chrome::draw_zen_bar(app, buf, &layout, &pal);
         draw_overlay(app, buf, &layout, &pal);
+        seal_frame(buf, &pal);
         return;
     }
 
@@ -650,8 +665,7 @@ fn link_at(
             cell.set_symbol(symbol);
             cell.set_fg(color(fg));
             cell.set_bg(color(bg));
-            cell.modifier
-                .insert(Modifier::BOLD | Modifier::UNDERLINED);
+            cell.modifier.insert(Modifier::BOLD | Modifier::UNDERLINED);
         }
     }
     width
@@ -911,7 +925,8 @@ fn panel(
                 put(buf, x0, y, "│", fg, bg);
                 put(buf, x1, y, "│", fg, bg);
             }
-            for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")] {
+            for (x, y, glyph) in [(x0, y0, "╭"), (x1, y0, "╮"), (x0, y1, "╰"), (x1, y1, "╯")]
+            {
                 put(buf, x, y, glyph, fg, bg);
             }
         }
@@ -1045,17 +1060,7 @@ mod tests {
         assert!(buf[(1, 0)].modifier.contains(Modifier::UNDERLINED));
         assert!(!buf[(1, 0)].modifier.contains(Modifier::BOLD));
 
-        let width = link_at(
-            &mut buf,
-            1,
-            0,
-            8,
-            "Biberon",
-            &pal,
-            pal.secondary,
-            true,
-            0.4,
-        );
+        let width = link_at(&mut buf, 1, 0, 8, "Biberon", &pal, pal.secondary, true, 0.4);
         assert_eq!(width, 7);
         assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
         assert!(matches!(buf[(1, 0)].bg, Color::Rgb(..)));

@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(me))
         .route("/me/avatar", put(update_avatar))
         .route("/users", get(users))
+        .route("/friends", get(list_friends))
         .route("/friends/{id}", post(add_friend))
         .route("/sync/snapshot", get(sync_snapshot))
         .route("/sync/pull", get(sync_pull))
@@ -218,6 +219,13 @@ async fn users(
     _auth: AuthUser,
 ) -> Result<Json<Vec<Presence>>, AppError> {
     Ok(Json(service::users(&state)?))
+}
+
+async fn list_friends(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Vec<User>>, AppError> {
+    Ok(Json(service::friends(&state, &auth.0.id)?))
 }
 
 async fn add_friend(

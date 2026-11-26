@@ -8,8 +8,8 @@ use std::sync::mpsc::Receiver;
 use futures_util::{SinkExt, StreamExt};
 use spote_core::config::ServerCfg;
 use spote_protocol::{
-    encode_line, ChatMsg, ClientMsg, ControlAction, LoginRequest, LoginResponse, Presence,
-    QueueItem, Room, RoomState, ServerMsg, TimeResponse, TrackRef,
+    encode_line, ChatMsg, ClientMsg, ControlAction, CreateRoomRequest, LoginRequest, LoginResponse,
+    Presence, QueueItem, Room, RoomState, ServerMsg, TimeResponse, TrackRef, User,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::tungstenite::{
@@ -30,6 +30,11 @@ pub enum SocialCmd {
     Refresh,
     Join(String),
     Leave,
+    CreateRoom { name: String, is_public: bool },
+    AddFriend(String),
+    Invite { room: String, user: String },
+    Kick { room: String, user: String },
+    Chat(String),
     Control(ControlAction, Option<u64>),
     QueueAdd(TrackRef),
     QueueRemove(String),
@@ -40,16 +45,26 @@ pub enum SocialCmd {
 pub enum SocialEvent {
     Ready {
         user: String,
+        user_id: String,
         token: String,
     },
     Status(String),
+    /// Usuario autenticado; llega también al reutilizar el token guardado.
+    Me(User),
+    /// Acción completada; la UI lo enseña como aviso.
+    Notice(String),
     Error(String),
     Rooms(Vec<Room>),
     Room(Room),
     State(RoomState),
     Queue(Vec<QueueItem>),
     Presence(Vec<Presence>),
+    Friends(Vec<User>),
     Chat(ChatMsg),
+    ChatLog {
+        room: String,
+        messages: Vec<ChatMsg>,
+    },
     /// Offset estimado cliente→servidor en ms (positivo = servidor adelantado).
     Clock(i64),
 }
@@ -128,10 +143,10 @@ async fn worker(
             return;
         };
         token = new_token;
-        user = new_user;
+        user = new_user.name;
     }
     let _ = events.send(SocialEvent::Status(format!("conectado como {user}")));
-    refresh_rooms(&client, &base, &cfg.client_key, &token, &events).await;
+    refresh_all(&client, &base, &cfg.client_key, &token, &events).await;
 
     // 2. Reloj: 5 muestras, quedarse con la de menor RTT.
     if let Some(offset) = estimate_clock(&client, &base, &cfg.client_key).await {
@@ -143,7 +158,17 @@ async fn worker(
         match connect_ws(&base, &cfg.client_key, &token).await {
             Ok(stream) => {
                 let _ = events.send(SocialEvent::Status("websocket conectado".into()));
-                if run_ws(stream, &mut commands, &events).await {
+                if run_ws(
+                    stream,
+                    &client,
+                    &base,
+                    &cfg.client_key,
+                    &token,
+                    &mut commands,
+                    &events,
+                )
+                .await
+                {
                     return;
                 }
             }
@@ -154,9 +179,11 @@ async fn worker(
                 match login(&client, &base, &cfg, &events).await {
                     Some((new_token, new_user)) => {
                         token = new_token;
-                        let _ =
-                            events.send(SocialEvent::Status(format!("conectado como {new_user}")));
-                        refresh_rooms(&client, &base, &cfg.client_key, &token, &events).await;
+                        let _ = events.send(SocialEvent::Status(format!(
+                            "conectado como {}",
+                            new_user.name
+                        )));
+                        refresh_all(&client, &base, &cfg.client_key, &token, &events).await;
                         continue;
                     }
                     None => return,
@@ -171,7 +198,7 @@ async fn worker(
         loop {
             match tokio::time::timeout_at(deadline, commands.recv()).await {
                 Ok(Some(SocialCmd::Refresh)) => {
-                    refresh_rooms(&client, &base, &cfg.client_key, &token, &events).await;
+                    refresh_all(&client, &base, &cfg.client_key, &token, &events).await;
                 }
                 Ok(Some(_)) | Ok(None) => {}
                 Err(_) => break,
@@ -217,7 +244,7 @@ async fn login(
     base: &str,
     cfg: &ServerCfg,
     events: &std::sync::mpsc::Sender<SocialEvent>,
-) -> Option<(String, String)> {
+) -> Option<(String, User)> {
     if cfg.invite.trim().is_empty() {
         let _ = events.send(SocialEvent::Error(
             "falta [server] invite en config.toml".into(),
@@ -243,11 +270,13 @@ async fn login(
         Ok(response) if response.status().is_success() => {
             match response.json::<LoginResponse>().await {
                 Ok(login) => {
+                    let user = login.user.clone();
                     let _ = events.send(SocialEvent::Ready {
-                        user: login.user.name.clone(),
+                        user: user.name.clone(),
+                        user_id: user.id.clone(),
                         token: login.token.clone(),
                     });
-                    Some((login.token, login.user.name))
+                    Some((login.token, user))
                 }
                 Err(err) => {
                     let _ = events.send(SocialEvent::Error(format!("login: {err}")));
@@ -319,8 +348,13 @@ async fn connect_ws(
 }
 
 /// Devuelve `true` si el hilo debe terminar (canal cerrado).
+#[allow(clippy::too_many_arguments)]
 async fn run_ws<S>(
     stream: tokio_tungstenite::WebSocketStream<S>,
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
     commands: &mut UnboundedReceiver<SocialCmd>,
     events: &std::sync::mpsc::Sender<SocialEvent>,
 ) -> bool
@@ -347,9 +381,94 @@ where
             command = commands.recv() => {
                 let Some(command) = command else { return true };
                 let message = match command {
-                    SocialCmd::Refresh => continue,
-                    SocialCmd::Join(room) => ClientMsg::Join { room },
+                    SocialCmd::Refresh => {
+                        refresh_all(client, base, client_key, token, events).await;
+                        continue;
+                    }
+                    SocialCmd::Join(room) => {
+                        if let Some(full) = fetch_room(client, base, client_key, token, &room).await {
+                            let _ = events.send(SocialEvent::Room(full));
+                        }
+                        if let Ok(messages) =
+                            fetch_chat(client, base, client_key, token, &room).await
+                        {
+                            let _ = events.send(SocialEvent::ChatLog {
+                                room: room.clone(),
+                                messages,
+                            });
+                        }
+                        ClientMsg::Join { room }
+                    }
                     SocialCmd::Leave => ClientMsg::Leave { room: String::new() },
+                    SocialCmd::CreateRoom { name, is_public } => {
+                        match create_room(client, base, client_key, token, &name, is_public).await {
+                            Ok(room) => {
+                                let _ = events.send(SocialEvent::Room(room.clone()));
+                                let _ = events.send(SocialEvent::Notice(format!(
+                                    "sala «{}» creada",
+                                    room.name
+                                )));
+                                ClientMsg::Join { room: room.id }
+                            }
+                            Err(err) => {
+                                let _ = events.send(SocialEvent::Error(format!(
+                                    "no pude crear la sala: {err}"
+                                )));
+                                continue;
+                            }
+                        }
+                    }
+                    SocialCmd::AddFriend(user) => {
+                        match add_friend(client, base, client_key, token, &user).await {
+                            Ok(target) => {
+                                refresh_friends(client, base, client_key, token, events).await;
+                                refresh_presence(client, base, client_key, token, events).await;
+                                let _ = events.send(SocialEvent::Notice(format!(
+                                    "{} añadido a amigos",
+                                    target.name
+                                )));
+                            }
+                            Err(err) => {
+                                let _ = events.send(SocialEvent::Error(format!(
+                                    "no pude añadir el amigo: {err}"
+                                )));
+                            }
+                        }
+                        continue;
+                    }
+                    SocialCmd::Invite { room, user } => {
+                        match invite_member(client, base, client_key, token, &room, &user).await {
+                            Ok(full) => {
+                                let _ = events.send(SocialEvent::Room(full));
+                                let _ = events.send(SocialEvent::Notice(
+                                    "invitación enviada".into(),
+                                ));
+                            }
+                            Err(err) => {
+                                let _ = events.send(SocialEvent::Error(format!(
+                                    "no pude invitar: {err}"
+                                )));
+                            }
+                        }
+                        continue;
+                    }
+                    SocialCmd::Kick { room, user } => {
+                        match kick_member(client, base, client_key, token, &room, &user).await {
+                            Ok(full) => {
+                                let _ = events.send(SocialEvent::Room(full));
+                                let _ = events.send(SocialEvent::Notice(
+                                    "miembro expulsado".into(),
+                                ));
+                            }
+                            Err(err) => {
+                                let _ = events.send(SocialEvent::Error(format!(
+                                    "no pude expulsar: {err}"
+                                )));
+                            }
+                        }
+                        continue;
+                    }
+                    SocialCmd::Chat(text) => ClientMsg::Chat { text },
                     SocialCmd::Control(action, position_ms) => {
                         ClientMsg::Control { action, position_ms }
                     }
@@ -469,6 +588,217 @@ async fn refresh_rooms(
             let _ = events.send(SocialEvent::Error(format!("salas: {err}")));
         }
     }
+}
+
+async fn refresh_all(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    events: &std::sync::mpsc::Sender<SocialEvent>,
+) {
+    refresh_me(client, base, client_key, token, events).await;
+    refresh_rooms(client, base, client_key, token, events).await;
+    refresh_friends(client, base, client_key, token, events).await;
+    refresh_presence(client, base, client_key, token, events).await;
+}
+
+async fn refresh_me(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    events: &std::sync::mpsc::Sender<SocialEvent>,
+) {
+    let response = client
+        .get(format!("{base}/api/v1/me"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    if let Ok(user) = json_or_error::<User>(response, "sesión").await {
+        let _ = events.send(SocialEvent::Me(user));
+    }
+}
+
+async fn refresh_friends(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    events: &std::sync::mpsc::Sender<SocialEvent>,
+) {
+    let response = client
+        .get(format!("{base}/api/v1/friends"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    // Servidores anteriores a la lista de amigos: no es un error, solo no hay
+    // marca de amistad. El resto de acciones sociales siguen funcionando.
+    if let Ok(response) = &response {
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let _ = events.send(SocialEvent::Friends(Vec::new()));
+            return;
+        }
+    }
+    match json_or_error::<Vec<User>>(response, "amigos").await {
+        Ok(friends) => {
+            let _ = events.send(SocialEvent::Friends(friends));
+        }
+        Err(err) => {
+            let _ = events.send(SocialEvent::Error(err));
+        }
+    }
+}
+
+async fn refresh_presence(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    events: &std::sync::mpsc::Sender<SocialEvent>,
+) {
+    let response = client
+        .get(format!("{base}/api/v1/users"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    match json_or_error::<Vec<Presence>>(response, "presencia").await {
+        Ok(presences) => {
+            let _ = events.send(SocialEvent::Presence(presences));
+        }
+        Err(err) => {
+            let _ = events.send(SocialEvent::Error(err));
+        }
+    }
+}
+
+async fn fetch_room(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    room: &str,
+) -> Option<Room> {
+    let response = client
+        .get(format!("{base}/api/v1/rooms/{room}"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    json_or_error::<Room>(response, "sala").await.ok()
+}
+
+async fn fetch_chat(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    room: &str,
+) -> Result<Vec<ChatMsg>, String> {
+    let response = client
+        .get(format!("{base}/api/v1/rooms/{room}/chat?limit=80"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    json_or_error::<Vec<ChatMsg>>(response, "chat").await
+}
+
+async fn create_room(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    name: &str,
+    is_public: bool,
+) -> Result<Room, String> {
+    let request = CreateRoomRequest {
+        name: name.to_string(),
+        is_public,
+    };
+    let response = client
+        .post(format!("{base}/api/v1/rooms"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .json(&request)
+        .send()
+        .await;
+    json_or_error::<Room>(response, "crear sala").await
+}
+
+async fn add_friend(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    user: &str,
+) -> Result<User, String> {
+    let response = client
+        .post(format!("{base}/api/v1/friends/{user}"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    json_or_error::<User>(response, "añadir amigo").await
+}
+
+async fn invite_member(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    room: &str,
+    user: &str,
+) -> Result<Room, String> {
+    let response = client
+        .post(format!("{base}/api/v1/rooms/{room}/members"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .json(&serde_json::json!({ "user_id": user }))
+        .send()
+        .await;
+    json_or_error::<Room>(response, "invitar").await
+}
+
+async fn kick_member(
+    client: &reqwest::Client,
+    base: &str,
+    client_key: &str,
+    token: &str,
+    room: &str,
+    user: &str,
+) -> Result<Room, String> {
+    let response = client
+        .delete(format!("{base}/api/v1/rooms/{room}/members/{user}"))
+        .bearer_auth(token)
+        .header(CLIENT_KEY_HEADER, client_key)
+        .send()
+        .await;
+    json_or_error::<Room>(response, "expulsar").await
+}
+
+async fn json_or_error<T: serde::de::DeserializeOwned>(
+    response: reqwest::Result<reqwest::Response>,
+    label: &str,
+) -> Result<T, String> {
+    let response = response.map_err(|err| format!("{label}: {err}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let body = body.trim();
+        return Err(if body.is_empty() {
+            format!("{label}: HTTP {status}")
+        } else {
+            format!("{label}: HTTP {status} · {body}")
+        });
+    }
+    response
+        .json::<T>()
+        .await
+        .map_err(|err| format!("{label}: {err}"))
 }
 
 async fn estimate_clock(client: &reqwest::Client, base: &str, client_key: &str) -> Option<i64> {

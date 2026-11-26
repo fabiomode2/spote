@@ -51,6 +51,11 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::Album => draw_album_page(app, buf, layout, pal),
         Overlay::Trim => draw_trim(app, buf, layout, pal),
         Overlay::Update => draw_update(app, buf, layout, pal),
+        Overlay::CreateRoom => draw_create_room(app, buf, layout, pal),
+        Overlay::SocialPeople { mode, selected } => {
+            draw_social_people(app, buf, layout, pal, mode, selected)
+        }
+        Overlay::Chat => draw_chat(app, buf, layout, pal),
     }
 }
 
@@ -111,7 +116,12 @@ pub(super) fn draw_playlist_form(app: &mut App, buf: &mut Buffer, layout: &Layou
     );
 }
 
-pub(super) fn draw_import_playlist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+pub(super) fn draw_import_playlist(
+    app: &mut App,
+    buf: &mut Buffer,
+    layout: &Layout,
+    pal: &Palette,
+) {
     let rect = overlay_frame(layout, pal, buf, 72, 10, "importar lista");
     let inner = inset(rect, 3, 2);
     text_at(
@@ -134,7 +144,11 @@ pub(super) fn draw_import_playlist(app: &mut App, buf: &mut Buffer, layout: &Lay
         field.x + 3,
         field.y,
         &shown,
-        color(if app.import_input.is_empty() { pal.dim } else { pal.text }),
+        color(if app.import_input.is_empty() {
+            pal.dim
+        } else {
+            pal.text
+        }),
         None,
     );
     let cursor = field.x + 3 + app.import_input.chars().count() as u16;
@@ -145,6 +159,256 @@ pub(super) fn draw_import_playlist(app: &mut App, buf: &mut Buffer, layout: &Lay
         buf,
         Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
         "enter importa · esc cancela",
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+}
+
+pub(super) fn draw_create_room(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let rect = overlay_frame(layout, pal, buf, 70, 12, "nueva sala");
+    let inner = inset(rect, 3, 2);
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        "ponle nombre y decide si es pública. Tab cambia la visibilidad",
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+    let field = Rect::new(inner.x, inner.y + 2, inner.width, 1);
+    fill(buf, field, pal.bg_deep);
+    put(buf, field.x + 1, field.y, "↳", color(pal.primary), None);
+    let shown = if app.room_form.name.is_empty() {
+        "nombre de la sala".to_string()
+    } else {
+        app.room_form.name.clone()
+    };
+    put(
+        buf,
+        field.x + 3,
+        field.y,
+        &shown,
+        color(if app.room_form.name.is_empty() {
+            pal.dim
+        } else {
+            pal.text
+        }),
+        None,
+    );
+    let cursor = field.x + 3 + app.room_form.name.chars().count() as u16;
+    if cursor < field.x + field.width {
+        put(buf, cursor, field.y, "▌", color(pal.primary), None);
+    }
+    let (label, detail, tone) = if app.room_form.is_public {
+        (
+            "pública",
+            "cualquiera del servidor puede entrar",
+            pal.primary,
+        )
+    } else {
+        (
+            "privada",
+            "solo entra quien invites desde la sala",
+            pal.secondary,
+        )
+    };
+    let vis = Rect::new(inner.x, inner.y + 4, inner.width, 1);
+    put(buf, vis.x, vis.y, "visibilidad:", color(pal.dim), None);
+    put(buf, vis.x + 13, vis.y, label, color(tone), None);
+    put(
+        buf,
+        vis.x + 13 + label.chars().count() as u16 + 2,
+        vis.y,
+        detail,
+        color(pal.muted),
+        None,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
+        "enter crea · tab cambia pública/privada · esc cancela",
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+}
+
+pub(super) fn draw_social_people(
+    app: &mut App,
+    buf: &mut Buffer,
+    layout: &Layout,
+    pal: &Palette,
+    mode: SocialPeopleMode,
+    selected: usize,
+) {
+    let (title, subtitle) = match mode {
+        SocialPeopleMode::Friend => (
+            "añadir amigo",
+            "elige a alguien del servidor. ★ = ya es amigo",
+        ),
+        SocialPeopleMode::Invite => (
+            "invitar a la sala",
+            "los amigos van primero; enter lo mete en la sala",
+        ),
+        SocialPeopleMode::Kick => (
+            "expulsar de la sala",
+            "elige un miembro; el host no puede expulsarse",
+        ),
+    };
+    let rows = app.social_pick_rows(mode);
+    let max_h = (rows.len() as u16 + 7).clamp(10, 24);
+    let rect = overlay_frame(layout, pal, buf, 78, max_h, title);
+    let inner = inset(rect, 3, 2);
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        subtitle,
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+    let list_top = inner.y + 2;
+    let visible = inner.height.saturating_sub(4) as usize;
+    if rows.is_empty() {
+        text_at(
+            buf,
+            Rect::new(inner.x, list_top, inner.width, 1),
+            match mode {
+                SocialPeopleMode::Friend => "no hay nadie más en el servidor",
+                SocialPeopleMode::Invite => "no queda nadie por invitar",
+                SocialPeopleMode::Kick => "no hay miembros que expulsar",
+            },
+            Style::new().fg(color(pal.muted)),
+            Alignment::Left,
+        );
+    } else {
+        let start = super::lists::keep_visible(0, selected, visible.max(1), rows.len());
+        for (offset, row) in rows.iter().enumerate().skip(start).take(visible.max(1)) {
+            let y = list_top + (offset - start) as u16;
+            let rect = Rect::new(inner.x, y, inner.width, 1);
+            let active = offset == selected;
+            if active {
+                fill(buf, rect, mix(pal.surface, pal.primary, 0.22));
+                put(buf, rect.x, y, "▍", color(pal.primary), None);
+            }
+            let dot = if row.online { "●" } else { "○" };
+            put(
+                buf,
+                rect.x + 2,
+                y,
+                dot,
+                color(if row.online { pal.ok } else { pal.dim }),
+                None,
+            );
+            let mut name = row.name.clone();
+            if row.friend {
+                name.push_str(" ★");
+            }
+            let name_w = 22u16.min(rect.width.saturating_sub(6));
+            truncate_chars(&mut name, name_w as usize);
+            put(
+                buf,
+                rect.x + 4,
+                y,
+                &name,
+                color(if active { pal.text } else { pal.muted }),
+                None,
+            );
+            let mut detail = row.detail.clone();
+            let detail_x = rect.x + 6 + name_w;
+            let detail_w = rect.width.saturating_sub(8 + name_w);
+            truncate_chars(&mut detail, detail_w as usize);
+            if detail_w > 3 {
+                put(buf, detail_x, y, &detail, color(pal.dim), None);
+            }
+            app.hit.add(rect, Action::SocialPick(offset));
+        }
+    }
+    text_at(
+        buf,
+        Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
+        match mode {
+            SocialPeopleMode::Friend => "enter añade · ↑↓ elige · esc cancela",
+            SocialPeopleMode::Invite => "enter invita · ↑↓ elige · esc cancela",
+            SocialPeopleMode::Kick => "enter expulsa · ↑↓ elige · esc cancela",
+        },
+        Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+}
+
+pub(super) fn draw_chat(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
+    let room = app.room.as_ref();
+    let title = room
+        .map(|room| {
+            if room.name.is_empty() {
+                format!("chat · {}", room.id.chars().take(8).collect::<String>())
+            } else {
+                format!("chat · {}", room.name)
+            }
+        })
+        .unwrap_or_else(|| "chat".into());
+    let rect = overlay_frame(layout, pal, buf, 82, 20, &title);
+    let inner = inset(rect, 3, 2);
+    let room_id = room.map(|room| room.id.as_str()).unwrap_or_default();
+    let messages: Vec<&spote_protocol::ChatMsg> = app
+        .chat
+        .iter()
+        .filter(|message| message.room_id == room_id)
+        .collect();
+    let visible = inner.height.saturating_sub(3) as usize;
+    let start = messages.len().saturating_sub(visible);
+    let mut y = inner.y;
+    if messages.is_empty() {
+        text_at(
+            buf,
+            Rect::new(inner.x, y, inner.width, 1),
+            "todavía no hay mensajes. escribe el primero.",
+            Style::new().fg(color(pal.muted)),
+            Alignment::Left,
+        );
+    }
+    for message in messages.iter().skip(start) {
+        let mut line = format!("{}: {}", message.user_name, message.text);
+        truncate_chars(&mut line, inner.width as usize);
+        text_at(
+            buf,
+            Rect::new(inner.x, y, inner.width, 1),
+            line,
+            Style::new().fg(color(if message.user_id == app.social_user_id {
+                pal.text
+            } else {
+                pal.muted
+            })),
+            Alignment::Left,
+        );
+        y += 1;
+    }
+    let field = Rect::new(inner.x, rect.y + rect.height - 3, inner.width, 1);
+    fill(buf, field, pal.bg_deep);
+    put(buf, field.x + 1, field.y, "›", color(pal.primary), None);
+    let shown = if app.chat_input.is_empty() {
+        "escribe un mensaje".to_string()
+    } else {
+        app.chat_input.clone()
+    };
+    put(
+        buf,
+        field.x + 3,
+        field.y,
+        &shown,
+        color(if app.chat_input.is_empty() {
+            pal.dim
+        } else {
+            pal.text
+        }),
+        None,
+    );
+    let cursor = field.x + 3 + app.chat_input.chars().count() as u16;
+    if cursor < field.x + field.width {
+        put(buf, cursor, field.y, "▌", color(pal.primary), None);
+    }
+    text_at(
+        buf,
+        Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
+        "enter envía · esc cierra",
         Style::new().fg(color(pal.dim)),
         Alignment::Left,
     );
@@ -170,7 +434,9 @@ pub(super) fn draw_confirm_delete_playlist(
         buf,
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
         format!("¿borrar '{name}'?"),
-        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.text))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     text_at(
@@ -179,12 +445,20 @@ pub(super) fn draw_confirm_delete_playlist(
         if remove_tracks {
             format!(
                 "{songs} {} también de la biblioteca.",
-                if tracks == 1 { "se quitará" } else { "se quitarán" }
+                if tracks == 1 {
+                    "se quitará"
+                } else {
+                    "se quitarán"
+                }
             )
         } else {
             format!(
                 "{songs} {} en la biblioteca.",
-                if tracks == 1 { "se quedará" } else { "se quedarán" }
+                if tracks == 1 {
+                    "se quedará"
+                } else {
+                    "se quedarán"
+                }
             )
         },
         Style::new().fg(color(if remove_tracks { pal.warn } else { pal.muted })),
@@ -229,7 +503,9 @@ pub(super) fn draw_confirm_delete_album(
         buf,
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
         format!("¿quitar '{album}' de {artist}?"),
-        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.text))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     text_at(
@@ -290,7 +566,12 @@ pub(super) fn draw_add_to_playlist(
         let count = format!("{}", list.count);
         text_at(
             buf,
-            Rect::new(row.x + row.width - count.len() as u16, y, count.len() as u16, 1),
+            Rect::new(
+                row.x + row.width - count.len() as u16,
+                y,
+                count.len() as u16,
+                1,
+            ),
             count,
             Style::new().fg(color(pal.dim)),
             Alignment::Right,
@@ -306,7 +587,14 @@ pub(super) fn draw_add_to_playlist(
     );
 }
 
-pub(super) fn overlay_frame(layout: &Layout, pal: &Palette, buf: &mut Buffer, width: u16, height: u16, title: &str) -> Rect {
+pub(super) fn overlay_frame(
+    layout: &Layout,
+    pal: &Palette,
+    buf: &mut Buffer,
+    width: u16,
+    height: u16,
+    title: &str,
+) -> Rect {
     let width = width.min(layout.full.width.saturating_sub(4));
     let height = height.min(layout.full.height.saturating_sub(2));
     let rect = Rect::new(
@@ -362,27 +650,13 @@ pub(super) fn draw_help(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
             continue;
         }
         if let Some(section) = section {
-            put(
-                buf,
-                x,
-                y,
-                section,
-                color(pal.primary),
-                None,
-            );
+            put(buf, x, y, section, color(pal.primary), None);
             continue;
         }
         let key_w = key.chars().count() as u16 + 2;
         let cap = Rect::new(x, y, key_w, 1);
         keycap(buf, cap, pal, key);
-        put(
-            buf,
-            x + key_w + 1,
-            y,
-            label,
-            color(pal.muted),
-            None,
-        );
+        put(buf, x + key_w + 1, y, label, color(pal.muted), None);
     }
     text_at(
         buf,
@@ -410,7 +684,11 @@ pub(super) fn draw_palette(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             put(buf, row.x, y, "▍", color(pal.primary), None);
         }
         let preview = app.dominant.variant(*variant);
-        let marker = if *variant == app.palette_variant { "●" } else { " " };
+        let marker = if *variant == app.palette_variant {
+            "●"
+        } else {
+            " "
+        };
         put(
             buf,
             row.x + 2,
@@ -443,7 +721,12 @@ pub(super) fn draw_palette(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     };
     text_at(
         buf,
-        Rect::new(inner.x, rect.y + rect.height.saturating_sub(2), inner.width, 1),
+        Rect::new(
+            inner.x,
+            rect.y + rect.height.saturating_sub(2),
+            inner.width,
+            1,
+        ),
         footer,
         Style::new().fg(color(pal.dim)),
         Alignment::Center,
@@ -451,11 +734,23 @@ pub(super) fn draw_palette(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
 }
 
 pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
-    let rect = overlay_frame(layout, pal, buf, 74, 22, "visualizaciones · capas y presets");
+    let rect = overlay_frame(
+        layout,
+        pal,
+        buf,
+        74,
+        22,
+        "visualizaciones · capas y presets",
+    );
     // El cierre se registra primero: el HitMap se queda con la última acción
     // añadida y, si fuera al final, se tragaría los clics de presets/capas.
     app.hit.add(rect, Action::CloseOverlay);
-    let inner = Rect::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(4), rect.height.saturating_sub(3));
+    let inner = Rect::new(
+        rect.x + 2,
+        rect.y + 2,
+        rect.width.saturating_sub(4),
+        rect.height.saturating_sub(3),
+    );
 
     // Presets.
     let mut y = inner.y;
@@ -463,7 +758,9 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         buf,
         Rect::new(inner.x, y, inner.width, 1),
         "presets · ↑↓ elegir · espacio activar · enter usar · v cicla · V fullscreen",
-        Style::new().fg(color(pal.primary)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.primary))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     y += 1;
@@ -518,7 +815,9 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         buf,
         Rect::new(inner.x, y, inner.width, 1),
         format!("capas de «{}»  ·  1-9 alterna", app.viz.preset_name()),
-        Style::new().fg(color(pal.primary)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.primary))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     y += 1;
@@ -553,7 +852,10 @@ pub(super) fn draw_effects(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
     // Efectos disponibles.
     y += 1;
     if y < inner.y + inner.height {
-        let keys: Vec<&str> = crate::viz::EffectKind::ALL.iter().map(|kind| kind.key()).collect();
+        let keys: Vec<&str> = crate::viz::EffectKind::ALL
+            .iter()
+            .map(|kind| kind.key())
+            .collect();
         let mut available = format!("disponibles: {}", keys.join(" · "));
         truncate_chars(&mut available, inner.width.saturating_sub(2) as usize);
         text_at(
@@ -663,7 +965,9 @@ pub(super) fn draw_context(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         buf,
         Rect::new(inner.x, inner.y, inner.width, 1),
         title,
-        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        Style::new()
+            .fg(color(pal.text))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     app.hit.add(rect, Action::CloseOverlay);
@@ -749,8 +1053,13 @@ pub(super) fn draw_trim(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
     text_at(
         buf,
         Rect::new(inner.x, inner.y, inner.width, 1),
-        format!("posición {pos}  ·  recorte {start}–{end}", pos = spote_core::util::format_ms(position)),
-        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        format!(
+            "posición {pos}  ·  recorte {start}–{end}",
+            pos = spote_core::util::format_ms(position)
+        ),
+        Style::new()
+            .fg(color(pal.text))
+            .add_modifier(Modifier::BOLD),
         Alignment::Left,
     );
     text_at(
@@ -773,7 +1082,14 @@ pub(super) fn draw_trim(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         let t = (x as f32 + 0.5) / bar.width.max(1) as f32;
         let inside = t >= start_pct && t <= end_pct;
         let color_fg = if inside { pal.primary } else { pal.border_dim };
-        put(buf, bar.x + x, bar.y, if inside { "━" } else { "─" }, color(color_fg), None);
+        put(
+            buf,
+            bar.x + x,
+            bar.y,
+            if inside { "━" } else { "─" },
+            color(color_fg),
+            None,
+        );
     }
     for (pct, glyph, fg) in [
         (start_pct, "┃", pal.warn),
@@ -781,7 +1097,14 @@ pub(super) fn draw_trim(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         (pos_pct, "◆", pal.text),
     ] {
         let x = bar.x + (pct * bar.width.saturating_sub(1) as f32) as u16;
-        put(buf, x.min(bar.x + bar.width - 1), bar.y, glyph, color(fg), None);
+        put(
+            buf,
+            x.min(bar.x + bar.width - 1),
+            bar.y,
+            glyph,
+            color(fg),
+            None,
+        );
     }
     let mut x = inner.x;
     for (label, action, fg) in [
@@ -794,7 +1117,13 @@ pub(super) fn draw_trim(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &
         let chip = Rect::new(x, inner.y + 6, width, 1);
         let hover = app.hover == Some(action.clone());
         fill(buf, chip, if hover { pal.surface_alt } else { pal.surface });
-        text_at(buf, chip, label, Style::new().fg(color(fg)), Alignment::Center);
+        text_at(
+            buf,
+            chip,
+            label,
+            Style::new().fg(color(fg)),
+            Alignment::Center,
+        );
         app.hit.add(chip, action);
         x += width + 2;
     }
@@ -846,7 +1175,13 @@ pub(super) fn draw_artist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     let image_h = if image_w > 0 { 12 } else { 0 };
     if image_w > 0 {
         if let Some(art) = &app.artist_art {
-            draw_cached_art(buf, Rect::new(inner.x, inner.y, image_w, image_h), art, pal, true);
+            draw_cached_art(
+                buf,
+                Rect::new(inner.x, inner.y, image_w, image_h),
+                art,
+                pal,
+                true,
+            );
         } else {
             fill(
                 buf,
@@ -866,14 +1201,7 @@ pub(super) fn draw_artist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     let text_w = (inner.x + inner.width).saturating_sub(text_x);
     let mut name = profile.name.clone();
     truncate_chars(&mut name, text_w as usize);
-    put(
-        buf,
-        text_x,
-        inner.y,
-        &name,
-        color(pal.text),
-        None,
-    );
+    put(buf, text_x, inner.y, &name, color(pal.text), None);
     let meta = format!(
         "{} · {} fans{}",
         profile.provider,
@@ -890,7 +1218,14 @@ pub(super) fn draw_artist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     if !profile.genres.is_empty() {
         let mut genres = profile.genres.join("  ·  ");
         truncate_chars(&mut genres, text_w as usize);
-        put(buf, text_x, inner.y + 2, &genres, color(pal.secondary), None);
+        put(
+            buf,
+            text_x,
+            inner.y + 2,
+            &genres,
+            color(pal.secondary),
+            None,
+        );
     }
     if profile.popularity > 0 {
         let bar_w = text_w.min(30);
@@ -901,7 +1236,11 @@ pub(super) fn draw_artist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
                 text_x + i,
                 inner.y + 3,
                 if i < filled { "━" } else { "─" },
-                color(if i < filled { pal.primary } else { pal.border_dim }),
+                color(if i < filled {
+                    pal.primary
+                } else {
+                    pal.border_dim
+                }),
                 None,
             );
         }
@@ -956,7 +1295,12 @@ pub(super) fn draw_artist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
     y += 1;
     let rows = (inner.y + inner.height).saturating_sub(y + 1) as usize;
     let start = app.artist_selected.saturating_sub(rows / 2);
-    let start = start.min(profile.top_tracks.len().saturating_sub(rows.min(profile.top_tracks.len())));
+    let start = start.min(
+        profile
+            .top_tracks
+            .len()
+            .saturating_sub(rows.min(profile.top_tracks.len())),
+    );
     for (offset, track) in profile.top_tracks.iter().skip(start).take(rows).enumerate() {
         let index = start + offset;
         let row = Rect::new(inner.x, y + offset as u16, inner.width, 1);
@@ -1004,7 +1348,9 @@ pub(super) fn draw_artist(app: &mut App, buf: &mut Buffer, layout: &Layout, pal:
 /// Álbum abierto como overlay: portada, ficha y tracklist. Sustituye a la
 /// pestaña independiente de álbumes, que el usuario no quería.
 pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {
-    let Some(page) = app.album_page.clone() else { return };
+    let Some(page) = app.album_page.clone() else {
+        return;
+    };
     let width = layout.full.width.saturating_sub(8).min(106);
     let height = layout.full.height.saturating_sub(4).min(36);
     let rect = overlay_frame(layout, pal, buf, width, height, "álbum");
@@ -1038,14 +1384,7 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
     let text_w = (inner.x + inner.width).saturating_sub(text_x);
     let mut title = page.title.clone();
     truncate_chars(&mut title, text_w as usize);
-    put(
-        buf,
-        text_x,
-        inner.y,
-        &title,
-        color(pal.text),
-        None,
-    );
+    put(buf, text_x, inner.y, &title, color(pal.text), None);
     let mut artist = page.artist.clone();
     truncate_chars(&mut artist, text_w as usize);
     let artist_w = artist.chars().count() as u16;
@@ -1069,9 +1408,15 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
     }
     let meta = format!(
         "{} · {} pistas{}",
-        page.release_date.clone().unwrap_or_else(|| "fecha desconocida".into()),
+        page.release_date
+            .clone()
+            .unwrap_or_else(|| "fecha desconocida".into()),
         page.tracks.len(),
-        if page.provider == "local" { " · en biblioteca" } else { "" }
+        if page.provider == "local" {
+            " · en biblioteca"
+        } else {
+            ""
+        }
     );
     put(buf, text_x, inner.y + 2, &meta, color(pal.dim), None);
     let mut x = text_x;
@@ -1113,13 +1458,16 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
         );
         return;
     }
-    let start = page
-        .selected
-        .saturating_sub(rows / 2)
-        .min(page.tracks.len().saturating_sub(rows.min(page.tracks.len())));
+    let start = page.selected.saturating_sub(rows / 2).min(
+        page.tracks
+            .len()
+            .saturating_sub(rows.min(page.tracks.len())),
+    );
     for offset in 0..rows {
         let index = start + offset;
-        let Some(track) = page.tracks.get(index) else { break };
+        let Some(track) = page.tracks.get(index) else {
+            break;
+        };
         let y = list_y + offset as u16;
         let row = Rect::new(inner.x, y, inner.width, 1);
         let selected = index == page.selected;
@@ -1177,7 +1525,6 @@ pub(super) fn draw_album_page(app: &mut App, buf: &mut Buffer, layout: &Layout, 
         Alignment::Left,
     );
 }
-
 
 /// Aviso de versión nueva. Si el usuario acepta, el actualizador corre en
 /// segundo plano; aquí solo se explica qué va a pasar.

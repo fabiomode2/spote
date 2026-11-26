@@ -107,9 +107,11 @@ la propia TUI.
   desactiva): BPM, tonalidad, Camelot,
   energy, danceability, happiness y popularidad. Se consulta solo al cambiar
   de canción, se cachea en memoria y tiene respaldo compacto en paneles bajos.
-- **Salas**: `spoted` añade presencia, chat y cola compartida. La API exige una
-  clave de cliente por persona (`X-Spote-Key`), las sesiones están atadas a esa
-  clave y caducan. Ver [`docs/social.md`](docs/social.md).
+- **Salas**: `spoted` añade presencia, chat y cola compartida. En la TUI, `s`
+  abre la pestaña de salas; `n` crea una (Tab alterna pública/privada), `a`
+  añade amigos, `i` invita a la sala, `x` expulsa, `t` abre el chat y `L` sale.
+  La API exige una clave de cliente por persona (`X-Spote-Key`), las sesiones
+  están atadas a esa clave y caducan. Ver [`docs/social.md`](docs/social.md).
 - **Cuenta y sync**: la misma clave en PC y Android identifica la misma cuenta;
   `spoted` sincroniza favoritas, escuchas y playlists por revisiones, sin subir
   audio ni rutas locales.
@@ -166,7 +168,7 @@ token = ""             # se rellena tras el login
 art_mode = "default"   # default | half | pixel | braille | off
 viz = "clean"          # clean | aurora | bloom | inferno | crt | lcd | rack | braille | stage
 fps = 60               # frames de la UI (20-60)
-fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
+fx_fps = 60            # ritmo de los efectos; el canvas a pantalla completa va a este ritmo
 tunebat = true         # BPM/tonalidad de la pista en el panel de amigos (API no oficial)
 
 panel_opacity = 72     # 55-100; transparencia real de paneles

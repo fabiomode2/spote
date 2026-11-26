@@ -297,6 +297,12 @@ impl App {
             return;
         }
 
+        // Salas: n/a/i/x/t abren creación, amigos, invitación, expulsión y
+        // chat. El resto (↑↓, enter, L, s) sigue en el teclado global.
+        if self.tab == Tab::Room && self.handle_room_key(key) {
+            return;
+        }
+
         let upper = key.modifiers.contains(KeyModifiers::SHIFT)
             || matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase());
         match key.code {
@@ -310,8 +316,7 @@ impl App {
             }
             KeyCode::Char(' ') => self.toggle_play(),
             KeyCode::Char(c)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && c.is_ascii_digit() =>
+                if key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_digit() =>
             {
                 if let Some(digit) = c.to_digit(10) {
                     if digit > 0 {
@@ -588,6 +593,11 @@ impl App {
                 } else {
                     Fullscreen::Viz
                 };
+                if self.fullscreen == Fullscreen::Viz {
+                    // V siempre enseña el efecto, aunque estuviera apagado.
+                    self.show_viz = true;
+                    self.viz.paused = false;
+                }
                 self.needs_redraw = true;
             }
             KeyCode::Char('u') if !upper => self.toggle_loop(),

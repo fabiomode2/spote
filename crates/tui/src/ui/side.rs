@@ -49,7 +49,13 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
             let two = inner.height >= 7;
             let now_h = if two { 2 } else { 1 };
             let now_rect = Rect::new(inner.x, inner.y, inner.width, now_h);
-            fill_soft(buf, now_rect, mix(pal.surface, pal.primary, 0.16), 0.9, pal.bg);
+            fill_soft(
+                buf,
+                now_rect,
+                mix(pal.surface, pal.primary, 0.16),
+                0.9,
+                pal.bg,
+            );
             let mut title = track.title.clone();
             truncate_chars(&mut title, inner.width.saturating_sub(4) as usize);
             put(buf, inner.x, inner.y, "▶", color(pal.primary), None);
@@ -61,7 +67,14 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                     artist.push_str(album);
                 }
                 truncate_chars(&mut artist, inner.width.saturating_sub(4) as usize);
-                put(buf, inner.x + 2, inner.y + 1, &artist, color(pal.secondary), None);
+                put(
+                    buf,
+                    inner.x + 2,
+                    inner.y + 1,
+                    &artist,
+                    color(pal.secondary),
+                    None,
+                );
             }
             app.hit.add(now_rect, Action::Tab(Tab::Now));
             inner.y += now_h + 1;
@@ -87,12 +100,8 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     if app.list_cards {
         let card_h = 3u16;
         let visible = (inner.height / card_h).max(1) as usize;
-        let start = super::lists::keep_visible(
-            app.queue_start,
-            app.queue_selected,
-            visible,
-            queue_len,
-        );
+        let start =
+            super::lists::keep_visible(app.queue_start, app.queue_selected, visible, queue_len);
         app.queue_start = start;
         let shown = (queue_len - start).min(visible);
         let y_offset = if app.vcenter {
@@ -102,7 +111,8 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         };
         for offset in 0..visible {
             let index = start + offset;
-            if index >= queue_len || inner.y + (offset as u16 + 1) * card_h > inner.y + inner.height {
+            if index >= queue_len || inner.y + (offset as u16 + 1) * card_h > inner.y + inner.height
+            {
                 break;
             }
             let y = inner.y + y_offset + offset as u16 * card_h;
@@ -190,12 +200,7 @@ fn draw_queue(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     }
 
     let visible = inner.height.saturating_sub(1) as usize;
-    let start = super::lists::keep_visible(
-        app.queue_start,
-        app.queue_selected,
-        visible,
-        queue_len,
-    );
+    let start = super::lists::keep_visible(app.queue_start, app.queue_selected, visible, queue_len);
     app.queue_start = start;
     let shown = (queue_len - start).min(visible);
     let y_offset = if app.vcenter {
@@ -400,7 +405,12 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         text_at(
             buf,
             Rect::new(inner.x, y, inner.width, 1),
-            format!("{} online · {} en total", online, app.presence.len()),
+            format!(
+                "{} amigos · {} online · {} en total",
+                app.friends.len(),
+                online,
+                app.presence.len()
+            ),
             Style::new().fg(color(pal.dim)),
             Alignment::Left,
         );
@@ -415,11 +425,14 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
             let dot = if presence.online { "●" } else { "○" };
             let dot_color = if presence.online { pal.ok } else { pal.dim };
             put(buf, inner.x, y, dot, color(dot_color), None);
-            let name = if presence.user.name == app.cfg.server.name {
+            let mut name = if presence.user.name == app.cfg.server.name {
                 format!("{} (tú)", presence.user.name)
             } else {
                 presence.user.name.clone()
             };
+            if app.is_friend(&presence.user.id) {
+                name.push_str(" ★");
+            }
             let mut label = name;
             truncate_chars(&mut label, inner.width.saturating_sub(2) as usize);
             put(
@@ -447,7 +460,14 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         if app.now.track.is_none() {
             put(buf, inner.x, y, "sin reproducción", color(pal.dim), None);
         } else if app.tunebat_loading {
-            put(buf, inner.x, y, "buscando en Tunebat…", color(pal.dim), None);
+            put(
+                buf,
+                inner.x,
+                y,
+                "buscando en Tunebat…",
+                color(pal.dim),
+                None,
+            );
         } else if let Some(info) = &app.tunebat {
             let mut bpm = info.bpm_line();
             truncate_chars(&mut bpm, inner.width as usize);
@@ -494,7 +514,14 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                 put(buf, inner.x, y, &texture, color(pal.dim), None);
             }
         } else {
-            put(buf, inner.x, y, "sin datos en Tunebat", color(pal.dim), None);
+            put(
+                buf,
+                inner.x,
+                y,
+                "sin datos en Tunebat",
+                color(pal.dim),
+                None,
+            );
         }
     }
 
@@ -547,7 +574,11 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
                 inner.x,
                 base + 1,
                 &bar,
-                color(if download.percent > 0.0 { pal.primary } else { pal.dim }),
+                color(if download.percent > 0.0 {
+                    pal.primary
+                } else {
+                    pal.dim
+                }),
                 None,
             );
         }
@@ -589,11 +620,21 @@ pub(super) fn draw_viz(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
     if app.cfg.ui.fx.edge_flame {
         edge_flame(app, buf, rect, pal);
     }
-    let label = format!("{} · {}", app.viz.preset_name(), app.viz.preset_description());
+    let label = format!(
+        "{} · {}",
+        app.viz.preset_name(),
+        app.viz.preset_description()
+    );
     let width = label.chars().count() as u16;
     if rect.width > width + 4 {
         let x = rect.x + rect.width - width - 2;
-        fill_soft(buf, Rect::new(x, rect.y, width, 1), pal.bg_deep, 0.7, pal.bg_deep);
+        fill_soft(
+            buf,
+            Rect::new(x, rect.y, width, 1),
+            pal.bg_deep,
+            0.7,
+            pal.bg_deep,
+        );
         put(buf, x, rect.y, &label, color(pal.dim), None);
     }
     app.hit.add(rect, Action::VizNext);
@@ -629,9 +670,7 @@ fn clean_spill(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
 fn edge_flame(app: &App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
     let y = rect.y + rect.height.saturating_sub(1);
     let t = app.viz.time;
-    let energy = (app.audio.bass * 0.9
-        + app.audio.kick_pulse * 0.75
-        + app.audio.mid * 0.25)
+    let energy = (app.audio.bass * 0.9 + app.audio.kick_pulse * 0.75 + app.audio.mid * 0.25)
         * (0.7 + app.song_intensity * 1.1);
     for x in 0..rect.width {
         let nx = x as f32 / rect.width.max(1) as f32;
@@ -656,7 +695,38 @@ pub(super) fn blit_viz(
     bg_amount: f32,
     scale: u16,
 ) {
-    blit_layer(&app.viz.output, buf, dst, src_y0, fg_amount, bg_amount, scale);
+    blit_layer(
+        &app.viz.output,
+        buf,
+        dst,
+        src_y0,
+        fg_amount,
+        bg_amount,
+        scale,
+    );
+}
+
+/// Copia el canvas del visualizador usando el fondo propio del efecto: las
+/// celdas que el efecto deja en blanco llevan el gradiente de la paleta, así
+/// que a pantalla completa no se ve el mosaico detrás de los glifos.
+pub(super) fn blit_viz_cover(
+    app: &App,
+    buf: &mut Buffer,
+    dst: Rect,
+    src_y0: u16,
+    bg_amount: f32,
+    scale: u16,
+) {
+    blit_layer_impl(
+        &app.viz.output,
+        buf,
+        dst,
+        src_y0,
+        1.0,
+        bg_amount,
+        scale,
+        true,
+    );
 }
 
 /// Copia una capa ya renderizada. La usa el fondo ambiental (que vive en un
@@ -669,6 +739,20 @@ pub(super) fn blit_layer(
     fg_amount: f32,
     bg_amount: f32,
     scale: u16,
+) {
+    blit_layer_impl(layer, buf, dst, src_y0, fg_amount, bg_amount, scale, false);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_layer_impl(
+    layer: &crate::viz::Layer,
+    buf: &mut Buffer,
+    dst: Rect,
+    src_y0: u16,
+    fg_amount: f32,
+    bg_amount: f32,
+    scale: u16,
+    cover_bg: bool,
 ) {
     if layer.w == 0 || layer.h == 0 {
         return;
@@ -702,14 +786,18 @@ pub(super) fn blit_layer(
                 _ => (11, 11, 16),
             };
             let fg = mix(under, src.fg, (src.alpha * fg_amount).clamp(0.0, 1.0));
-            let bg = if bg_amount <= 0.001 {
-                under
-            } else {
+            // En modo `cover_bg` solo las celdas vacías pintan fondo: son el
+            // gradiente del efecto. Los glifos conservan el fondo de debajo
+            // para no crear un halo de color alrededor de cada trazo.
+            let paint_bg = bg_amount > 0.001 && (!cover_bg || src.ch == ' ');
+            let bg = if paint_bg {
                 mix(under, src.fg, (src.alpha * bg_amount).clamp(0.0, 1.0))
+            } else {
+                under
             };
             let mut glyph = [0u8; 4];
             cell.set_symbol(src.ch.encode_utf8(&mut glyph));
-            cell.set_fg(color(fg));
+            cell.set_fg(color(if src.ch == ' ' && paint_bg { bg } else { fg }));
             cell.set_bg(color(bg));
         }
     }

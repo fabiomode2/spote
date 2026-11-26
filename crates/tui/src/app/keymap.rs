@@ -1,7 +1,7 @@
 //! Fuente única de leyendas y ayuda. Si una tecla no está aquí, no existe:
 //! así la barra inferior no miente.
 
-use super::{App, CenterFocus, Detail, Overlay, Pane, Tab};
+use super::{App, CenterFocus, Detail, Overlay, Pane, SocialPeopleMode, Tab};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Hint {
@@ -95,9 +95,14 @@ pub fn help_sections() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)>
                 ("l", "añadir a lista (en biblioteca)"),
                 ("d", "borrar la lista abierta"),
                 ("[ / ]", "ciclar filtros y listas"),
+                ("n", "crear sala (Tab pública/privada)"),
+                ("a", "añadir amigo"),
+                ("i", "invitar a la sala (host)"),
+                ("x", "expulsar de la sala (host)"),
+                ("t", "chat de la sala"),
                 ("enter", "unirse a sala"),
                 ("L", "salir de la sala"),
-                ("s", "refrescar salas"),
+                ("s", "refrescar salas, amigos y presencia"),
             ],
         ),
         (
@@ -207,6 +212,48 @@ impl App {
                     Hint {
                         key: "c",
                         label: "quitar",
+                    },
+                    Hint {
+                        key: "esc",
+                        label: "cerrar",
+                    },
+                ],
+                Overlay::CreateRoom => vec![
+                    Hint {
+                        key: "enter",
+                        label: "crear",
+                    },
+                    Hint {
+                        key: "tab",
+                        label: "pública/privada",
+                    },
+                    Hint {
+                        key: "esc",
+                        label: "cancelar",
+                    },
+                ],
+                Overlay::SocialPeople { mode, .. } => vec![
+                    Hint {
+                        key: "↑↓",
+                        label: "elegir",
+                    },
+                    Hint {
+                        key: "enter",
+                        label: match mode {
+                            SocialPeopleMode::Friend => "añadir",
+                            SocialPeopleMode::Invite => "invitar",
+                            SocialPeopleMode::Kick => "expulsar",
+                        },
+                    },
+                    Hint {
+                        key: "esc",
+                        label: "cancelar",
+                    },
+                ],
+                Overlay::Chat => vec![
+                    Hint {
+                        key: "enter",
+                        label: "enviar",
                     },
                     Hint {
                         key: "esc",
@@ -583,8 +630,24 @@ impl App {
             ],
             Tab::Room => vec![
                 Hint {
+                    key: "↑↓",
+                    label: "mover",
+                },
+                Hint {
                     key: "enter",
                     label: "entrar",
+                },
+                Hint {
+                    key: "n",
+                    label: "sala",
+                },
+                Hint {
+                    key: "a",
+                    label: "amigo",
+                },
+                Hint {
+                    key: "t",
+                    label: "chat",
                 },
                 Hint {
                     key: "L",
@@ -593,18 +656,6 @@ impl App {
                 Hint {
                     key: "s",
                     label: "refrescar",
-                },
-                Hint {
-                    key: "g",
-                    label: "artista",
-                },
-                Hint {
-                    key: "E",
-                    label: "diseño",
-                },
-                Hint {
-                    key: "?",
-                    label: "ayuda",
                 },
             ],
             Tab::Settings => vec![

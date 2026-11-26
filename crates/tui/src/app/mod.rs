@@ -52,6 +52,7 @@ pub use keymap::help_sections;
 mod lyrics_search;
 mod playlists;
 mod settings;
+mod social_ui;
 mod spotify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +267,23 @@ pub enum Overlay {
     Audio,
     /// Hay una versión nueva en GitHub.
     Update,
+    /// Formulario para crear una sala social.
+    CreateRoom,
+    /// Selector de personas para amistad, invitación o expulsión.
+    SocialPeople {
+        mode: SocialPeopleMode,
+        selected: usize,
+    },
+    /// Chat de la sala actual.
+    Chat,
+}
+
+/// Qué se hace con la persona elegida en `Overlay::SocialPeople`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocialPeopleMode {
+    Friend,
+    Invite,
+    Kick,
 }
 
 /// Campos del formulario de lista nueva. `field` marca dónde está el cursor.
@@ -291,6 +309,22 @@ impl PlaylistForm {
             1 => &mut self.description,
             2 => &mut self.cover,
             _ => &mut self.name,
+        }
+    }
+}
+
+/// Formulario de sala nueva. La visibilidad se alterna con Tab.
+#[derive(Debug, Clone)]
+pub struct RoomForm {
+    pub name: String,
+    pub is_public: bool,
+}
+
+impl Default for RoomForm {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            is_public: true,
         }
     }
 }
@@ -419,6 +453,12 @@ pub enum Action {
     AddToPlaylist,
     JoinRoom(usize),
     LeaveRoom,
+    NewRoom,
+    AddFriendPicker,
+    InvitePicker,
+    KickPicker,
+    OpenChat,
+    SocialPick(usize),
     Quit,
 }
 
@@ -834,7 +874,9 @@ impl SettingRow {
             Self::MosaicOpacity => "opacidad del mosaico (5-50 %)",
             Self::MosaicAuto => "el movimiento sigue la energía de la canción",
             Self::FullscreenBackdrop => "mosaico o negro detrás del efecto a pantalla completa",
-            Self::MosaicMotion => "movimiento del mosaico: deriva, filas, columnas, diagonal, giro o auto",
+            Self::MosaicMotion => {
+                "movimiento del mosaico: deriva, filas, columnas, diagonal, giro o auto"
+            }
             Self::MosaicSpeed => "velocidad del mosaico",
             Self::MosaicBeat => "el mosaico salta al compás del bombo",
             Self::InstrumentBorders => "los bordes laten con bombo, caja, charles y voz",
@@ -1390,7 +1432,11 @@ pub struct App {
     pub room_state: Option<RoomState>,
     pub room_queue: Vec<QueueItem>,
     pub presence: Vec<Presence>,
+    pub friends: Vec<spote_protocol::User>,
+    pub social_user_id: String,
     pub chat: Vec<spote_protocol::ChatMsg>,
+    pub chat_input: String,
+    pub room_form: RoomForm,
     pub social_status: String,
     pub social_connected: bool,
     pub last_social_error: Option<Instant>,
@@ -1602,11 +1648,9 @@ impl App {
             search_worker: SearchWorker::start(),
             palette: PaletteRuntime::new(Palette::dark(), cfg.ui.theme_fade_ms),
             dominant: Palette::dark(),
-            palette_variant: PaletteVariant::from_str(&cfg.ui.palette_variant)
-                .unwrap_or_default(),
+            palette_variant: PaletteVariant::from_str(&cfg.ui.palette_variant).unwrap_or_default(),
             palette_selected: 0,
-            palette_original: PaletteVariant::from_str(&cfg.ui.palette_variant)
-                .unwrap_or_default(),
+            palette_original: PaletteVariant::from_str(&cfg.ui.palette_variant).unwrap_or_default(),
             effects_selected: 0,
             list_cards: cfg.ui.list_cards,
             viz_background: cfg.ui.viz_background,
@@ -1653,7 +1697,11 @@ impl App {
             room_state: None,
             room_queue: Vec::new(),
             presence: Vec::new(),
+            friends: Vec::new(),
+            social_user_id: String::new(),
             chat: Vec::new(),
+            chat_input: String::new(),
+            room_form: RoomForm::default(),
             social_status: String::new(),
             social_connected: false,
             last_social_error: None,
@@ -2158,7 +2206,7 @@ impl App {
                             duration_ms: track.duration_ms,
                         });
                         self.now.track = Some(track);
-        self.refresh_now_artists();
+                        self.refresh_now_artists();
                     }
                     // El id resuelto vale también para el contexto y la cola:
                     // al volver a esta pista no se repite la búsqueda.
@@ -2806,7 +2854,7 @@ impl App {
                 }
                 self.pending_play = Some(entry.track.key.clone());
                 self.now.track = Some(entry.track.clone());
-        self.refresh_now_artists();
+                self.refresh_now_artists();
                 self.now.path = None;
                 self.now.position_ms = 0;
                 self.now.duration_ms = entry.track.duration_ms;
@@ -3728,10 +3776,10 @@ impl App {
     }
 
     /// Ritmo del canvas a pantalla completa (fondo del visualizador, zen).
-    /// Regenerarlo a 60 Hz es lo que satura la GPU integrada: nadie nota el
-    /// glitch a 30 entre paneles translúcidos. En pausa, 10 (como el diseño).
+    /// El canvas es una sola capa: puede ir a la frecuencia completa del
+    /// ajuste. En pausa, 10 (como el diseño).
     pub fn full_effects_hz(&self) -> f32 {
-        let hz = (self.fx_fps * 0.5).clamp(4.0, 30.0);
+        let hz = self.fx_fps.clamp(4.0, 60.0);
         if self.now.playing {
             hz
         } else {
@@ -3783,10 +3831,7 @@ impl App {
             return;
         }
         let current = self.viz.preset_name();
-        let index = names
-            .iter()
-            .position(|name| *name == current)
-            .unwrap_or(0) as i32;
+        let index = names.iter().position(|name| *name == current).unwrap_or(0) as i32;
         let next = (index + delta).rem_euclid(names.len() as i32) as usize;
         if let Some(preset) = crate::viz::preset_by_name(names[next]) {
             self.viz.set_preset(preset);
@@ -4214,9 +4259,7 @@ impl App {
                 .map(|track| format!("ambient:{}", track.key));
             let wanted_mode =
                 ArtMode::from_str(&self.cfg.ui.fx.mosaic_mode).unwrap_or(ArtMode::Half);
-            if wanted.as_deref() == Some(response.key.as_str())
-                && response.mode == wanted_mode
-            {
+            if wanted.as_deref() == Some(response.key.as_str()) && response.mode == wanted_mode {
                 if let Some(art) = response.art {
                     self.ambient_art = Some(art);
                 }
@@ -4562,8 +4605,7 @@ impl App {
                         self.drop_thumbs(&key);
                         // Si la miniatura estaba en backoff, la URL nueva
                         // debe probarse ya.
-                        self.thumb_retry
-                            .retain(|(track, _, _), _| track != &key);
+                        self.thumb_retry.retain(|(track, _, _), _| track != &key);
                         // La portada puede haber cambiado: se pide otra sin
                         // borrar la actual. Solo se marca para refrescar.
                         self.art_refresh = true;
@@ -4784,11 +4826,24 @@ impl App {
         }
         for event in events {
             match event {
-                SocialEvent::Ready { user, token } => {
+                SocialEvent::Ready {
+                    user,
+                    user_id,
+                    token,
+                } => {
                     self.social_status = format!("conectado como {user}");
+                    self.social_user_id = user_id;
                     self.cfg.server.token = token;
                     self.cfg.server.name = user;
                     let _ = self.cfg.save();
+                }
+                SocialEvent::Me(user) => {
+                    self.social_user_id = user.id;
+                    self.social_status = format!("conectado como {}", user.name);
+                    self.cfg.server.name = user.name;
+                }
+                SocialEvent::Notice(message) => {
+                    self.toast(message, ToastKind::Ok);
                 }
                 SocialEvent::Status(status) => {
                     if status.contains("conectado") {
@@ -4818,18 +4873,64 @@ impl App {
                     }
                     self.rooms = rooms;
                 }
-                SocialEvent::Room(room) => {
-                    self.room_selected =
-                        self.rooms.iter().position(|r| r.id == room.id).unwrap_or(0);
-                    self.room = Some(room);
+                SocialEvent::Room(mut room) => {
+                    // Los mensajes del websocket solo traen estado y miembros;
+                    // nombre, host y visibilidad vienen del REST. Se conserva
+                    // lo que ya sabíamos para no perder la ficha completa.
+                    let partial = room.name.is_empty() && room.host_id.is_empty();
+                    let known = self
+                        .room
+                        .as_ref()
+                        .filter(|current| current.id == room.id)
+                        .or_else(|| self.rooms.iter().find(|current| current.id == room.id))
+                        .cloned();
+                    if let Some(existing) = known {
+                        if room.name.is_empty() {
+                            room.name = existing.name;
+                        }
+                        if room.host_id.is_empty() {
+                            room.host_id = existing.host_id;
+                        }
+                        if room.members.is_empty() {
+                            room.members = existing.members;
+                        }
+                        if partial {
+                            room.is_public = existing.is_public;
+                        }
+                    }
+                    if let Some(index) = self.rooms.iter().position(|r| r.id == room.id) {
+                        self.rooms[index] = room.clone();
+                        self.room_selected = index;
+                    } else {
+                        self.rooms.push(room.clone());
+                        self.room_selected = self.rooms.len().saturating_sub(1);
+                    }
+                    self.room = Some(room.clone());
+                    self.apply_room_state(room.state);
                 }
                 SocialEvent::State(state) => self.apply_room_state(state),
                 SocialEvent::Queue(items) => self.room_queue = items,
                 SocialEvent::Presence(presences) => self.presence = presences,
+                SocialEvent::Friends(friends) => self.friends = friends,
                 SocialEvent::Chat(chat) => {
-                    self.chat.push(chat);
-                    if self.chat.len() > 100 {
-                        self.chat.remove(0);
+                    // El servidor manda el historial al entrar y además puede
+                    // llegar por REST; el id evita duplicados.
+                    if !self.chat.iter().any(|message| message.id == chat.id) {
+                        self.chat.push(chat);
+                        self.chat.sort_by_key(|message| message.ts);
+                        if self.chat.len() > 150 {
+                            let drop = self.chat.len() - 150;
+                            self.chat.drain(0..drop);
+                        }
+                    }
+                }
+                SocialEvent::ChatLog { room, messages } => {
+                    self.chat.retain(|message| message.room_id != room);
+                    self.chat.extend(messages);
+                    self.chat.sort_by_key(|message| message.ts);
+                    if self.chat.len() > 150 {
+                        let drop = self.chat.len() - 150;
+                        self.chat.drain(0..drop);
                     }
                 }
             }
@@ -5070,10 +5171,10 @@ impl App {
             || self.cfg.ui.fx.mosaic_wallpaper
             || self.cfg.ui.fx.ambient == "mosaic"
             || self.cfg.ui.fx.ambient == "cover";
-        let mosaic_mode =
-            ArtMode::from_str(&self.cfg.ui.fx.mosaic_mode).unwrap_or(ArtMode::Half);
+        let mosaic_mode = ArtMode::from_str(&self.cfg.ui.fx.mosaic_mode).unwrap_or(ArtMode::Half);
         let ambient_key = format!("{}:{}", track.key, mosaic_mode.label());
-        if ambient_mode && self.ambient_art_key != ambient_key && (local.is_some() || url.is_some()) {
+        if ambient_mode && self.ambient_art_key != ambient_key && (local.is_some() || url.is_some())
+        {
             self.ambient_art_key = ambient_key;
             self.ambient_art = None;
             self.art_worker.request(ArtRequest {
@@ -5495,6 +5596,13 @@ impl App {
                 }
                 let next = self.search.selected as i32 + delta;
                 self.search.selected = next.clamp(0, len as i32 - 1) as usize;
+            }
+            Tab::Room => {
+                if self.rooms.is_empty() {
+                    return;
+                }
+                let next = self.room_selected as i32 + delta;
+                self.room_selected = next.clamp(0, self.rooms.len() as i32 - 1) as usize;
             }
             _ => {
                 if self.view.is_empty() {
