@@ -723,6 +723,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_recent(
     ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_remember_track(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_remove_from_library(
+    ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_remove_from_playlist(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_search(
@@ -817,6 +821,10 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_spote_android_fn_method_spoteengine_recent(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_remember_track(`ptr`: Long,`key`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artUrl`: RustBuffer.ByValue,`provider`: RustBuffer.ByValue,`providerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+    external fun uniffi_spote_android_fn_method_spoteengine_remove_from_library(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
     external fun uniffi_spote_android_fn_method_spoteengine_remove_from_playlist(`ptr`: Long,`playlistId`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
     external fun uniffi_spote_android_fn_method_spoteengine_search(`ptr`: Long,`query`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
@@ -1023,6 +1031,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_recent() and 0xFFFF) != 38544) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_remember_track() and 0xFFFF) != 31426) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_remove_from_library() and 0xFFFF) != 4684) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_remove_from_playlist() and 0xFFFF) != 44386) {
@@ -1558,6 +1572,18 @@ public interface SpoteEngineInterface {
     fun `playlists`(): List<PlaylistDto>
 
     fun `recent`(`limit`: kotlin.UInt): List<TrackDto>
+
+    /**
+     * Añade a la biblioteca una pista que se ha escuchado en streaming, sin
+     * audio local. Queda como fuente pendiente para poder resolverla al
+     * reproducir y para que aparezca en Álbumes/Artistas.
+     */
+    fun `rememberTrack`(`key`: kotlin.String, `title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artUrl`: kotlin.String?, `provider`: kotlin.String, `providerId`: kotlin.String)
+
+    /**
+     * Quita una pista de la biblioteca sin borrar el archivo ni el historial.
+     */
+    fun `removeFromLibrary`(`key`: kotlin.String)
 
     fun `removeFromPlaylist`(`playlistId`: kotlin.Long, `key`: kotlin.String)
 
@@ -2118,6 +2144,49 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
+
+
+
+    /**
+     * Añade a la biblioteca una pista que se ha escuchado en streaming, sin
+     * audio local. Queda como fuente pendiente para poder resolverla al
+     * reproducir y para que aparezca en Álbumes/Artistas.
+     */
+    @Throws(SpoteException::class)override fun `rememberTrack`(`key`: kotlin.String, `title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artUrl`: kotlin.String?, `provider`: kotlin.String, `providerId`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_remember_track(
+        it,
+
+        FfiConverterString.lower(`key`),
+        FfiConverterString.lower(`title`),
+        FfiConverterString.lower(`artist`),
+        FfiConverterOptionalString.lower(`album`),
+        FfiConverterULong.lower(`durationMs`),
+        FfiConverterOptionalString.lower(`artUrl`),
+        FfiConverterString.lower(`provider`),
+        FfiConverterString.lower(`providerId`),_status)
+}
+    }
+
+
+
+
+    /**
+     * Quita una pista de la biblioteca sin borrar el archivo ni el historial.
+     */
+    @Throws(SpoteException::class)override fun `removeFromLibrary`(`key`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_remove_from_library(
+        it,
+
+        FfiConverterString.lower(`key`),_status)
+}
+    }
+
 
 
 

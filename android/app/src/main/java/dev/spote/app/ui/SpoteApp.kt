@@ -745,6 +745,7 @@ fun SpoteApp(
             playlistId = currentPlaylistId,
             queueIndex = currentQueueIndex,
             queueSize = state.player.queue.size,
+            inLibrary = state.library.tracks.any { it.key == track.key },
             onDismiss = {
                 menuTrack = null
                 menuPlaylistId = null
@@ -766,6 +767,10 @@ fun SpoteApp(
             onFavorite = {
                 menuTrack = null
                 appViewModel.toggleFavorite(track.key)
+            },
+            onRemoveFromLibrary = {
+                menuTrack = null
+                appViewModel.removeFromLibrary(track.key)
             },
             onOpenArtist = {
                 menuTrack = null
@@ -931,6 +936,8 @@ private fun TrackActionsSheet(
     onFavorite: () -> Unit,
     onOpenArtist: () -> Unit = {},
     onOpenAlbum: () -> Unit = {},
+    onRemoveFromLibrary: () -> Unit = {},
+    inLibrary: Boolean = false,
     playlistId: String? = null,
     queueIndex: Int? = null,
     queueSize: Int = 0,
@@ -1035,6 +1042,13 @@ private fun TrackActionsSheet(
                 text = if (track.favorite) "Quitar de favoritas" else "Añadir a favoritas",
                 onClick = onFavorite,
             )
+            if (inLibrary) {
+                SheetAction(
+                    icon = Icons.Rounded.DeleteOutline,
+                    text = "Quitar de la biblioteca",
+                    onClick = onRemoveFromLibrary,
+                )
+            }
         }
     }
 }

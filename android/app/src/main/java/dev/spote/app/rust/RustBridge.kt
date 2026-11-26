@@ -137,6 +137,28 @@ class RustBridge private constructor(private val engine: SpoteEngine) {
         artPath,
     )
 
+    fun rememberTrack(
+        key: String,
+        title: String,
+        artist: String,
+        album: String?,
+        durationMs: Long,
+        artUrl: String?,
+        provider: String,
+        providerId: String,
+    ) = engine.rememberTrack(
+        key,
+        title,
+        artist,
+        album,
+        durationMs.toULong(),
+        artUrl,
+        provider,
+        providerId,
+    )
+
+    fun removeFromLibrary(key: String) = engine.removeFromLibrary(key)
+
     fun seedDemo(title: String, artist: String, album: String? = null, durationMs: Long = 0L) {
         engine.upsertDemo(title, artist, album, durationMs.toULong())
     }
@@ -174,6 +196,12 @@ fun TrackDto.toModel(): Track = Track(
     favorite = favorite,
     localPath = path,
     sourceLabel = provider,
+    provider = provider,
+    remoteQuery = if (!downloaded && !provider.isNullOrBlank() && provider != "local") {
+        "$artist $title"
+    } else {
+        null
+    },
 )
 
 fun PlaylistDto.toModel(tracks: List<Track>): Playlist = Playlist(

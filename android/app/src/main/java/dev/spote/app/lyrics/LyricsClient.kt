@@ -4,6 +4,7 @@ import android.content.Context
 import dev.spote.app.logging.ActionLog
 import java.io.File
 import java.io.IOException
+import java.text.Normalizer
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -68,9 +69,27 @@ class LyricsClient(context: Context) {
         cached(key)?.let { return@withContext it }
 
         val doc = try {
-            fetch(title = title, artist = artist, album = album, durationMs = durationMs)
-                ?: fetchLyricsPlus(title = title, artist = artist, album = album, durationMs = durationMs)
-                ?: fetchGenius(title = title, artist = artist)
+            val lrclib = runCatching {
+                fetchLrclib(title = title, artist = artist, album = album, durationMs = durationMs)
+            }.getOrNull()
+            if (lrclib?.synced == true) {
+                lrclib
+            } else {
+                val plus = runCatching {
+                    fetchLyricsPlus(
+                        title = title,
+                        artist = artist,
+                        album = album,
+                        durationMs = durationMs,
+                    )
+                }.getOrNull()
+                when {
+                    plus?.synced == true -> plus
+                    lrclib != null -> lrclib
+                    else -> runCatching { fetchGenius(title = title, artist = artist) }
+                        .getOrNull() ?: plus
+                }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -121,7 +140,7 @@ class LyricsClient(context: Context) {
         return age in -FUTURE_SKEW_MS..CACHE_TTL_MS
     }
 
-    private suspend fun fetch(title: String, artist: String, album: String?, durationMs: Long): LyricsDoc? {
+    private suspend fun fetchLrclib(title: String, artist: String, album: String?, durationMs: Long): LyricsDoc? {
         if (title.isBlank()) return null
 
         exactLookup(title, artist, album, durationMs)?.toLyricsDoc()?.let { return it }
@@ -142,12 +161,14 @@ class LyricsClient(context: Context) {
         album: String?,
         durationMs: Long,
     ): LrclibTrack? {
+        val queryTitle = nfc(title)
+        val queryArtist = nfc(artist)
         val builder = API_BASE.newBuilder()
             .addPathSegment("api")
             .addPathSegment("get")
-            .addQueryParameter("artist_name", artist)
-            .addQueryParameter("track_name", title)
-        if (!album.isNullOrBlank()) builder.addQueryParameter("album_name", album)
+            .addQueryParameter("artist_name", queryArtist)
+            .addQueryParameter("track_name", queryTitle)
+        if (!album.isNullOrBlank()) builder.addQueryParameter("album_name", nfc(album))
         if (durationMs > 0L) {
             builder.addQueryParameter("duration", (durationMs / 1000.0).roundToLong().toString())
         }
@@ -160,8 +181,8 @@ class LyricsClient(context: Context) {
         val builder = API_BASE.newBuilder()
             .addPathSegment("api")
             .addPathSegment("search")
-            .addQueryParameter("track_name", title)
-        if (artist.isNotBlank()) builder.addQueryParameter("artist_name", artist)
+            .addQueryParameter("track_name", nfc(title))
+        if (artist.isNotBlank()) builder.addQueryParameter("artist_name", nfc(artist))
 
         val body = executeJson(builder.build()) ?: return emptyList()
         return runCatching {
@@ -188,10 +209,10 @@ class LyricsClient(context: Context) {
     ): LyricsDoc? {
         if (title.isBlank() || artist.isBlank()) return null
         val url = LYRICS_PLUS_API.toHttpUrl().newBuilder()
-            .addQueryParameter("title", title)
-            .addQueryParameter("artist", artist)
+            .addQueryParameter("title", nfc(title))
+            .addQueryParameter("artist", nfc(artist))
             .apply {
-                if (!album.isNullOrBlank()) addQueryParameter("album", album)
+                if (!album.isNullOrBlank()) addQueryParameter("album", nfc(album))
                 if (durationMs > 0L) {
                     addQueryParameter("duration", "%.3f".format(Locale.ROOT, durationMs / 1000.0))
                 }
@@ -200,7 +221,6 @@ class LyricsClient(context: Context) {
             .build()
         val body = executeJson(url) ?: return null
         val root = runCatching { JSONObject(body) }.getOrNull() ?: return null
-        if (root.optString("type") == "None") return null
         val linesJson = root.optJSONArray("lyrics") ?: return null
         val lines = buildList {
             for (index in 0 until linesJson.length()) {
@@ -211,7 +231,16 @@ class LyricsClient(context: Context) {
                 add(LyricLine(startMs = time.coerceAtLeast(0L), text = text))
             }
         }
-        if (lines.size < 2 || lines.all { it.startMs == 0L }) return null
+        if (lines.size < 2) return null
+        val timed = lines.any { it.startMs > 0L }
+        if (!timed) {
+            return LrcParser.parsePlain(
+                lines.joinToString("\n") { it.text },
+                source = "apple",
+            )
+        }
+        val lastStart = lines.maxOf { it.startMs }
+        if (durationMs > 0L && lastStart > durationMs + 20_000L) return null
         return LyricsDoc(
             lines = lines.sortedBy { it.startMs },
             synced = true,
@@ -224,7 +253,7 @@ class LyricsClient(context: Context) {
      * así que se devuelve como letra plana (la UI no finge sincronización).
      */
     private suspend fun fetchGenius(title: String, artist: String): LyricsDoc? {
-        val query = "$title $artist".trim()
+        val query = "${nfc(title)} ${nfc(artist)}".trim()
         if (query.isEmpty()) return null
         val url = GENIUS_SEARCH.toHttpUrl().newBuilder()
             .addQueryParameter("per_page", "5")
@@ -235,10 +264,16 @@ class LyricsClient(context: Context) {
         val sections = root.optJSONObject("response")?.optJSONArray("sections") ?: return null
         val wantedTitle = normalizeText(title)
         val wantedArtist = normalizeText(artist)
-        var candidatePath: String? = null
+        var bestPath: String? = null
+        var bestScore = 0
 
         for (sectionIndex in 0 until sections.length()) {
-            val hits = sections.optJSONObject(sectionIndex)?.optJSONArray("hits") ?: continue
+            val section = sections.optJSONObject(sectionIndex) ?: continue
+            // Las secciones "lyric" son snippets de canciones que mencionan la
+            // consulta; nunca son la ficha de la canción.
+            val sectionType = section.optString("type")
+            if (sectionType != "top_hit" && sectionType != "song") continue
+            val hits = section.optJSONArray("hits") ?: continue
             for (hitIndex in 0 until hits.length()) {
                 val result = hits.optJSONObject(hitIndex)
                     ?.optJSONObject("result") ?: continue
@@ -246,25 +281,33 @@ class LyricsClient(context: Context) {
                 if (result.optString("lyrics_state") != "complete") continue
                 val resultTitle = normalizeText(result.optString("title"))
                 val resultArtist = normalizeText(result.optString("artist_names"))
-                val titleOk = resultTitle == wantedTitle ||
+                val exactTitle = resultTitle == wantedTitle
+                val titleOk = exactTitle ||
                     resultTitle.contains(wantedTitle) ||
                     wantedTitle.contains(resultTitle)
-                val artistOk = wantedArtist.isBlank() ||
+                val exactArtist = wantedArtist.isNotBlank() && resultArtist == wantedArtist
+                val artistOk = wantedArtist.isBlank() || exactArtist ||
                     resultArtist.contains(wantedArtist) ||
                     wantedArtist.contains(resultArtist)
-                if (titleOk && artistOk) {
-                    candidatePath = result.optString("path").takeIf { it.isNotBlank() }
-                    break
+                if (!titleOk || !artistOk) continue
+                val score = (if (exactTitle) 100 else 40) + (if (exactArtist) 100 else 20)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestPath = result.optString("path").takeIf { it.isNotBlank() }
                 }
             }
-            if (candidatePath != null) break
         }
-        val path = candidatePath ?: return null
+        val path = bestPath ?: return null
         val pageUrl = if (path.startsWith("http")) path else "https://genius.com$path"
         val page = executeGenius(pageUrl.toHttpUrl(), acceptHtml = true) ?: return null
         val text = extractGeniusLyrics(page)
         if (text.isBlank()) return null
-        return LrcParser.parsePlain(text, source = "genius")
+        val header = normalizeText("$title lyrics")
+        val cleaned = text.lineSequence()
+            .filterNot { normalizeText(it) == header }
+            .joinToString("\n")
+        if (cleaned.isBlank()) return null
+        return LrcParser.parsePlain(cleaned, source = "genius")
     }
 
     private fun extractGeniusLyrics(page: String): String {
@@ -286,10 +329,15 @@ class LyricsClient(context: Context) {
         return lines.joinToString("\n")
     }
 
-    private fun normalizeText(value: String): String = value
-        .lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9áéíóúüñ]+"), " ")
-        .trim()
+    private fun normalizeText(value: String): String =
+        Normalizer.normalize(value, Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+            .lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+
+    private fun nfc(value: String): String =
+        Normalizer.normalize(value, Normalizer.Form.NFC).trim()
 
     private suspend fun executeGenius(
         url: HttpUrl,
@@ -514,7 +562,7 @@ class LyricsClient(context: Context) {
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0 Mobile Safari/537.36"
         private const val CACHE_DIR = "lyrics"
-        private const val CACHE_VERSION = 1
+        private const val CACHE_VERSION = 2
         private const val CACHE_TTL_MS = 30L * 24L * 60L * 60L * 1000L
         private const val FUTURE_SKEW_MS = 5L * 60L * 1000L
         private const val MAX_FILE_KEY_LENGTH = 100

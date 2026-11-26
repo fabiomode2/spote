@@ -608,6 +608,58 @@ impl SpoteEngine {
         Ok(key)
     }
 
+    /// Añade a la biblioteca una pista que se ha escuchado en streaming, sin
+    /// audio local. Queda como fuente pendiente para poder resolverla al
+    /// reproducir y para que aparezca en Álbumes/Artistas.
+    pub fn remember_track(
+        &self,
+        key: String,
+        title: String,
+        artist: String,
+        album: Option<String>,
+        duration_ms: u64,
+        art_url: Option<String>,
+        provider: String,
+        provider_id: String,
+    ) -> Result<(), SpoteError> {
+        let track = TrackRef {
+            key: key.clone(),
+            title,
+            artist,
+            album,
+            duration_ms,
+            art_url: art_url.clone(),
+            source_hint: Some(spote_protocol::SourceHint {
+                provider: provider.clone(),
+                id: provider_id.clone(),
+                duration_ms,
+            }),
+        };
+        let mut lib = self.lib()?;
+        let id = lib.upsert_track(&track).map_err(SpoteError::library)?;
+        lib.set_source(
+            id,
+            &provider,
+            Some(&provider_id),
+            None,
+            SourceStatus::Pending,
+            None,
+        )
+        .map_err(SpoteError::library)?;
+        if let Some(url) = art_url {
+            lib.set_art(&key, None, Some(&url))
+                .map_err(SpoteError::library)?;
+        }
+        Ok(())
+    }
+
+    /// Quita una pista de la biblioteca sin borrar el archivo ni el historial.
+    pub fn remove_from_library(&self, key: String) -> Result<(), SpoteError> {
+        let mut lib = self.lib()?;
+        lib.remove_from_library(&key)
+            .map_err(SpoteError::library)
+    }
+
     /// Inserta una pista de prueba. Sirve para el smoke test del puente antes
     /// de conectar el resolvedor y el descargador reales.
     pub fn upsert_demo(

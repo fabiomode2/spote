@@ -114,6 +114,24 @@ class RustSpoteRepository(private val bridge: RustBridge) : SpoteRepository {
     override fun backupLibrary(path: String): Boolean =
         runCatching { bridge.backupLibrary(path) }.isSuccess
 
+    override fun rememberTrack(track: Track): Boolean = runCatching {
+        val provider = track.provider ?: "deezer"
+        val providerId = track.providerId ?: return false
+        bridge.rememberTrack(
+            key = track.key,
+            title = track.title,
+            artist = track.artist,
+            album = track.album,
+            durationMs = track.durationMs,
+            artUrl = track.cover.remoteUrl,
+            provider = provider,
+            providerId = providerId,
+        )
+    }.isSuccess
+
+    override fun removeFromLibrary(key: String): Boolean =
+        runCatching { bridge.removeFromLibrary(key) }.isSuccess
+
     private fun loadPlaylists(): List<Playlist> =
         bridge.playlists().map { dto ->
             dto.toModel(bridge.playlistTracks(dto.id))

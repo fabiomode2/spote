@@ -24,6 +24,8 @@ interface SpoteRepository {
     fun duplicateCount(): Long = 0L
     fun mergeDuplicates(): Int = 0
     fun backupLibrary(path: String): Boolean = false
+    fun rememberTrack(track: Track): Boolean = false
+    fun removeFromLibrary(key: String): Boolean = false
 }
 
 /** Fallback sin datos: si el core no carga, no inventamos una biblioteca. */

@@ -831,6 +831,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     ),
                 )
             }
+            rememberInLibrary(resolved)
             requestLyrics(resolved)
             val playbackTrack = resolved.toPlaybackTrack()
             if (playbackTrack == null) {
@@ -838,6 +839,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             playback.playQueue(listOf(playbackTrack), 0)
+        }
+    }
+
+    private fun rememberInLibrary(track: Track) {
+        if (track.downloaded || track.localPath != null) return
+        if (track.providerId.isNullOrBlank()) return
+        if (_state.value.library.tracks.any { it.key == track.key }) return
+        viewModelScope.launch {
+            val added = withContext(Dispatchers.IO) { repo.rememberTrack(track) }
+            if (added) {
+                ActionLog.log(
+                    "library.remember",
+                    "key" to track.key,
+                    "title" to track.title,
+                    "artist" to track.artist,
+                )
+                refreshFromRepo()
+            }
+        }
+    }
+
+    fun removeFromLibrary(key: String) {
+        viewModelScope.launch {
+            val removed = withContext(Dispatchers.IO) { repo.removeFromLibrary(key) }
+            if (removed) {
+                ActionLog.log("library.remove", "key" to key)
+                refreshFromRepo()
+                _messages.emit("Quitada de la biblioteca")
+            } else {
+                _messages.emit("No se pudo quitar de la biblioteca")
+            }
         }
     }
 

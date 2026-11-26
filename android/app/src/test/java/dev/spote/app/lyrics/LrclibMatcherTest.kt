@@ -101,6 +101,16 @@ class LrclibMatcherTest {
     }
 
     @Test
+    fun `matches a decomposed enye against the composed title`() {
+        val candidate = track(trackName = "Karin\u0303osa", artistName = "Guxo")
+
+        assertSame(
+            candidate,
+            LrclibMatcher.selectBest(listOf(candidate), "Kariñosa", "Guxo"),
+        )
+    }
+
+    @Test
     fun `matches a decorated title against its base title`() {
         val candidate = track(trackName = "Song (Remastered 2011)")
 
