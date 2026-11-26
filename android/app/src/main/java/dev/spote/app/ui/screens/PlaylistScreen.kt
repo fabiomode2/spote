@@ -50,7 +50,10 @@ fun PlaylistScreen(
 ) {
     val colors = LocalSpoteColors.current
     var confirmDelete by remember { mutableStateOf(false) }
-    AppBackground(accentStart = playlist.cover.start) {
+    AppBackground(
+        accentStart = playlist.cover.start,
+        cover = playlist.cover,
+    ) {
         LazyColumn(
             modifier = modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 28.dp),

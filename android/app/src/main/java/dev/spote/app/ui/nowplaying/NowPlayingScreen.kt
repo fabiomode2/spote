@@ -86,7 +86,28 @@ fun NowPlayingScreen(
     onRetryLyrics: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val track = player.track ?: return
+    val track = player.track
+    if (track == null) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "No hay nada sonando",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                TextButton(onClick = onClose) { Text("Cerrar") }
+            }
+        }
+        return
+    }
     val colors = LocalSpoteColors.current
     val openArtist = LocalArtistNavigation.current
     val openAlbum = LocalAlbumNavigation.current
@@ -106,7 +127,10 @@ fun NowPlayingScreen(
         player.lyrics.getOrNull(1)
     }
 
-    AppBackground(accentStart = track.cover.start) {
+    AppBackground(
+        accentStart = track.cover.start,
+        cover = track.cover,
+    ) {
         BoxWithConstraints(modifier = modifier.fillMaxSize()) {
             val coverSize = minOf(maxWidth - 64.dp, maxHeight * 0.34f, 300.dp)
                 .coerceAtLeast(160.dp)

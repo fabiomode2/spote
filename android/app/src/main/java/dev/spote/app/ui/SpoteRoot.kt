@@ -26,7 +26,7 @@ fun SpoteRoot() {
         mutableStateOf(prefs.getString("theme", SpoteThemeMode.Midnight.name) ?: SpoteThemeMode.Midnight.name)
     }
     var styleName by rememberSaveable {
-        mutableStateOf(prefs.getString("style", SpoteUiStyle.Medium.name) ?: SpoteUiStyle.Medium.name)
+        mutableStateOf(prefs.getString("style", SpoteUiStyle.Off.name) ?: SpoteUiStyle.Off.name)
     }
     val mode = SpoteThemeMode.fromName(modeName)
     val uiStyle = SpoteUiStyle.fromName(styleName)

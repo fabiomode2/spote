@@ -57,7 +57,10 @@ fun AlbumScreen(
         album.tracks.any { it.key == current.key }
     } == true
 
-    AppBackground(accentStart = album.cover.start) {
+    AppBackground(
+        accentStart = album.cover.start,
+        cover = album.cover,
+    ) {
         LazyColumn(
             modifier = modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 28.dp),

@@ -346,7 +346,7 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
         }
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -356,7 +356,7 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    // Start 
+    // Start
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -679,9 +679,19 @@ internal object IntegrityCheckingUniffiLib {
     internal fun ensureInitialized() = Unit
     external fun uniffi_spote_android_checksum_method_spoteengine_add_to_playlist(
     ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_album_info(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_album_tracks(
+    ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_albums(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_all_tracks(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_artist_albums(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_artist_profile(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_artist_profile_by_id(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_backup_library(
     ): Int
@@ -691,9 +701,17 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_duplicate_count(
     ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_find_album(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_find_track_by_meta(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_find_track_metadata(
+    ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_home(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_import_local(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_import_local_with_key(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_merge_duplicates(
     ): Int
@@ -708,6 +726,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_spote_android_checksum_method_spoteengine_remove_from_playlist(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_search(
+    ): Int
+    external fun uniffi_spote_android_checksum_method_spoteengine_search_catalog(
     ): Int
     external fun uniffi_spote_android_checksum_method_spoteengine_set_track_art(
     ): Int
@@ -728,82 +748,102 @@ internal object IntegrityCheckingUniffiLib {
     external fun ffi_spote_android_uniffi_contract_version(
     ): Int
 
-        
+
 }
 
 internal object UniffiLib {
-    
+
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
-    
+
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "spote_android"))
-        
+
     }
 
     internal fun ensureInitialized() = Unit
-    external fun uniffi_spote_android_fn_clone_spoteengine(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_clone_spoteengine(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_spote_android_fn_free_spoteengine(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_free_spoteengine(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_constructor_spoteengine_new(`home`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_constructor_spoteengine_new(`home`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_spote_android_fn_method_spoteengine_add_to_playlist(`ptr`: Long,`playlistId`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_add_to_playlist(`ptr`: Long,`playlistId`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_method_spoteengine_albums(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_album_info(`ptr`: Long,`provider`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_all_tracks(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_album_tracks(`ptr`: Long,`album`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_backup_library(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_albums(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_all_tracks(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_artist_albums(`ptr`: Long,`provider`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_artist_profile(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_artist_profile_by_id(`ptr`: Long,`provider`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_backup_library(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_method_spoteengine_create_playlist(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_create_playlist(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_spote_android_fn_method_spoteengine_delete_playlist(`ptr`: Long,`playlistId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_delete_playlist(`ptr`: Long,`playlistId`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_method_spoteengine_duplicate_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_duplicate_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-    external fun uniffi_spote_android_fn_method_spoteengine_home(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_find_album(`ptr`: Long,`album`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_import_local(`ptr`: Long,`path`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_find_track_by_meta(`ptr`: Long,`artist`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`durationMs`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_merge_duplicates(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_find_track_metadata(`ptr`: Long,`artist`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_home(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_import_local(`ptr`: Long,`path`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_import_local_with_key(`ptr`: Long,`key`: RustBuffer.ByValue,`path`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artPath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_merge_duplicates(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
-    external fun uniffi_spote_android_fn_method_spoteengine_palette(`ptr`: Long,`imagePath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_palette(`ptr`: Long,`imagePath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_playlist_tracks(`ptr`: Long,`playlistId`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_playlist_tracks(`ptr`: Long,`playlistId`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_playlists(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_playlists(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_recent(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_recent(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_remove_from_playlist(`ptr`: Long,`playlistId`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_remove_from_playlist(`ptr`: Long,`playlistId`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_method_spoteengine_search(`ptr`: Long,`query`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_search(`ptr`: Long,`query`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_set_track_art(`ptr`: Long,`key`: RustBuffer.ByValue,`artPath`: RustBuffer.ByValue,`artUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_search_catalog(`ptr`: Long,`query`: RustBuffer.ByValue,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_spote_android_fn_method_spoteengine_set_track_art(`ptr`: Long,`key`: RustBuffer.ByValue,`artPath`: RustBuffer.ByValue,`artUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_method_spoteengine_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_toggle_favorite(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_toggle_favorite(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
-    external fun uniffi_spote_android_fn_method_spoteengine_tracks_without_art(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_tracks_without_art(`ptr`: Long,`limit`: Int,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_update_track_metadata(`ptr`: Long,`key`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_update_track_metadata(`ptr`: Long,`key`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`title`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,`artUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun uniffi_spote_android_fn_method_spoteengine_upsert_demo(`ptr`: Long,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_upsert_demo(`ptr`: Long,`title`: RustBuffer.ByValue,`artist`: RustBuffer.ByValue,`album`: RustBuffer.ByValue,`durationMs`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun uniffi_spote_android_fn_method_spoteengine_version(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_spote_android_fn_method_spoteengine_version(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun ffi_spote_android_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun ffi_spote_android_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-    external fun ffi_spote_android_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-    external fun ffi_spote_android_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun ffi_spote_android_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -811,7 +851,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_u8(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_spote_android_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -819,7 +859,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_i8(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
     external fun ffi_spote_android_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -827,7 +867,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_u16(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_spote_android_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -835,7 +875,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_i16(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Short
     external fun ffi_spote_android_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -843,7 +883,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_u32(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_spote_android_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -851,7 +891,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_i32(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
     external fun ffi_spote_android_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -859,7 +899,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_u64(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
     external fun ffi_spote_android_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -867,7 +907,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_i64(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
     external fun ffi_spote_android_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -875,7 +915,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_f32(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Float
     external fun ffi_spote_android_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -883,7 +923,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_f64(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Double
     external fun ffi_spote_android_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -891,7 +931,7 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_rust_buffer(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun ffi_spote_android_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
@@ -899,10 +939,10 @@ internal object UniffiLib {
     ): Unit
     external fun ffi_spote_android_rust_future_free_void(`handle`: Long,
     ): Unit
-    external fun ffi_spote_android_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun ffi_spote_android_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
-        
+
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -919,10 +959,25 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_add_to_playlist() and 0xFFFF) != 35330) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_album_info() and 0xFFFF) != 17401) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_album_tracks() and 0xFFFF) != 4288) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_albums() and 0xFFFF) != 59006) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_all_tracks() and 0xFFFF) != 16402) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_artist_albums() and 0xFFFF) != 29900) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_artist_profile() and 0xFFFF) != 5473) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_artist_profile_by_id() and 0xFFFF) != 24648) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_backup_library() and 0xFFFF) != 29507) {
@@ -937,10 +992,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_duplicate_count() and 0xFFFF) != 19228) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_find_album() and 0xFFFF) != 49428) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_find_track_by_meta() and 0xFFFF) != 7078) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_find_track_metadata() and 0xFFFF) != 18712) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_home() and 0xFFFF) != 25495) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_import_local() and 0xFFFF) != 58879) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_import_local_with_key() and 0xFFFF) != 34763) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_merge_duplicates() and 0xFFFF) != 31396) {
@@ -962,6 +1029,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_search() and 0xFFFF) != 16527) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_spote_android_checksum_method_spoteengine_search_catalog() and 0xFFFF) != 36198) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_spote_android_checksum_method_spoteengine_set_track_art() and 0xFFFF) != 21668) {
@@ -1063,7 +1133,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/** 
+/**
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
  *
  * This is the first argument for interface constructors that input a raw handle. It exists is that
@@ -1074,7 +1144,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * */
 object UniffiWithHandle
 
-/** 
+/**
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1391,86 +1461,141 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 
 
 public interface SpoteEngineInterface {
-    
+
     fun `addToPlaylist`(`playlistId`: kotlin.Long, `key`: kotlin.String)
-    
+
+    /**
+     * Ficha completa de un álbum del catálogo, con su tracklist.
+     */
+    fun `albumInfo`(`provider`: kotlin.String, `id`: kotlin.String): CatalogAlbumInfoDto
+
+    /**
+     * Tracklist real de un álbum local, agrupado por el core (incluye
+     * colaboraciones y respeta la identidad `album_artist`).
+     */
+    fun `albumTracks`(`album`: kotlin.String, `artist`: kotlin.String): List<TrackDto>
+
     fun `albums`(): List<AlbumDto>
-    
+
     fun `allTracks`(`limit`: kotlin.UInt): List<TrackDto>
-    
+
+    fun `artistAlbums`(`provider`: kotlin.String, `id`: kotlin.String): List<CatalogAlbumDto>
+
+    /**
+     * Perfil de artista por nombre, como el que abre la TUI desde cualquier
+     * crédito. Incluye top tracks y discografía.
+     */
+    fun `artistProfile`(`name`: kotlin.String): CatalogArtistProfileDto
+
+    /**
+     * Perfil de artista por id de proveedor (el que viene de la búsqueda).
+     */
+    fun `artistProfileById`(`provider`: kotlin.String, `id`: kotlin.String): CatalogArtistProfileDto
+
     /**
      * Copia de seguridad consistente antes de operaciones destructivas.
      */
     fun `backupLibrary`(`path`: kotlin.String)
-    
+
     /**
      * Crea una playlist vacía y devuelve su id.
      */
     fun `createPlaylist`(`name`: kotlin.String): kotlin.Long
-    
+
     fun `deletePlaylist`(`playlistId`: kotlin.Long)
-    
+
     /**
      * Número de parejas de canciones duplicadas (mismo título/artista/duración).
      */
     fun `duplicateCount`(): kotlin.Long
-    
+
+    /**
+     * Busca un álbum por artista + título y devuelve su ficha completa.
+     * Es el mismo emparejamiento que usa la TUI al abrir un álbum local.
+     */
+    fun `findAlbum`(`album`: kotlin.String, `artist`: kotlin.String): CatalogAlbumInfoDto?
+
+    /**
+     * Busca la copia local de una pista del catálogo por metadatos. Evita
+     * duplicar una canción ya descargada de otra fuente.
+     */
+    fun `findTrackByMeta`(`artist`: kotlin.String, `title`: kotlin.String, `durationMs`: kotlin.ULong): TrackDto?
+
+    /**
+     * Metadatos de una pista local: elige la coincidencia que más se parece
+     * en título, artista y duración, no simplemente la primera.
+     */
+    fun `findTrackMetadata`(`artist`: kotlin.String, `title`: kotlin.String): CatalogTrackDto?
+
     fun `home`(): kotlin.String
-    
+
     /**
      * Indexa un fichero que Kotlin ya ha copiado al almacenamiento privado.
      * Devuelve la clave canónica; la UI recarga la biblioteca después.
      */
     fun `importLocal`(`path`: kotlin.String, `title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artPath`: kotlin.String?): kotlin.String
-    
+
+    /**
+     * Indexa un fichero conservando la clave canónica del catálogo. Así una
+     * descarga mantiene la misma identidad que la pista remota y el álbum
+     * sigue marcándola como disponible.
+     */
+    fun `importLocalWithKey`(`key`: kotlin.String, `path`: kotlin.String, `title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artPath`: kotlin.String?): kotlin.String
+
     /**
      * Fusiona duplicados conservando la copia con audio y moviendo listas/fuentes.
      */
     fun `mergeDuplicates`(): kotlin.UInt
-    
+
     /**
      * Extrae la paleta de una portada local. La UI de Compose la usa para
      * teñir el tema y el fondo, igual que la TUI.
      */
     fun `palette`(`imagePath`: kotlin.String): PaletteDto
-    
+
     fun `playlistTracks`(`playlistId`: kotlin.Long): List<TrackDto>
-    
+
     fun `playlists`(): List<PlaylistDto>
-    
+
     fun `recent`(`limit`: kotlin.UInt): List<TrackDto>
-    
+
     fun `removeFromPlaylist`(`playlistId`: kotlin.Long, `key`: kotlin.String)
-    
+
     fun `search`(`query`: kotlin.String, `limit`: kotlin.UInt): List<TrackDto>
-    
+
+    /**
+     * Búsqueda mixta en el catálogo (Spotify con respaldo Deezer), igual que
+     * la TUI. Devuelve pistas, álbumes y artistas reales, no derivados.
+     */
+    fun `searchCatalog`(`query`: kotlin.String, `limit`: kotlin.UInt): CatalogSearchDto
+
     /**
      * Asocia una portada local y/o URL a una pista existente.
      */
     fun `setTrackArt`(`key`: kotlin.String, `artPath`: kotlin.String?, `artUrl`: kotlin.String?)
-    
+
     fun `stats`(): LibraryStatsDto
-    
+
     fun `toggleFavorite`(`key`: kotlin.String): kotlin.Boolean
-    
+
     /**
      * Pistas sin portada para el backfill de metadatos.
      */
     fun `tracksWithoutArt`(`limit`: kotlin.UInt): List<TrackDto>
-    
+
     /**
      * Completa metadatos sin pisar valores mejores con vacíos.
      */
     fun `updateTrackMetadata`(`key`: kotlin.String, `artist`: kotlin.String, `title`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artUrl`: kotlin.String?)
-    
+
     /**
      * Inserta una pista de prueba. Sirve para el smoke test del puente antes
      * de conectar el resolvedor y el descargador reales.
      */
     fun `upsertDemo`(`title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong): kotlin.String
-    
+
     fun `version`(): kotlin.String
-    
+
     companion object
 }
 
@@ -1503,11 +1628,11 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
      * `context.filesDir`. El core usa `SPOTE_HOME` para config/data/cache.
      */
     constructor(`home`: kotlin.String) :
-        this(UniffiWithHandle, 
+        this(UniffiWithHandle,
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_constructor_spoteengine_new(
-    
-        
+
+
         FfiConverterString.lower(`home`),_status)
 }
     )
@@ -1588,22 +1713,61 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
         }
     }
 
-    
+
     @Throws(SpoteException::class)override fun `addToPlaylist`(`playlistId`: kotlin.Long, `key`: kotlin.String)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_add_to_playlist(
         it,
-        
+
         FfiConverterLong.lower(`playlistId`),
         FfiConverterString.lower(`key`),_status)
 }
     }
-    
-    
 
-    
+
+
+
+    /**
+     * Ficha completa de un álbum del catálogo, con su tracklist.
+     */
+    @Throws(SpoteException::class)override fun `albumInfo`(`provider`: kotlin.String, `id`: kotlin.String): CatalogAlbumInfoDto {
+            return FfiConverterTypeCatalogAlbumInfoDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_album_info(
+        it,
+
+        FfiConverterString.lower(`provider`),
+        FfiConverterString.lower(`id`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Tracklist real de un álbum local, agrupado por el core (incluye
+     * colaboraciones y respeta la identidad `album_artist`).
+     */
+    @Throws(SpoteException::class)override fun `albumTracks`(`album`: kotlin.String, `artist`: kotlin.String): List<TrackDto> {
+            return FfiConverterSequenceTypeTrackDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_album_tracks(
+        it,
+
+        FfiConverterString.lower(`album`),
+        FfiConverterString.lower(`artist`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(SpoteException::class)override fun `albums`(): List<AlbumDto> {
             return FfiConverterSequenceTypeAlbumDto.lift(
     callWithHandle {
@@ -1615,41 +1779,95 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `allTracks`(`limit`: kotlin.UInt): List<TrackDto> {
             return FfiConverterSequenceTypeTrackDto.lift(
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_all_tracks(
         it,
-        
+
         FfiConverterUInt.lower(`limit`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
+    @Throws(SpoteException::class)override fun `artistAlbums`(`provider`: kotlin.String, `id`: kotlin.String): List<CatalogAlbumDto> {
+            return FfiConverterSequenceTypeCatalogAlbumDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_artist_albums(
+        it,
+
+        FfiConverterString.lower(`provider`),
+        FfiConverterString.lower(`id`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Perfil de artista por nombre, como el que abre la TUI desde cualquier
+     * crédito. Incluye top tracks y discografía.
+     */
+    @Throws(SpoteException::class)override fun `artistProfile`(`name`: kotlin.String): CatalogArtistProfileDto {
+            return FfiConverterTypeCatalogArtistProfileDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_artist_profile(
+        it,
+
+        FfiConverterString.lower(`name`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Perfil de artista por id de proveedor (el que viene de la búsqueda).
+     */
+    @Throws(SpoteException::class)override fun `artistProfileById`(`provider`: kotlin.String, `id`: kotlin.String): CatalogArtistProfileDto {
+            return FfiConverterTypeCatalogArtistProfileDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_artist_profile_by_id(
+        it,
+
+        FfiConverterString.lower(`provider`),
+        FfiConverterString.lower(`id`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Copia de seguridad consistente antes de operaciones destructivas.
      */
     @Throws(SpoteException::class)override fun `backupLibrary`(`path`: kotlin.String)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_backup_library(
         it,
-        
+
         FfiConverterString.lower(`path`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Crea una playlist vacía y devuelve su id.
      */
@@ -1659,29 +1877,29 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_create_playlist(
         it,
-        
+
         FfiConverterString.lower(`name`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `deletePlaylist`(`playlistId`: kotlin.Long)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_delete_playlist(
         it,
-        
+
         FfiConverterLong.lower(`playlistId`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Número de parejas de canciones duplicadas (mismo título/artista/duración).
      */
@@ -1696,7 +1914,68 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
+
+
+
+    /**
+     * Busca un álbum por artista + título y devuelve su ficha completa.
+     * Es el mismo emparejamiento que usa la TUI al abrir un álbum local.
+     */
+    @Throws(SpoteException::class)override fun `findAlbum`(`album`: kotlin.String, `artist`: kotlin.String): CatalogAlbumInfoDto? {
+            return FfiConverterOptionalTypeCatalogAlbumInfoDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_find_album(
+        it,
+
+        FfiConverterString.lower(`album`),
+        FfiConverterString.lower(`artist`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Busca la copia local de una pista del catálogo por metadatos. Evita
+     * duplicar una canción ya descargada de otra fuente.
+     */
+    @Throws(SpoteException::class)override fun `findTrackByMeta`(`artist`: kotlin.String, `title`: kotlin.String, `durationMs`: kotlin.ULong): TrackDto? {
+            return FfiConverterOptionalTypeTrackDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_find_track_by_meta(
+        it,
+
+        FfiConverterString.lower(`artist`),
+        FfiConverterString.lower(`title`),
+        FfiConverterULong.lower(`durationMs`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Metadatos de una pista local: elige la coincidencia que más se parece
+     * en título, artista y duración, no simplemente la primera.
+     */
+    @Throws(SpoteException::class)override fun `findTrackMetadata`(`artist`: kotlin.String, `title`: kotlin.String): CatalogTrackDto? {
+            return FfiConverterOptionalTypeCatalogTrackDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_find_track_metadata(
+        it,
+
+        FfiConverterString.lower(`artist`),
+        FfiConverterString.lower(`title`),_status)
+}
+    }
+    )
+    }
+
 
     override fun `home`(): kotlin.String {
             return FfiConverterString.lift(
@@ -1709,9 +1988,9 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Indexa un fichero que Kotlin ya ha copiado al almacenamiento privado.
      * Devuelve la clave canónica; la UI recarga la biblioteca después.
@@ -1722,7 +2001,7 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_import_local(
         it,
-        
+
         FfiConverterString.lower(`path`),
         FfiConverterString.lower(`title`),
         FfiConverterString.lower(`artist`),
@@ -1733,9 +2012,35 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
 
-    
+
+
+    /**
+     * Indexa un fichero conservando la clave canónica del catálogo. Así una
+     * descarga mantiene la misma identidad que la pista remota y el álbum
+     * sigue marcándola como disponible.
+     */
+    @Throws(SpoteException::class)override fun `importLocalWithKey`(`key`: kotlin.String, `path`: kotlin.String, `title`: kotlin.String, `artist`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artPath`: kotlin.String?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_import_local_with_key(
+        it,
+
+        FfiConverterString.lower(`key`),
+        FfiConverterString.lower(`path`),
+        FfiConverterString.lower(`title`),
+        FfiConverterString.lower(`artist`),
+        FfiConverterOptionalString.lower(`album`),
+        FfiConverterULong.lower(`durationMs`),
+        FfiConverterOptionalString.lower(`artPath`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Fusiona duplicados conservando la copia con audio y moviendo listas/fuentes.
      */
@@ -1750,9 +2055,9 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
 
-    
+
+
     /**
      * Extrae la paleta de una portada local. La UI de Compose la usa para
      * teñir el tema y el fondo, igual que la TUI.
@@ -1763,30 +2068,30 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_palette(
         it,
-        
+
         FfiConverterString.lower(`imagePath`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `playlistTracks`(`playlistId`: kotlin.Long): List<TrackDto> {
             return FfiConverterSequenceTypeTrackDto.lift(
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_playlist_tracks(
         it,
-        
+
         FfiConverterLong.lower(`playlistId`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `playlists`(): List<PlaylistDto> {
             return FfiConverterSequenceTypePlaylistDto.lift(
     callWithHandle {
@@ -1798,74 +2103,94 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `recent`(`limit`: kotlin.UInt): List<TrackDto> {
             return FfiConverterSequenceTypeTrackDto.lift(
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_recent(
         it,
-        
+
         FfiConverterUInt.lower(`limit`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `removeFromPlaylist`(`playlistId`: kotlin.Long, `key`: kotlin.String)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_remove_from_playlist(
         it,
-        
+
         FfiConverterLong.lower(`playlistId`),
         FfiConverterString.lower(`key`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     @Throws(SpoteException::class)override fun `search`(`query`: kotlin.String, `limit`: kotlin.UInt): List<TrackDto> {
             return FfiConverterSequenceTypeTrackDto.lift(
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_search(
         it,
-        
+
         FfiConverterString.lower(`query`),
         FfiConverterUInt.lower(`limit`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
+    /**
+     * Búsqueda mixta en el catálogo (Spotify con respaldo Deezer), igual que
+     * la TUI. Devuelve pistas, álbumes y artistas reales, no derivados.
+     */
+    @Throws(SpoteException::class)override fun `searchCatalog`(`query`: kotlin.String, `limit`: kotlin.UInt): CatalogSearchDto {
+            return FfiConverterTypeCatalogSearchDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(SpoteException) { _status ->
+    UniffiLib.uniffi_spote_android_fn_method_spoteengine_search_catalog(
+        it,
+
+        FfiConverterString.lower(`query`),
+        FfiConverterUInt.lower(`limit`),_status)
+}
+    }
+    )
+    }
+
+
+
     /**
      * Asocia una portada local y/o URL a una pista existente.
      */
     @Throws(SpoteException::class)override fun `setTrackArt`(`key`: kotlin.String, `artPath`: kotlin.String?, `artUrl`: kotlin.String?)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_set_track_art(
         it,
-        
+
         FfiConverterString.lower(`key`),
         FfiConverterOptionalString.lower(`artPath`),
         FfiConverterOptionalString.lower(`artUrl`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     @Throws(SpoteException::class)override fun `stats`(): LibraryStatsDto {
             return FfiConverterTypeLibraryStatsDto.lift(
     callWithHandle {
@@ -1877,24 +2202,24 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
 
-    
+
+
     @Throws(SpoteException::class)override fun `toggleFavorite`(`key`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_toggle_favorite(
         it,
-        
+
         FfiConverterString.lower(`key`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
     /**
      * Pistas sin portada para el backfill de metadatos.
      */
@@ -1904,25 +2229,25 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_tracks_without_art(
         it,
-        
+
         FfiConverterUInt.lower(`limit`),_status)
 }
     }
     )
     }
-    
 
-    
+
+
     /**
      * Completa metadatos sin pisar valores mejores con vacíos.
      */
     @Throws(SpoteException::class)override fun `updateTrackMetadata`(`key`: kotlin.String, `artist`: kotlin.String, `title`: kotlin.String, `album`: kotlin.String?, `durationMs`: kotlin.ULong, `artUrl`: kotlin.String?)
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_update_track_metadata(
         it,
-        
+
         FfiConverterString.lower(`key`),
         FfiConverterString.lower(`artist`),
         FfiConverterString.lower(`title`),
@@ -1931,10 +2256,10 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
         FfiConverterOptionalString.lower(`artUrl`),_status)
 }
     }
-    
-    
 
-    
+
+
+
     /**
      * Inserta una pista de prueba. Sirve para el smoke test del puente antes
      * de conectar el resolvedor y el descargador reales.
@@ -1945,7 +2270,7 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     uniffiRustCallWithError(SpoteException) { _status ->
     UniffiLib.uniffi_spote_android_fn_method_spoteengine_upsert_demo(
         it,
-        
+
         FfiConverterString.lower(`title`),
         FfiConverterString.lower(`artist`),
         FfiConverterOptionalString.lower(`album`),
@@ -1954,7 +2279,7 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
+
 
     override fun `version`(): kotlin.String {
             return FfiConverterString.lift(
@@ -1967,20 +2292,20 @@ open class SpoteEngine: Disposable, AutoCloseable, SpoteEngineInterface
     }
     )
     }
-    
-
-    
-
-    
 
 
-    
-    
+
+
+
+
+
+
+
     /**
      * @suppress
      */
     companion object
-    
+
 }
 
 
@@ -2011,25 +2336,25 @@ public object FfiConverterTypeSpoteEngine: FfiConverter<SpoteEngine, Long> {
 
 data class AlbumDto (
     var `album`: kotlin.String
-    , 
+    ,
     var `artist`: kotlin.String
-    , 
+    ,
     var `trackCount`: kotlin.Long
-    , 
+    ,
     var `readyCount`: kotlin.Long
-    , 
+    ,
     var `durationMs`: kotlin.ULong
-    , 
+    ,
     var `artPath`: kotlin.String?
-    , 
+    ,
     var `artUrl`: kotlin.String?
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2072,17 +2397,411 @@ public object FfiConverterTypeAlbumDto: FfiConverterRustBuffer<AlbumDto> {
 
 
 
+data class CatalogAlbumDto (
+    var `provider`: kotlin.String
+    ,
+    var `id`: kotlin.String
+    ,
+    var `title`: kotlin.String
+    ,
+    var `artist`: kotlin.String
+    ,
+    var `coverUrl`: kotlin.String?
+    ,
+    var `releaseYear`: kotlin.UInt?
+    ,
+    var `trackCount`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCatalogAlbumDto: FfiConverterRustBuffer<CatalogAlbumDto> {
+    override fun read(buf: ByteBuffer): CatalogAlbumDto {
+        return CatalogAlbumDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CatalogAlbumDto) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`artist`) +
+            FfiConverterOptionalString.allocationSize(value.`coverUrl`) +
+            FfiConverterOptionalUInt.allocationSize(value.`releaseYear`) +
+            FfiConverterUInt.allocationSize(value.`trackCount`)
+    )
+
+    override fun write(value: CatalogAlbumDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`artist`, buf)
+            FfiConverterOptionalString.write(value.`coverUrl`, buf)
+            FfiConverterOptionalUInt.write(value.`releaseYear`, buf)
+            FfiConverterUInt.write(value.`trackCount`, buf)
+    }
+}
+
+
+
+data class CatalogAlbumInfoDto (
+    var `provider`: kotlin.String
+    ,
+    var `id`: kotlin.String
+    ,
+    var `title`: kotlin.String
+    ,
+    var `artist`: kotlin.String
+    ,
+    var `coverUrl`: kotlin.String?
+    ,
+    var `releaseDate`: kotlin.String?
+    ,
+    var `year`: kotlin.UInt?
+    ,
+    var `tracks`: List<CatalogTrackDto>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCatalogAlbumInfoDto: FfiConverterRustBuffer<CatalogAlbumInfoDto> {
+    override fun read(buf: ByteBuffer): CatalogAlbumInfoDto {
+        return CatalogAlbumInfoDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterSequenceTypeCatalogTrackDto.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CatalogAlbumInfoDto) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`artist`) +
+            FfiConverterOptionalString.allocationSize(value.`coverUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`releaseDate`) +
+            FfiConverterOptionalUInt.allocationSize(value.`year`) +
+            FfiConverterSequenceTypeCatalogTrackDto.allocationSize(value.`tracks`)
+    )
+
+    override fun write(value: CatalogAlbumInfoDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`artist`, buf)
+            FfiConverterOptionalString.write(value.`coverUrl`, buf)
+            FfiConverterOptionalString.write(value.`releaseDate`, buf)
+            FfiConverterOptionalUInt.write(value.`year`, buf)
+            FfiConverterSequenceTypeCatalogTrackDto.write(value.`tracks`, buf)
+    }
+}
+
+
+
+data class CatalogArtistDto (
+    var `provider`: kotlin.String
+    ,
+    var `id`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `imageUrl`: kotlin.String?
+    ,
+    var `followers`: kotlin.ULong
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCatalogArtistDto: FfiConverterRustBuffer<CatalogArtistDto> {
+    override fun read(buf: ByteBuffer): CatalogArtistDto {
+        return CatalogArtistDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CatalogArtistDto) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`imageUrl`) +
+            FfiConverterULong.allocationSize(value.`followers`)
+    )
+
+    override fun write(value: CatalogArtistDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`imageUrl`, buf)
+            FfiConverterULong.write(value.`followers`, buf)
+    }
+}
+
+
+
+data class CatalogArtistProfileDto (
+    var `provider`: kotlin.String
+    ,
+    var `id`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `imageUrl`: kotlin.String?
+    ,
+    var `genres`: List<kotlin.String>
+    ,
+    var `followers`: kotlin.ULong
+    ,
+    var `popularity`: kotlin.UInt
+    ,
+    var `topTracks`: List<CatalogTrackDto>
+    ,
+    var `albums`: List<CatalogAlbumDto>
+    ,
+    var `bio`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCatalogArtistProfileDto: FfiConverterRustBuffer<CatalogArtistProfileDto> {
+    override fun read(buf: ByteBuffer): CatalogArtistProfileDto {
+        return CatalogArtistProfileDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeCatalogTrackDto.read(buf),
+            FfiConverterSequenceTypeCatalogAlbumDto.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CatalogArtistProfileDto) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`imageUrl`) +
+            FfiConverterSequenceString.allocationSize(value.`genres`) +
+            FfiConverterULong.allocationSize(value.`followers`) +
+            FfiConverterUInt.allocationSize(value.`popularity`) +
+            FfiConverterSequenceTypeCatalogTrackDto.allocationSize(value.`topTracks`) +
+            FfiConverterSequenceTypeCatalogAlbumDto.allocationSize(value.`albums`) +
+            FfiConverterOptionalString.allocationSize(value.`bio`)
+    )
+
+    override fun write(value: CatalogArtistProfileDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`imageUrl`, buf)
+            FfiConverterSequenceString.write(value.`genres`, buf)
+            FfiConverterULong.write(value.`followers`, buf)
+            FfiConverterUInt.write(value.`popularity`, buf)
+            FfiConverterSequenceTypeCatalogTrackDto.write(value.`topTracks`, buf)
+            FfiConverterSequenceTypeCatalogAlbumDto.write(value.`albums`, buf)
+            FfiConverterOptionalString.write(value.`bio`, buf)
+    }
+}
+
+
+
+data class CatalogSearchDto (
+    var `provider`: kotlin.String
+    ,
+    var `tracks`: List<CatalogTrackDto>
+    ,
+    var `albums`: List<CatalogAlbumDto>
+    ,
+    var `artists`: List<CatalogArtistDto>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCatalogSearchDto: FfiConverterRustBuffer<CatalogSearchDto> {
+    override fun read(buf: ByteBuffer): CatalogSearchDto {
+        return CatalogSearchDto(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceTypeCatalogTrackDto.read(buf),
+            FfiConverterSequenceTypeCatalogAlbumDto.read(buf),
+            FfiConverterSequenceTypeCatalogArtistDto.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CatalogSearchDto) = (
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterSequenceTypeCatalogTrackDto.allocationSize(value.`tracks`) +
+            FfiConverterSequenceTypeCatalogAlbumDto.allocationSize(value.`albums`) +
+            FfiConverterSequenceTypeCatalogArtistDto.allocationSize(value.`artists`)
+    )
+
+    override fun write(value: CatalogSearchDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterSequenceTypeCatalogTrackDto.write(value.`tracks`, buf)
+            FfiConverterSequenceTypeCatalogAlbumDto.write(value.`albums`, buf)
+            FfiConverterSequenceTypeCatalogArtistDto.write(value.`artists`, buf)
+    }
+}
+
+
+
+data class CatalogTrackDto (
+    /**
+     * Clave canónica (`isrc:…` o `sha1:…`), igual que en la TUI.
+     */
+    var `key`: kotlin.String
+    ,
+    var `provider`: kotlin.String
+    ,
+    /**
+     * Id del proveedor (`deezer` numérico o `dz:…`).
+     */
+    var `providerId`: kotlin.String
+    ,
+    var `title`: kotlin.String
+    ,
+    var `artists`: kotlin.String
+    ,
+    var `artistList`: List<kotlin.String>
+    ,
+    var `album`: kotlin.String?
+    ,
+    var `durationMs`: kotlin.ULong
+    ,
+    var `artUrl`: kotlin.String?
+    ,
+    var `isrc`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCatalogTrackDto: FfiConverterRustBuffer<CatalogTrackDto> {
+    override fun read(buf: ByteBuffer): CatalogTrackDto {
+        return CatalogTrackDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CatalogTrackDto) = (
+            FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterString.allocationSize(value.`provider`) +
+            FfiConverterString.allocationSize(value.`providerId`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`artists`) +
+            FfiConverterSequenceString.allocationSize(value.`artistList`) +
+            FfiConverterOptionalString.allocationSize(value.`album`) +
+            FfiConverterULong.allocationSize(value.`durationMs`) +
+            FfiConverterOptionalString.allocationSize(value.`artUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`isrc`)
+    )
+
+    override fun write(value: CatalogTrackDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterString.write(value.`provider`, buf)
+            FfiConverterString.write(value.`providerId`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`artists`, buf)
+            FfiConverterSequenceString.write(value.`artistList`, buf)
+            FfiConverterOptionalString.write(value.`album`, buf)
+            FfiConverterULong.write(value.`durationMs`, buf)
+            FfiConverterOptionalString.write(value.`artUrl`, buf)
+            FfiConverterOptionalString.write(value.`isrc`, buf)
+    }
+}
+
+
+
 data class LibraryStatsDto (
     var `tracks`: kotlin.ULong
-    , 
+    ,
     var `ready`: kotlin.ULong
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2112,23 +2831,35 @@ public object FfiConverterTypeLibraryStatsDto: FfiConverterRustBuffer<LibrarySta
 
 data class PaletteDto (
     var `background`: kotlin.String
-    , 
+    ,
     var `surface`: kotlin.String
-    , 
+    ,
+    var `surfaceAlt`: kotlin.String
+    ,
+    var `bgDeep`: kotlin.String
+    ,
     var `text`: kotlin.String
-    , 
+    ,
+    var `muted`: kotlin.String
+    ,
+    var `border`: kotlin.String
+    ,
     var `primary`: kotlin.String
-    , 
+    ,
     var `secondary`: kotlin.String
-    , 
+    ,
     var `accent`: kotlin.String
-    
+    ,
+    var `ok`: kotlin.String
+    ,
+    var `error`: kotlin.String
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2144,25 +2875,43 @@ public object FfiConverterTypePaletteDto: FfiConverterRustBuffer<PaletteDto> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
         )
     }
 
     override fun allocationSize(value: PaletteDto) = (
             FfiConverterString.allocationSize(value.`background`) +
             FfiConverterString.allocationSize(value.`surface`) +
+            FfiConverterString.allocationSize(value.`surfaceAlt`) +
+            FfiConverterString.allocationSize(value.`bgDeep`) +
             FfiConverterString.allocationSize(value.`text`) +
+            FfiConverterString.allocationSize(value.`muted`) +
+            FfiConverterString.allocationSize(value.`border`) +
             FfiConverterString.allocationSize(value.`primary`) +
             FfiConverterString.allocationSize(value.`secondary`) +
-            FfiConverterString.allocationSize(value.`accent`)
+            FfiConverterString.allocationSize(value.`accent`) +
+            FfiConverterString.allocationSize(value.`ok`) +
+            FfiConverterString.allocationSize(value.`error`)
     )
 
     override fun write(value: PaletteDto, buf: ByteBuffer) {
             FfiConverterString.write(value.`background`, buf)
             FfiConverterString.write(value.`surface`, buf)
+            FfiConverterString.write(value.`surfaceAlt`, buf)
+            FfiConverterString.write(value.`bgDeep`, buf)
             FfiConverterString.write(value.`text`, buf)
+            FfiConverterString.write(value.`muted`, buf)
+            FfiConverterString.write(value.`border`, buf)
             FfiConverterString.write(value.`primary`, buf)
             FfiConverterString.write(value.`secondary`, buf)
             FfiConverterString.write(value.`accent`, buf)
+            FfiConverterString.write(value.`ok`, buf)
+            FfiConverterString.write(value.`error`, buf)
     }
 }
 
@@ -2170,23 +2919,23 @@ public object FfiConverterTypePaletteDto: FfiConverterRustBuffer<PaletteDto> {
 
 data class PlaylistDto (
     var `id`: kotlin.Long
-    , 
+    ,
     var `name`: kotlin.String
-    , 
+    ,
     var `description`: kotlin.String
-    , 
+    ,
     var `trackCount`: kotlin.Long
-    , 
+    ,
     var `coverKey`: kotlin.String?
-    , 
+    ,
     var `coverUrl`: kotlin.String?
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2228,37 +2977,37 @@ public object FfiConverterTypePlaylistDto: FfiConverterRustBuffer<PlaylistDto> {
 
 data class TrackDto (
     var `key`: kotlin.String
-    , 
+    ,
     var `title`: kotlin.String
-    , 
+    ,
     var `artist`: kotlin.String
-    , 
+    ,
     var `album`: kotlin.String?
-    , 
+    ,
     var `durationMs`: kotlin.ULong
-    , 
+    ,
     var `favorite`: kotlin.Boolean
-    , 
+    ,
     var `playCount`: kotlin.UInt
-    , 
+    ,
     var `downloaded`: kotlin.Boolean
-    , 
+    ,
     var `provider`: kotlin.String?
-    , 
+    ,
     var `artPath`: kotlin.String?
-    , 
+    ,
     var `artUrl`: kotlin.String?
-    , 
+    ,
     var `path`: kotlin.String?
-    , 
+    ,
     var `addedAt`: kotlin.Long
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
@@ -2322,40 +3071,48 @@ public object FfiConverterTypeTrackDto: FfiConverterRustBuffer<TrackDto> {
 
 
 sealed class SpoteException: kotlin.Exception() {
-    
-    class Library(
-        
-        val `detail`: kotlin.String
-        ) : SpoteException() {
-        override val message
-            get() = "detail=${ `detail` }"
-    }
-    
-    class Io(
-        
-        val `detail`: kotlin.String
-        ) : SpoteException() {
-        override val message
-            get() = "detail=${ `detail` }"
-    }
-    
-    class Image(
-        
-        val `detail`: kotlin.String
-        ) : SpoteException() {
-        override val message
-            get() = "detail=${ `detail` }"
-    }
-    
 
-    
+    class Library(
+
+        val `detail`: kotlin.String
+        ) : SpoteException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class Io(
+
+        val `detail`: kotlin.String
+        ) : SpoteException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class Image(
+
+        val `detail`: kotlin.String
+        ) : SpoteException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class Catalog(
+
+        val `detail`: kotlin.String
+        ) : SpoteException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+
+
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<SpoteException> {
         override fun lift(error_buf: RustBuffer.ByValue): SpoteException = FfiConverterTypeSpoteError.lift(error_buf)
     }
 
-    
+
 }
 
 /**
@@ -2363,7 +3120,7 @@ sealed class SpoteException: kotlin.Exception() {
  */
 public object FfiConverterTypeSpoteError : FfiConverterRustBuffer<SpoteException> {
     override fun read(buf: ByteBuffer): SpoteException {
-        
+
 
         return when(buf.getInt()) {
             1 -> SpoteException.Library(
@@ -2373,6 +3130,9 @@ public object FfiConverterTypeSpoteError : FfiConverterRustBuffer<SpoteException
                 FfiConverterString.read(buf),
                 )
             3 -> SpoteException.Image(
+                FfiConverterString.read(buf),
+                )
+            4 -> SpoteException.Catalog(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -2392,6 +3152,11 @@ public object FfiConverterTypeSpoteError : FfiConverterRustBuffer<SpoteException
                 + FfiConverterString.allocationSize(value.`detail`)
             )
             is SpoteException.Image -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is SpoteException.Catalog -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
                 + FfiConverterString.allocationSize(value.`detail`)
@@ -2416,9 +3181,46 @@ public object FfiConverterTypeSpoteError : FfiConverterRustBuffer<SpoteException
                 FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
+            is SpoteException.Catalog -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
 }
 
 
@@ -2459,6 +3261,130 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeCatalogAlbumInfoDto: FfiConverterRustBuffer<CatalogAlbumInfoDto?> {
+    override fun read(buf: ByteBuffer): CatalogAlbumInfoDto? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeCatalogAlbumInfoDto.read(buf)
+    }
+
+    override fun allocationSize(value: CatalogAlbumInfoDto?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeCatalogAlbumInfoDto.allocationSize(value)
+        }
+    }
+
+    override fun write(value: CatalogAlbumInfoDto?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeCatalogAlbumInfoDto.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeCatalogTrackDto: FfiConverterRustBuffer<CatalogTrackDto?> {
+    override fun read(buf: ByteBuffer): CatalogTrackDto? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeCatalogTrackDto.read(buf)
+    }
+
+    override fun allocationSize(value: CatalogTrackDto?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeCatalogTrackDto.allocationSize(value)
+        }
+    }
+
+    override fun write(value: CatalogTrackDto?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeCatalogTrackDto.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeTrackDto: FfiConverterRustBuffer<TrackDto?> {
+    override fun read(buf: ByteBuffer): TrackDto? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeTrackDto.read(buf)
+    }
+
+    override fun allocationSize(value: TrackDto?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeTrackDto.allocationSize(value)
+        }
+    }
+
+    override fun write(value: TrackDto?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeTrackDto.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeAlbumDto: FfiConverterRustBuffer<List<AlbumDto>> {
     override fun read(buf: ByteBuffer): List<AlbumDto> {
         val len = buf.getInt()
@@ -2477,6 +3403,90 @@ public object FfiConverterSequenceTypeAlbumDto: FfiConverterRustBuffer<List<Albu
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeAlbumDto.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeCatalogAlbumDto: FfiConverterRustBuffer<List<CatalogAlbumDto>> {
+    override fun read(buf: ByteBuffer): List<CatalogAlbumDto> {
+        val len = buf.getInt()
+        return List<CatalogAlbumDto>(len) {
+            FfiConverterTypeCatalogAlbumDto.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<CatalogAlbumDto>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCatalogAlbumDto.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<CatalogAlbumDto>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCatalogAlbumDto.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeCatalogArtistDto: FfiConverterRustBuffer<List<CatalogArtistDto>> {
+    override fun read(buf: ByteBuffer): List<CatalogArtistDto> {
+        val len = buf.getInt()
+        return List<CatalogArtistDto>(len) {
+            FfiConverterTypeCatalogArtistDto.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<CatalogArtistDto>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCatalogArtistDto.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<CatalogArtistDto>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCatalogArtistDto.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeCatalogTrackDto: FfiConverterRustBuffer<List<CatalogTrackDto>> {
+    override fun read(buf: ByteBuffer): List<CatalogTrackDto> {
+        val len = buf.getInt()
+        return List<CatalogTrackDto>(len) {
+            FfiConverterTypeCatalogTrackDto.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<CatalogTrackDto>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeCatalogTrackDto.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<CatalogTrackDto>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeCatalogTrackDto.write(it, buf)
         }
     }
 }

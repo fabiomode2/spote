@@ -47,6 +47,8 @@ fun MiniPlayer(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(10.dp))
             .background(colors.surfaceHigh)
             .clickable(onClick = onExpand),
     ) {

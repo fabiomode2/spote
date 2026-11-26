@@ -12,6 +12,23 @@ data class Cover(
     val remoteUrl: String? = null,
 )
 
+/** Paleta completa extraída por el core Rust a partir de una portada. */
+@Immutable
+data class CoverPalette(
+    val background: Color,
+    val surface: Color,
+    val surfaceHigh: Color,
+    val deep: Color,
+    val text: Color,
+    val muted: Color,
+    val outline: Color,
+    val primary: Color,
+    val secondary: Color,
+    val accent: Color,
+    val success: Color,
+    val danger: Color,
+)
+
 @Immutable
 data class Track(
     val key: String,
@@ -33,6 +50,14 @@ data class Track(
     /** Consulta de catálogo (artista + título) para resolver el audio bajo demanda. */
     val remoteQuery: String? = null,
     val sourceLabel: String? = null,
+    /** `spotify` / `deezer` cuando la pista viene del catálogo. */
+    val provider: String? = null,
+    val providerId: String? = null,
+    val albumProvider: String? = null,
+    val albumProviderId: String? = null,
+    val artistProvider: String? = null,
+    val artistProviderId: String? = null,
+    val isrc: String? = null,
 ) {
     val isRemote: Boolean get() = remoteUrl != null || remoteQuery != null
 }
@@ -45,9 +70,37 @@ data class Album(
     val year: Int,
     val cover: Cover,
     val tracks: List<Track>,
+    /** `local` o el proveedor del catálogo (`spotify`/`deezer`). */
+    val provider: String? = null,
+    val providerId: String? = null,
+    val artistProvider: String? = null,
+    val artistProviderId: String? = null,
+    val trackCount: Int = tracks.size,
+    val releaseDate: String? = null,
 ) {
     val durationMs: Long get() = tracks.sumOf { it.durationMs }
+    val isCatalog: Boolean get() = provider != null && provider != "local"
 }
+
+@Immutable
+data class Artist(
+    val id: String,
+    val name: String,
+    val imageUrl: String? = null,
+    val followers: Long = 0,
+    val provider: String? = null,
+    val providerId: String? = null,
+)
+
+@Immutable
+data class ArtistProfile(
+    val artist: Artist,
+    val genres: List<String> = emptyList(),
+    val popularity: Int = 0,
+    val bio: String? = null,
+    val topTracks: List<Track> = emptyList(),
+    val albums: List<Album> = emptyList(),
+)
 
 @Immutable
 data class Playlist(
@@ -102,7 +155,7 @@ data class SearchState(
     /** Resultados del catálogo, separados de la biblioteca local. */
     val remoteResults: List<Track> = emptyList(),
     val remoteAlbums: List<Album> = emptyList(),
-    val remoteArtists: List<String> = emptyList(),
+    val remoteArtists: List<Artist> = emptyList(),
     val remoteLoading: Boolean = false,
     val remoteError: String? = null,
 )
@@ -161,14 +214,21 @@ data class PlayerState(
     val lyricsLoading: Boolean = false,
 )
 
-enum class Tab { Home, Search, Now, Library }
+enum class Tab { Home, Search, Library }
 
 @Immutable
 data class AppUiState(
-    val tab: Tab = Tab.Home,
     val home: HomeState,
     val search: SearchState,
     val library: LibraryState,
     val player: PlayerState,
     val downloads: Map<String, DownloadUi> = emptyMap(),
+    /** Álbumes de catálogo cargados bajo demanda, por id de ruta. */
+    val albumDetails: Map<String, Album> = emptyMap(),
+    val albumLoading: Set<String> = emptySet(),
+    val albumErrors: Map<String, String> = emptyMap(),
+    /** Perfiles de artista cargados bajo demanda. */
+    val artistDetails: Map<String, ArtistProfile> = emptyMap(),
+    val artistLoading: Set<String> = emptySet(),
+    val artistErrors: Map<String, String> = emptyMap(),
 )

@@ -20,7 +20,7 @@ class RustSpoteRepository(private val bridge: RustBridge) : SpoteRepository {
     override fun home(): HomeState {
         val all = bridge.allTracks(200)
         val recent = bridge.recent(12)
-        val albums = buildAlbums(all)
+        val albums = bridge.albums().map { it.toModel(emptyList()) }
         val playlists = loadPlaylists()
         return HomeState(
             greeting = greeting(),
@@ -45,9 +45,10 @@ class RustSpoteRepository(private val bridge: RustBridge) : SpoteRepository {
 
     override fun library(): LibraryState {
         val tracks = bridge.allTracks(500)
+        val albums = bridge.albums().map { it.toModel(emptyList()) }
         return LibraryState(
             playlists = loadPlaylists(),
-            albums = buildAlbums(tracks),
+            albums = albums,
             tracks = tracks,
             downloadedCount = tracks.count { it.downloaded },
             storageLabel = "Local",
@@ -55,8 +56,9 @@ class RustSpoteRepository(private val bridge: RustBridge) : SpoteRepository {
     }
 
     override fun album(id: String): Album? {
-        val tracks = bridge.allTracks(1000)
-        return buildAlbums(tracks).firstOrNull { it.id == id }
+        val dto = bridge.albums().firstOrNull { it.toModel(emptyList<Track>()).id == id } ?: return null
+        val tracks = bridge.albumTracks(dto.album, dto.artist)
+        return dto.toModel(tracks)
     }
 
     override fun playerFor(track: Track): PlayerState {

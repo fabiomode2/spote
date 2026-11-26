@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -52,6 +51,7 @@ import dev.spote.app.ui.components.EmptyState
 import dev.spote.app.ui.components.GenreCard
 import dev.spote.app.ui.components.SectionHeader
 import dev.spote.app.ui.components.SpoteChip
+import dev.spote.app.ui.components.SpoteHeader
 import dev.spote.app.ui.components.TrackRow
 import dev.spote.app.ui.theme.LocalSpoteColors
 
@@ -62,10 +62,13 @@ fun SearchScreen(
     onPlayTrack: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onMore: (Track) -> Unit,
-    onOpenArtist: (String) -> Unit = { onQueryChange(it) },
+    onOpenArtist: (String, String?, String?) -> Unit = { name, _, _ -> onQueryChange(name) },
     onClearSearch: () -> Unit = { onQueryChange("") },
     onClearHistory: () -> Unit = {},
     onSearchCommit: (String) -> Unit = {},
+    userName: String = "",
+    avatarUri: String? = null,
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
@@ -74,25 +77,28 @@ fun SearchScreen(
     val allAlbums = remember(state.albums, state.remoteAlbums) {
         (state.albums + state.remoteAlbums).distinctBy { it.id }
     }
-    val allArtists = remember(state.artists, state.remoteArtists) {
-        (state.artists + state.remoteArtists).distinctBy { it.lowercase() }
+    val localOnlyArtists = remember(state.artists, state.remoteArtists) {
+        state.artists.filter { name ->
+            state.remoteArtists.none { it.name.equals(name, ignoreCase = true) }
+        }
     }
 
-    AppBackground {
+    AppBackground(
+        cover = state.remoteResults.firstOrNull()?.cover ?: state.results.firstOrNull()?.cover,
+    ) {
         Column(modifier = modifier.fillMaxSize()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(top = 10.dp, bottom = 10.dp),
+                    .padding(bottom = 10.dp),
             ) {
-                Text(
-                    text = "Buscar",
-                    style = MaterialTheme.typography.displayMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    modifier = Modifier.padding(horizontal = 20.dp),
+                SpoteHeader(
+                    title = "Buscar",
+                    userName = userName,
+                    avatarUri = avatarUri,
+                    onOpenSettings = onOpenSettings,
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(6.dp))
                 BasicTextField(
                     value = state.query,
                     onValueChange = onQueryChange,
@@ -290,7 +296,7 @@ fun SearchScreen(
                             }
                         }
                     }
-                    if (allArtists.isNotEmpty()) {
+                    if (state.remoteArtists.isNotEmpty() || localOnlyArtists.isNotEmpty()) {
                         item(key = "artists-title") {
                             SectionHeader(title = "Artistas")
                         }
@@ -299,17 +305,29 @@ fun SearchScreen(
                                 contentPadding = PaddingValues(horizontal = 20.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                items(allArtists, key = { it }) { artist ->
+                                items(state.remoteArtists, key = { "remote-artist-${it.id}" }) { artist ->
+                                    ArtistCircle(
+                                        name = artist.name,
+                                        cover = dev.spote.app.rust.coverFor(
+                                            artist.name,
+                                            null,
+                                            artist.imageUrl,
+                                        ),
+                                        onClick = {
+                                            onOpenArtist(artist.name, artist.provider, artist.providerId)
+                                        },
+                                    )
+                                }
+                                items(localOnlyArtists, key = { "local-artist-$it" }) { artist ->
                                     val cover = allAlbums.firstOrNull { it.artist == artist }?.cover
                                         ?: state.results.firstOrNull { it.artist == artist }?.cover
-                                        ?: state.remoteResults.firstOrNull { it.artist == artist }?.cover
                                         ?: dev.spote.app.model.Cover(
                                             start = Color(0xFF3A3A42),
                                             end = Color(0xFF15151A),
                                             label = artist.take(1).uppercase(),
                                         )
                                     ArtistCircle(name = artist, cover = cover, onClick = {
-                                        onOpenArtist(artist)
+                                        onOpenArtist(artist, null, null)
                                     })
                                 }
                             }
@@ -318,7 +336,8 @@ fun SearchScreen(
                     if (
                         state.results.isEmpty() &&
                         allAlbums.isEmpty() &&
-                        allArtists.isEmpty() &&
+                        state.artists.isEmpty() &&
+                        state.remoteArtists.isEmpty() &&
                         state.remoteResults.isEmpty() &&
                         !state.remoteLoading
                     ) {

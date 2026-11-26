@@ -31,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -44,7 +45,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.spote.app.artwork.rememberCoverPalette
+import dev.spote.app.model.Cover
 import dev.spote.app.ui.theme.LocalSpoteColors
+import dev.spote.app.ui.theme.withCoverPalette
 
 /** Navegación global al perfil de un artista, disponible desde cualquier fila. */
 val LocalArtistNavigation = staticCompositionLocalOf<((String) -> Unit)?> { null }
@@ -55,28 +59,34 @@ val LocalAlbumNavigation = staticCompositionLocalOf<((dev.spote.app.model.Track)
 @Composable
 fun AppBackground(
     accentStart: Color = LocalSpoteColors.current.coverStart,
+    cover: Cover? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
-    val colors = LocalSpoteColors.current
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.background),
-    ) {
+    val base = LocalSpoteColors.current
+    val palette = rememberCoverPalette(cover)
+    val colors = palette?.let { base.withCoverPalette(it) } ?: base
+    val start = palette?.primary ?: accentStart
+    CompositionLocalProvider(LocalSpoteColors provides colors) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            accentStart.copy(alpha = 0.22f),
-                            colors.background.copy(alpha = 0.92f),
-                            colors.background,
+                .background(colors.background),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                start.copy(alpha = 0.26f),
+                                colors.background.copy(alpha = 0.94f),
+                                colors.background,
+                            ),
                         ),
                     ),
-                ),
-        )
-        content()
+            )
+            content()
+        }
     }
 }
 
@@ -115,6 +125,47 @@ fun TopBar(
             )
         }
         Spacer(Modifier.weight(1f))
+        actions()
+    }
+}
+
+/**
+ * Cabecera común de las pestañas: avatar (abre Ajustes), título y acciones.
+ * El avatar vive aquí para que el perfil esté a un toque desde cualquier tab.
+ */
+@Composable
+fun SpoteHeader(
+    title: String,
+    userName: String,
+    avatarUri: String?,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Avatar(
+            name = userName.ifBlank { "Tú" },
+            size = 40.dp,
+            imageUri = avatarUri,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable(onClick = onOpenSettings),
+        )
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineLarge,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
         actions()
     }
 }

@@ -63,7 +63,10 @@ fun RoomScreen(
     val colors = LocalSpoteColors.current
     var draft by remember { mutableStateOf("") }
 
-    AppBackground(accentStart = room.nowPlaying?.cover?.start ?: colors.coverStart) {
+    AppBackground(
+        accentStart = room.nowPlaying?.cover?.start ?: colors.coverStart,
+        cover = room.nowPlaying?.cover,
+    ) {
         Column(modifier = modifier.fillMaxSize()) {
             Row(
                 modifier = Modifier

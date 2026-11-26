@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,6 +38,7 @@ import dev.spote.app.ui.components.CollectionRow
 import dev.spote.app.ui.components.EmptyState
 import dev.spote.app.ui.components.FilterChips
 import dev.spote.app.ui.components.SectionHeader
+import dev.spote.app.ui.components.SpoteHeader
 import dev.spote.app.ui.components.TrackRow
 import dev.spote.app.ui.theme.LocalSpoteColors
 import androidx.compose.material.icons.rounded.LibraryMusic
@@ -57,6 +57,9 @@ fun LibraryScreen(
     onOpenArtist: (String) -> Unit,
     onCreatePlaylist: () -> Unit = {},
     onImport: () -> Unit = {},
+    userName: String = "",
+    avatarUri: String? = null,
+    onOpenSettings: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
@@ -64,40 +67,36 @@ fun LibraryScreen(
     val artists = state.tracks.map { it.artist }.distinct()
     val downloaded = state.tracks.filter { it.downloaded }
 
-    AppBackground {
+    AppBackground(
+        cover = state.albums.firstOrNull()?.cover ?: state.tracks.firstOrNull()?.cover,
+    ) {
         Column(modifier = modifier.fillMaxSize()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(top = 10.dp),
+                    .padding(bottom = 4.dp),
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "Tu biblioteca",
-                        style = MaterialTheme.typography.displayMedium,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        modifier = Modifier.weight(1f),
-                    )
-                    CircleIconButton(
-                        icon = Icons.Rounded.Search,
-                        contentDescription = "Buscar",
-                        onClick = onOpenSearch,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    CircleIconButton(
-                        icon = Icons.Rounded.Add,
-                        contentDescription = "Importar música",
-                        onClick = onImport,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
+                SpoteHeader(
+                    title = "Tu biblioteca",
+                    userName = userName,
+                    avatarUri = avatarUri,
+                    onOpenSettings = onOpenSettings,
+                    actions = {
+                        CircleIconButton(
+                            icon = Icons.Rounded.Search,
+                            contentDescription = "Buscar",
+                            onClick = onOpenSearch,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        CircleIconButton(
+                            icon = Icons.Rounded.Add,
+                            contentDescription = "Importar música",
+                            onClick = onImport,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                )
+                Spacer(Modifier.height(8.dp))
                 FilterChips(
                     labels = filters.map { it.label },
                     selected = state.filter.label,
