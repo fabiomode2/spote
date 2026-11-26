@@ -29,9 +29,17 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
         Overlay::Wrapped => draw_wrapped(app, buf, layout, pal),
         Overlay::PlaylistForm => draw_playlist_form(app, buf, layout, pal),
         Overlay::ImportPlaylist => draw_import_playlist(app, buf, layout, pal),
-        Overlay::ConfirmDeletePlaylist { name, .. } => {
-            draw_confirm_delete(app, buf, layout, pal, &name)
-        }
+        Overlay::ConfirmDeletePlaylist {
+            name,
+            tracks,
+            remove_tracks,
+            ..
+        } => draw_confirm_delete_playlist(app, buf, layout, pal, &name, tracks, remove_tracks),
+        Overlay::ConfirmDeleteAlbum {
+            album,
+            artist,
+            tracks,
+        } => draw_confirm_delete_album(app, buf, layout, pal, &album, &artist, tracks),
         Overlay::AddToPlaylist { key, selected } => {
             draw_add_to_playlist(app, buf, layout, pal, &key, selected)
         }
@@ -140,15 +148,22 @@ pub(super) fn draw_import_playlist(app: &mut App, buf: &mut Buffer, layout: &Lay
     );
 }
 
-pub(super) fn draw_confirm_delete(
+pub(super) fn draw_confirm_delete_playlist(
     _app: &mut App,
     buf: &mut Buffer,
     layout: &Layout,
     pal: &Palette,
     name: &str,
+    tracks: usize,
+    remove_tracks: bool,
 ) {
-    let rect = overlay_frame(layout, pal, buf, 56, 8, "borrar lista");
+    let rect = overlay_frame(layout, pal, buf, 68, 10, "borrar lista");
     let inner = inset(rect, 3, 2);
+    let songs = if tracks == 1 {
+        "1 canción".to_string()
+    } else {
+        format!("{tracks} canciones")
+    };
     text_at(
         buf,
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
@@ -159,8 +174,77 @@ pub(super) fn draw_confirm_delete(
     text_at(
         buf,
         Rect::new(inner.x, inner.y + 3, inner.width, 1),
-        "enter sí · esc no (las pistas se quedan en la biblioteca)",
+        if remove_tracks {
+            format!(
+                "{songs} {} también de la biblioteca.",
+                if tracks == 1 { "se quitará" } else { "se quitarán" }
+            )
+        } else {
+            format!(
+                "{songs} {} en la biblioteca.",
+                if tracks == 1 { "se quedará" } else { "se quedarán" }
+            )
+        },
+        Style::new().fg(color(if remove_tracks { pal.warn } else { pal.muted })),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 4, inner.width, 1),
+        "El audio no se borra del disco.",
         Style::new().fg(color(pal.dim)),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 6, inner.width, 1),
+        format!(
+            "enter borrar · t canciones: {} · esc",
+            if remove_tracks { "sí" } else { "no" }
+        ),
+        Style::new().fg(color(pal.muted)),
+        Alignment::Left,
+    );
+}
+
+pub(super) fn draw_confirm_delete_album(
+    _app: &mut App,
+    buf: &mut Buffer,
+    layout: &Layout,
+    pal: &Palette,
+    album: &str,
+    artist: &str,
+    tracks: usize,
+) {
+    let rect = overlay_frame(layout, pal, buf, 68, 9, "quitar disco");
+    let inner = inset(rect, 3, 2);
+    let songs = if tracks == 1 {
+        "1 canción".to_string()
+    } else {
+        format!("{tracks} canciones")
+    };
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        format!("¿quitar '{album}' de {artist}?"),
+        Style::new().fg(color(pal.text)).add_modifier(Modifier::BOLD),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 3, inner.width, 1),
+        format!(
+            "{songs} {} de la biblioteca; el audio no se borra.",
+            if tracks == 1 { "saldrá" } else { "saldrán" }
+        ),
+        Style::new().fg(color(pal.warn)),
+        Alignment::Left,
+    );
+    text_at(
+        buf,
+        Rect::new(inner.x, inner.y + 5, inner.width, 1),
+        "enter quitar · esc cancelar",
+        Style::new().fg(color(pal.muted)),
         Alignment::Left,
     );
 }

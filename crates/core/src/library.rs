@@ -1552,13 +1552,101 @@ impl Library {
     /// Saca una pista de la biblioteca sin borrar la fila: conserva historial
     /// (Wrapped), letra y fuentes. El audio sigue en disco. Es lo que hace el
     /// borrado rápido; para eliminar de verdad está [`delete_track`].
+    ///
+    /// También la saca de todas las listas: si se queda como `playlist_item`
+    /// oculta, esas listas conservan una entrada fantasma que nunca suena.
     pub fn remove_from_library(&mut self, key: &str) -> Result<()> {
         self.count_cache.set(None);
         self.ready_cache.set(None);
         *self.playlists_cache.borrow_mut() = None;
-        self.conn
-            .execute("UPDATE track SET hidden = 1 WHERE key = ?1", params![key])?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM playlist_item
+             WHERE track_id = (SELECT id FROM track WHERE key = ?1)",
+            params![key],
+        )?;
+        tx.execute("UPDATE track SET hidden = 1 WHERE key = ?1", params![key])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Oculta varias pistas de golpe (listas y discos) y las saca de todas
+    /// las listas. Devuelve cuántas seguían visibles.
+    pub fn hide_tracks(&mut self, keys: &[String]) -> Result<usize> {
+        self.count_cache.set(None);
+        self.ready_cache.set(None);
+        *self.playlists_cache.borrow_mut() = None;
+        let mut seen = std::collections::HashSet::new();
+        let tx = self.conn.transaction()?;
+        let mut hidden = 0usize;
+        for key in keys {
+            if !seen.insert(key.as_str()) {
+                continue;
+            }
+            tx.execute(
+                "DELETE FROM playlist_item
+                 WHERE track_id = (SELECT id FROM track WHERE key = ?1)",
+                params![key],
+            )?;
+            hidden += tx.execute(
+                "UPDATE track SET hidden = 1 WHERE key = ?1 AND hidden = 0",
+                params![key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(hidden)
+    }
+
+    /// Claves visibles de una lista, en su orden.
+    pub fn playlist_track_keys(&self, playlist_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT t.key FROM playlist_item i
+               JOIN track t ON t.id = i.track_id
+               WHERE i.playlist_id = ?1 AND t.hidden = 0
+               ORDER BY i.position"#,
+        )?;
+        let keys = stmt
+            .query_map(params![playlist_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(keys)
+    }
+
+    /// Borra una lista y, si `remove_tracks`, saca de la biblioteca todas sus
+    /// canciones. Devuelve las claves ocultadas para que la UI corte la cola
+    /// y la reproducción en curso.
+    pub fn delete_playlist_with_tracks(
+        &mut self,
+        playlist_id: i64,
+        remove_tracks: bool,
+    ) -> Result<Vec<String>> {
+        let keys = if remove_tracks {
+            self.playlist_track_keys(playlist_id)?
+        } else {
+            Vec::new()
+        };
+        self.delete_playlist(playlist_id)?;
+        if remove_tracks && !keys.is_empty() {
+            self.hide_tracks(&keys)?;
+        }
+        Ok(keys)
+    }
+
+    /// Oculta todas las pistas visibles de un disco. Devuelve sus claves.
+    pub fn hide_album(&mut self, album: &str, artist: &str) -> Result<Vec<String>> {
+        let keys: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT key FROM track
+                 WHERE album = ?1 AND artist = ?2 AND hidden = 0",
+            )?;
+            let keys = stmt
+                .query_map(params![album, artist], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            keys
+        };
+        if !keys.is_empty() {
+            self.hide_tracks(&keys)?;
+        }
+        Ok(keys)
     }
 
     /// Borra una pista de la biblioteca (fuentes, listas, letras y eventos
@@ -1745,6 +1833,68 @@ mod tests {
         assert_eq!(lib.wrapped_stats(true).unwrap().plays, 1);
         // Volver a importarla/reproducirla la devuelve a la biblioteca.
         lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
+        assert_eq!(lib.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn hide_track_drops_it_from_playlists() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
+        let list = lib.create_playlist("List").unwrap();
+        lib.add_to_playlist(list, "k").unwrap();
+        lib.remove_from_library("k").unwrap();
+        assert_eq!(lib.count().unwrap(), 0);
+        assert!(lib.playlist_tracks(list).unwrap().is_empty());
+        assert!(lib.playlist_track_keys(list).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hide_tracks_is_idempotent_and_hide_album_only_touches_that_album() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let mut one = track("k1", "One", "Artist");
+        one.album = Some("Album".into());
+        let mut two = track("k2", "Two", "Artist");
+        two.album = Some("Album".into());
+        let mut other = track("k3", "Three", "Artist");
+        other.album = Some("Otro".into());
+        for item in [&one, &two, &other] {
+            lib.upsert_track(item).unwrap();
+        }
+        let keys = lib.hide_album("Album", "Artist").unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(lib.count().unwrap(), 1);
+        assert!(lib.track_by_key("k1").unwrap().is_some());
+        assert!(lib
+            .all_tracks(10)
+            .unwrap()
+            .iter()
+            .all(|row| row.track.key == "k3"));
+        assert_eq!(lib.hide_tracks(&keys).unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_playlist_with_tracks_hides_them() {
+        let mut lib = Library::open_in_memory().unwrap();
+        for key in ["k1", "k2", "k3"] {
+            lib.upsert_track(&track(key, key, "Artist")).unwrap();
+        }
+        let list = lib.create_playlist("List").unwrap();
+        lib.add_to_playlist(list, "k1").unwrap();
+        lib.add_to_playlist(list, "k2").unwrap();
+        let keys = lib.delete_playlist_with_tracks(list, true).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(lib.playlist(list).unwrap().is_none());
+        assert_eq!(lib.count().unwrap(), 1);
+        assert!(lib
+            .all_tracks(10)
+            .unwrap()
+            .iter()
+            .all(|row| row.track.key == "k3"));
+        // La lista de la que se conservan canciones no las oculta.
+        let keep = lib.create_playlist("Keep").unwrap();
+        lib.add_to_playlist(keep, "k3").unwrap();
+        let keys = lib.delete_playlist_with_tracks(keep, false).unwrap();
+        assert!(keys.is_empty());
         assert_eq!(lib.count().unwrap(), 1);
     }
 

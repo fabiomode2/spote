@@ -74,32 +74,114 @@ impl App {
                 KeyCode::Char(c) => self.import_input.push(c),
                 _ => {}
             },
-            Overlay::ConfirmDeletePlaylist { id, .. } => match key.code {
+            Overlay::ConfirmDeletePlaylist {
+                id,
+                name,
+                tracks,
+                remove_tracks,
+            } => match key.code {
                 KeyCode::Esc => self.overlay = Overlay::None,
+                KeyCode::Char('t' | 'T') => {
+                    self.overlay = Overlay::ConfirmDeletePlaylist {
+                        id,
+                        name,
+                        tracks,
+                        remove_tracks: !remove_tracks,
+                    };
+                }
                 KeyCode::Enter => {
-                    if let Err(err) = self.lib.delete_playlist(id) {
-                        self.toast(format!("no pude borrar la lista: {err}"), ToastKind::Error);
-                    } else {
-                        if self.lib_filter == LibFilter::Playlist(id) {
-                            self.lib_filter = LibFilter::All;
+                    match self.lib.delete_playlist_with_tracks(id, remove_tracks) {
+                        Ok(keys) => {
+                            if self.lib_filter == LibFilter::Playlist(id) {
+                                self.lib_filter = LibFilter::All;
+                            }
+                            if remove_tracks && !keys.is_empty() {
+                                self.cleanup_hidden_keys(&keys);
+                                let songs = if keys.len() == 1 {
+                                    "1 canción".to_string()
+                                } else {
+                                    format!("{} canciones", keys.len())
+                                };
+                                self.toast(
+                                    format!("lista borrada · {songs} fuera de la biblioteca"),
+                                    ToastKind::Ok,
+                                );
+                            } else {
+                                self.refresh_library();
+                                self.toast(
+                                    if remove_tracks {
+                                        "lista borrada · no quedaban canciones"
+                                    } else {
+                                        "lista borrada · canciones conservadas"
+                                    },
+                                    ToastKind::Ok,
+                                );
+                            }
                         }
-                        self.refresh_view();
-                        self.toast("lista borrada", ToastKind::Ok);
+                        Err(err) => {
+                            self.toast(format!("no pude borrar la lista: {err}"), ToastKind::Error)
+                        }
                     }
                     self.overlay = Overlay::None;
                 }
                 _ => {}
             },
-            Overlay::AddToPlaylist { key: track_key, selected } => match key.code {
+            Overlay::ConfirmDeleteAlbum { album, artist, .. } => match key.code {
+                KeyCode::Esc => self.overlay = Overlay::None,
+                KeyCode::Enter => {
+                    match self.lib.hide_album(&album, &artist) {
+                        Ok(keys) => {
+                            if keys.is_empty() {
+                                self.refresh_library();
+                                self.toast(
+                                    "el disco ya no estaba en la biblioteca",
+                                    ToastKind::Warn,
+                                );
+                            } else {
+                                if self.album_open.as_ref().is_some_and(|open| {
+                                    open.album == album && open.artist == artist
+                                }) {
+                                    self.close_album();
+                                }
+                                self.cleanup_hidden_keys(&keys);
+                                let songs = if keys.len() == 1 {
+                                    "1 canción".to_string()
+                                } else {
+                                    format!("{} canciones", keys.len())
+                                };
+                                self.toast(
+                                    format!("disco quitado · {songs} fuera de la biblioteca"),
+                                    ToastKind::Ok,
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            self.toast(format!("no pude quitar el disco: {err}"), ToastKind::Error)
+                        }
+                    }
+                    self.overlay = Overlay::None;
+                }
+                _ => {}
+            },
+            Overlay::AddToPlaylist {
+                key: track_key,
+                selected,
+            } => match key.code {
                 KeyCode::Esc => self.overlay = Overlay::None,
                 KeyCode::Up | KeyCode::Char('k') => {
                     let selected = selected.saturating_sub(1);
-                    self.overlay = Overlay::AddToPlaylist { key: track_key, selected };
+                    self.overlay = Overlay::AddToPlaylist {
+                        key: track_key,
+                        selected,
+                    };
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let len = self.lib.playlists().map(|lists| lists.len()).unwrap_or(0);
                     let selected = (selected + 1).min(len.saturating_sub(1));
-                    self.overlay = Overlay::AddToPlaylist { key: track_key, selected };
+                    self.overlay = Overlay::AddToPlaylist {
+                        key: track_key,
+                        selected,
+                    };
                 }
                 KeyCode::Enter => {
                     if let Ok(lists) = self.lib.playlists() {
@@ -107,10 +189,7 @@ impl App {
                             if let Err(err) = self.lib.add_to_playlist(list.id, &track_key) {
                                 self.toast(format!("no pude añadir: {err}"), ToastKind::Error);
                             } else {
-                                self.toast(
-                                    format!("añadida a '{}'", list.name),
-                                    ToastKind::Ok,
-                                );
+                                self.toast(format!("añadida a '{}'", list.name), ToastKind::Ok);
                                 self.refresh_view();
                             }
                         }
@@ -121,7 +200,6 @@ impl App {
             },
         }
     }
-
 
     fn commit_playlist_form(&mut self) {
         let name = self.playlist_form.name.trim().to_string();
@@ -149,7 +227,6 @@ impl App {
             Err(err) => self.toast(format!("no pude crear la lista: {err}"), ToastKind::Error),
         }
     }
-
 
     fn commit_import_playlist(&mut self) {
         let input = self.import_input.trim().to_string();
@@ -182,35 +259,39 @@ impl App {
         }
     }
 
-
     pub fn open_playlist_form(&mut self) {
         self.playlist_form = PlaylistForm::default();
         self.overlay = Overlay::PlaylistForm;
     }
-
 
     pub fn open_import_playlist(&mut self) {
         self.import_input.clear();
         self.overlay = Overlay::ImportPlaylist;
     }
 
-
     pub fn open_add_to_playlist(&mut self) {
         let Some(key) = self.context_key() else {
-            self.toast("selecciona una pista para añadirla a una lista", ToastKind::Warn);
+            self.toast(
+                "selecciona una pista para añadirla a una lista",
+                ToastKind::Warn,
+            );
             return;
         };
         if !self.ensure_track_key(&key) {
             self.toast("no encuentro esa pista en la biblioteca", ToastKind::Warn);
             return;
         }
-        if self.lib.playlists().map(|lists| lists.is_empty()).unwrap_or(true) {
+        if self
+            .lib
+            .playlists()
+            .map(|lists| lists.is_empty())
+            .unwrap_or(true)
+        {
             self.toast("no hay listas: crea una con N", ToastKind::Warn);
             return;
         }
         self.overlay = Overlay::AddToPlaylist { key, selected: 0 };
     }
-
 
     pub fn open_delete_playlist(&mut self) {
         let LibFilter::Playlist(id) = self.lib_filter else {
@@ -224,7 +305,16 @@ impl App {
             .flatten()
             .map(|list| list.name)
             .unwrap_or_else(|| "esta lista".into());
-        self.overlay = Overlay::ConfirmDeletePlaylist { id, name };
+        let tracks = self
+            .lib
+            .playlist_track_keys(id)
+            .map(|keys| keys.len())
+            .unwrap_or(0);
+        self.overlay = Overlay::ConfirmDeletePlaylist {
+            id,
+            name,
+            tracks,
+            remove_tracks: true,
+        };
     }
-
 }

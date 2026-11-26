@@ -328,6 +328,7 @@ impl App {
             }
             Action::SettingsRow(index) => {
                 self.settings_selected = index.min(SettingRow::ALL.len() - 1);
+                self.settings_search_focus = false;
                 self.tab = Tab::Settings;
             }
             Action::SettingsAdjust(row, delta) => self.adjust_setting(row, delta),
@@ -337,6 +338,7 @@ impl App {
                 self.tab = tab;
                 self.lib_search_focus = false;
                 self.album_search_focus = false;
+                self.settings_search_focus = false;
                 self.needs_redraw = true;
                 if tab != Tab::Library {
                     self.lib_filter = LibFilter::All;
@@ -544,6 +546,12 @@ impl App {
             Action::AlbumSearch => {
                 self.tab = Tab::Albums;
                 self.album_search_focus = true;
+                self.focus = Pane::Center;
+                self.needs_redraw = true;
+            }
+            Action::SettingsSearch => {
+                self.tab = Tab::Settings;
+                self.settings_search_focus = true;
                 self.focus = Pane::Center;
                 self.needs_redraw = true;
             }

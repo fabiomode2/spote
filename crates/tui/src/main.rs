@@ -335,6 +335,11 @@ fn run_import(args: &Args) -> Result<()> {
     let Some(target) = args.rest.first() else {
         anyhow::bail!("uso: spote import <url-o-uri-de-spotify> [--download] [--dry-run]");
     };
+    let cfg = Config::load();
+    spote_core::stream::configure_ytdlp_auth(
+        &cfg.stream.cookies_from_browser,
+        &cfg.stream.cookies_file,
+    );
 
     println!("resolviendo catálogo de Spotify …");
     let catalog = catalog::fetch(target)?;
@@ -382,7 +387,16 @@ fn run_import(args: &Args) -> Result<()> {
             .find(|p| p.name == catalog.name)
         {
             Some(existing) => existing.id,
-            None => lib.create_playlist(&catalog.name)?,
+            None => {
+                // Marca los álbumes importados para que la navegación de
+                // biblioteca no los confunda con listas de usuario.
+                let description = if catalog.kind == "album" {
+                    "álbum importado"
+                } else {
+                    ""
+                };
+                lib.create_playlist_full(&catalog.name, description, None, None)?
+            }
         };
         for track in &refs {
             lib.upsert_track(track)?;
@@ -787,6 +801,10 @@ fn run_tui(args: Args) -> Result<()> {
     init_tracing();
 
     let mut cfg = Config::load();
+    spote_core::stream::configure_ytdlp_auth(
+        &cfg.stream.cookies_from_browser,
+        &cfg.stream.cookies_file,
+    );
     if args.follow {
         cfg.ui.follow_spotify = true;
     }

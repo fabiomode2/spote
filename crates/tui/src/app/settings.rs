@@ -67,6 +67,56 @@ impl App {
     }
 
 
+    /// Índices de `SettingRow::ALL` que pasan el filtro actual. Se busca en
+    /// etiqueta, sección y ayuda para que «bpm», «arte» o «volumen» encuentren
+    /// la fila aunque la palabra no esté en el título.
+    pub fn settings_visible(&self) -> Vec<usize> {
+        let query = util::normalize(self.settings_query.trim());
+        SettingRow::ALL
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                if query.is_empty() {
+                    return Some(index);
+                }
+                let haystack = util::normalize(&format!(
+                    "{} {} {}",
+                    row.label(),
+                    row.section(),
+                    row.hint()
+                ));
+                haystack.contains(&query).then_some(index)
+            })
+            .collect()
+    }
+
+    /// Mueve la selección entre las filas visibles, no entre todas.
+    pub fn settings_move(&mut self, delta: i32) {
+        let visible = self.settings_visible();
+        if visible.is_empty() {
+            return;
+        }
+        let position = visible
+            .iter()
+            .position(|index| *index == self.settings_selected);
+        let next = match position {
+            Some(position) => {
+                (position as i32 + delta).clamp(0, visible.len() as i32 - 1) as usize
+            }
+            None if delta < 0 => visible.len() - 1,
+            None => 0,
+        };
+        self.settings_selected = visible[next];
+    }
+
+    /// Si el filtro deja fuera la fila seleccionada, cae en la primera visible.
+    pub fn settings_clamp_selection(&mut self) {
+        let visible = self.settings_visible();
+        if !visible.is_empty() && !visible.contains(&self.settings_selected) {
+            self.settings_selected = visible[0];
+        }
+    }
+
     pub fn adjust_setting(&mut self, row: usize, delta: i32) {
         let Some(setting) = SettingRow::from_index(row) else {
             return;

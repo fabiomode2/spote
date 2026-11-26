@@ -43,15 +43,58 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
     text_at(
         buf,
         Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1),
-        "enter para cambiar",
+        if app.settings_search_focus {
+            "escribe para filtrar · enter cierra"
+        } else {
+            "enter para cambiar · / buscar"
+        },
         Style::new().fg(color(pal.dim)),
         Alignment::Right,
     );
 
+    // Buscador inline: mismo lenguaje que discos/biblioteca.
+    let search = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    fill(
+        buf,
+        search,
+        if app.settings_search_focus {
+            pal.surface_alt
+        } else {
+            pal.surface
+        },
+    );
+    let mut search_text = if app.settings_query.is_empty() {
+        "buscar ajustes…  ( / )".to_string()
+    } else {
+        format!("⌕ {}", app.settings_query)
+    };
+    if app.settings_search_focus {
+        search_text.push('▏');
+    }
+    truncate_chars(&mut search_text, search.width.saturating_sub(1) as usize);
+    text_at(
+        buf,
+        search,
+        search_text,
+        Style::new().fg(color(if app.settings_search_focus {
+            pal.text
+        } else if app.settings_query.is_empty() {
+            pal.dim
+        } else {
+            pal.primary
+        })),
+        Alignment::Left,
+    );
+    app.hit.add(search, Action::SettingsSearch);
+
     let rows = app.settings_rows();
+    let visible = app.settings_visible();
     let mut items: Vec<Item> = Vec::new();
     let mut last_section = "";
-    for (index, (label, value)) in rows.iter().enumerate() {
+    for &index in &visible {
+        let Some((label, value)) = rows.get(index) else {
+            continue;
+        };
         let Some(setting) = app.setting_at(index) else {
             continue;
         };
@@ -62,6 +105,24 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
         }
         items.push(Item::Row(index, label, value, setting));
     }
+    // Con el filtro vacío no hay selección posible: mensaje y salida.
+    if items.is_empty() {
+        text_at(
+            buf,
+            Rect::new(inner.x + 1, inner.y + 4, inner.width.saturating_sub(2), 1),
+            "sin ajustes para esa búsqueda",
+            Style::new().fg(color(pal.muted)),
+            Alignment::Center,
+        );
+        text_at(
+            buf,
+            Rect::new(inner.x + 1, inner.y + 5, inner.width.saturating_sub(2), 1),
+            "esc limpia · / busca otra cosa",
+            Style::new().fg(color(pal.dim)),
+            Alignment::Center,
+        );
+        return;
+    }
 
     // Altura de cada elemento: las secciones llevan aire arriba; las filas
     // ocupan una línea y dejan una de separación.
@@ -71,8 +132,9 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
         .position(|item| matches!(item, Item::Row(index, _, _, _) if *index == app.settings_selected))
         .unwrap_or(0);
     let footer_h = 4u16;
+    let list_top = inner.y + 3;
     let list_bottom = inner.y + inner.height.saturating_sub(footer_h);
-    let list_h = list_bottom.saturating_sub(inner.y + 2);
+    let list_h = list_bottom.saturating_sub(list_top);
     let mut first = 0usize;
     loop {
         let mut used = 0u16;
@@ -93,7 +155,7 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
         first += 1;
     }
 
-    let mut y = inner.y + 2;
+    let mut y = list_top;
     let mut rows_drawn = 0usize;
     for (position, item) in items.iter().enumerate().skip(first) {
         let _ = position;
@@ -220,20 +282,20 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
     }
 
     // Barra de scroll: pequeña, a la derecha, solo si no cabe todo.
-    if first > 0 || rows_drawn < rows.len() {
+    if first > 0 || rows_drawn < visible.len() {
         let track = Rect::new(
             inner.x + inner.width.saturating_sub(1),
-            inner.y + 2,
+            list_top,
             1,
-            list_bottom.saturating_sub(inner.y + 2),
+            list_bottom.saturating_sub(list_top),
         );
         if track.height == 0 {
             return;
         }
-        let total = rows.len().max(1);
+        let total = visible.len().max(1);
         let thumb_h = ((track.height as usize * rows_drawn.max(1)) / total)
             .clamp(1, track.height as usize) as u16;
-        let max_first = rows.len().saturating_sub(rows_drawn);
+        let max_first = visible.len().saturating_sub(rows_drawn);
         let thumb_y = if max_first == 0 {
             0
         } else {
@@ -278,7 +340,7 @@ pub(super) fn draw_settings(app: &mut App, buf: &mut Buffer, layout: &Layout, pa
         buf,
         footer.x + 2,
         footer.y + 1,
-        "↑↓ mover   ←→ cambiar   enter alternar   E diseño   ? ayuda",
+        "↑↓ mover   ←→ cambiar   enter alternar   / buscar   E diseño   ? ayuda",
         color(pal.dim),
         None,
     );

@@ -15,6 +15,7 @@ pub struct Config {
     pub playback: PlaybackCfg,
     pub ui: UiCfg,
     pub download: DownloadCfg,
+    pub stream: StreamCfg,
     pub lyrics: LyricsCfg,
     pub discord: DiscordCfg,
     /// EQ, preamp, normalizador y limitador aplicados en caliente a mpv.
@@ -32,6 +33,27 @@ impl Default for AppCfg {
     fn default() -> Self {
         Self {
             name: "spote".to_string(),
+        }
+    }
+}
+
+/// Opciones de red para yt-dlp (streaming y descargas).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StreamCfg {
+    /// Navegador del que yt-dlp toma las cookies (`firefox`, `chrome`,
+    /// `brave`, `chromium`, `edge`…). Vacío: sin cookies.
+    pub cookies_from_browser: String,
+    /// Fichero `cookies.txt` exportado. Si no está vacío tiene prioridad
+    /// sobre `cookies_from_browser`.
+    pub cookies_file: String,
+}
+
+impl Default for StreamCfg {
+    fn default() -> Self {
+        Self {
+            cookies_from_browser: String::new(),
+            cookies_file: String::new(),
         }
     }
 }

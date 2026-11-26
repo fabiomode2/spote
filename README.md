@@ -59,8 +59,11 @@ la propia TUI.
 - **Discos guardados**: pestaña `discos` con todos los álbumes de la
   biblioteca agrupados por artista, portadas y un buscador propio (`/`).
   `X` o ⇧clic en la × oculta una pista de la biblioteca sin borrar el audio
-  ni su historial; en favoritas quita el corazón. `spote dedupe` fusiona
-  duplicados de forma explícita, con `--dry-run` y backup previo.
+  ni su historial; en favoritas quita el corazón. `d` sobre una lista y `X`
+  sobre un disco piden confirmación y quitan **todas sus canciones** de la
+  biblioteca (el audio sigue en disco); en la lista, `t` permite conservarlas.
+  `spote dedupe` fusiona duplicados de forma explícita, con `--dry-run` y
+  backup previo.
 - **Wrapped**: `W` abre un resumen de escucha con horas, reproducciones,
   artistas, canciones, discos y actividad por meses. `a` alterna entre el
   año actual y todo el tiempo. Manteniendo `shift` aparece una `×` en cada
@@ -78,6 +81,10 @@ la propia TUI.
   el audio completo y deja todas las canciones al mismo volumen; se aplica en
   caliente y se puede apagar desde la propia pestaña o desde ajustes. Dentro de
   la pestaña, `←`/`→` cambia de control y `↑`/`↓` ajusta el valor.
+- **Amigos y Tunebat**: el panel de amigos muestra, además de la presencia,
+  los datos de **Tunebat** de la pista sonando: BPM, tonalidad, Camelot,
+  energy, danceability, happiness y popularidad. Se consulta solo al cambiar
+  de canción, se cachea en memoria y tiene respaldo compacto en paneles bajos.
 - **Salas**: `spoted` añade presencia, chat y cola compartida. La API exige una
   clave de cliente por persona (`X-Spote-Key`), las sesiones están atadas a esa
   clave y caducan. Ver [`docs/social.md`](docs/social.md).
@@ -85,7 +92,14 @@ la propia TUI.
   `spoted` sincroniza favoritas, escuchas y playlists por revisiones, sin subir
   audio ni rutas locales.
 - **Layout**: `E` edita paneles, anchos, dock y tamaños. Se guarda solo en
-  `config.toml`.
+  `config.toml`. En **ajustes**, `/` abre un buscador inline por nombre,
+  sección o ayuda, igual que en discos y biblioteca.
+
+Los vídeos con verificación de edad necesitan una cuenta de YouTube ya
+verificada. Si configuras `[stream] cookies_from_browser`, spote reintenta el
+streaming y la descarga con las cookies de ese navegador. Para este tipo de
+vídeos también hace falta tener la edad verificada en la cuenta; sin eso
+YouTube no entrega ningún formato.
 
 ## Atajos
 
@@ -94,7 +108,7 @@ la propia TUI.
 | `space` | play/pausa | `a` | encolar |
 | `n` / `p` | siguiente / anterior | `f` | favorita |
 | `←` `→` | seek ±5 s | `g` | artista |
-| `/` | buscar · filtro en biblioteca | `T` | recortar intro/outro |
+| `/` | buscar · filtro en biblioteca, discos o ajustes | `T` | recortar intro/outro |
 | `u` | bucle de la pista | `F` | portada a pantalla completa |
 | `S` | aleatorio on/off | `o` | bucle: off / todo / una |
 | `c` / `C` | portada / letra | `V` | visualizador a pantalla completa |
@@ -140,6 +154,10 @@ mosaic_beat = true     # salta con el bombo
 [player]
 streaming = true       # resuelve YouTube y suena mientras descarga
 stream_cache = true    # guarda la copia local al terminar (tras unos segundos de escucha)
+
+[stream]
+cookies_from_browser = ""  # firefox | chrome | brave | chromium | edge
+cookies_file = ""          # cookies.txt exportado; tiene prioridad si no está vacío
 
 [playback]
 repeat = "off"         # off | all | one

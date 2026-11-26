@@ -29,6 +29,7 @@ pub mod stream;
 pub mod spotify_api;
 #[cfg(feature = "desktop")]
 pub mod system_media;
+pub mod tunebat;
 pub mod util;
 
 pub use spote_protocol as protocol;

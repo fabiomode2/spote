@@ -467,6 +467,14 @@ impl App {
                             label: "bajar álbum",
                         },
                         Hint {
+                            key: "x",
+                            label: "quitar pista",
+                        },
+                        Hint {
+                            key: "X",
+                            label: "quitar disco",
+                        },
+                        Hint {
                             key: "s",
                             label: "guardar lista",
                         },
@@ -492,6 +500,10 @@ impl App {
                         Hint {
                             key: "d",
                             label: "bajar todo",
+                        },
+                        Hint {
+                            key: "X",
+                            label: "quitar disco",
                         },
                         Hint {
                             key: "s",
