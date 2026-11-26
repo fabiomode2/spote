@@ -13,9 +13,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -23,14 +25,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.spote.app.model.Album
+import dev.spote.app.model.ArtistProfile
 import dev.spote.app.model.PlayerState
 import dev.spote.app.model.Track
+import dev.spote.app.rust.coverFor
 import dev.spote.app.ui.components.AlbumCard
 import dev.spote.app.ui.components.AppBackground
 import dev.spote.app.ui.components.CoverArt
 import dev.spote.app.ui.components.EmptyState
 import dev.spote.app.ui.components.PlayButton
 import dev.spote.app.ui.components.SectionHeader
+import dev.spote.app.ui.components.SpoteChip
 import dev.spote.app.ui.components.TopBar
 import dev.spote.app.ui.components.TrackRow
 import dev.spote.app.ui.theme.LocalSpoteColors
@@ -45,14 +50,25 @@ fun ArtistScreen(
     onPlayTrack: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onMore: (Track) -> Unit,
+    profile: ArtistProfile? = null,
+    loading: Boolean = false,
+    error: String? = null,
+    onRetry: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
-    val sorted = tracks.sortedByDescending { it.durationMs }
-    val cover = albums.firstOrNull()?.cover ?: tracks.firstOrNull()?.cover
+    val cover = profile?.artist?.imageUrl?.let {
+        coverFor(name, null, it)
+    } ?: albums.firstOrNull()?.cover ?: tracks.firstOrNull()?.cover
+    val sorted = tracks
     val totalMs = tracks.sumOf { it.durationMs }
+    val followers = profile?.artist?.followers ?: 0L
+    val genres = profile?.genres.orEmpty()
 
-    AppBackground(accentStart = cover?.start ?: colors.coverStart) {
+    AppBackground(
+        accentStart = cover?.start ?: colors.coverStart,
+        cover = cover,
+    ) {
         LazyColumn(
             modifier = modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 28.dp),
@@ -70,7 +86,7 @@ fun ArtistScreen(
                         CoverArt(
                             cover = cover,
                             size = 132.dp,
-                            corner = 18.dp,
+                            corner = 66.dp,
                             labelSize = 34.sp,
                         )
                     }
@@ -92,50 +108,121 @@ fun ArtistScreen(
                         )
                         Text(
                             text = buildString {
-                                append("${tracks.size} canciones")
-                                if (albums.isNotEmpty()) append(" · ${albums.size} álbumes")
-                                if (totalMs > 0L) append(" · ${formatTotal(totalMs)}")
+                                if (followers > 0L) {
+                                    append("${formatFollowers(followers)} seguidores")
+                                }
+                                if (tracks.isNotEmpty()) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append("${tracks.size} canciones")
+                                }
+                                if (albums.isNotEmpty()) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append("${albums.size} álbumes")
+                                }
+                                if (totalMs > 0L) {
+                                    if (isNotEmpty()) append(" · ")
+                                    append(formatTotal(totalMs))
+                                }
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (genres.isNotEmpty()) {
+                            Text(
+                                text = genres.take(3).joinToString(" · "),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         Spacer(Modifier.height(6.dp))
-                        PlayButton(
-                            isPlaying = false,
-                            onClick = { sorted.firstOrNull()?.let(onPlayTrack) },
-                            size = 46.dp,
-                        )
-                    }
-                }
-            }
-
-            if (tracks.isEmpty()) {
-                item(key = "empty") {
-                    EmptyState(
-                        icon = Icons.Rounded.Search,
-                        title = "Sin canciones",
-                        text = "Este artista no tiene pistas en tu biblioteca ni en el catálogo.",
-                    )
-                }
-            } else {
-                if (albums.isNotEmpty()) {
-                    item(key = "albums-title") { SectionHeader(title = "Álbumes") }
-                    item(key = "albums") {
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 20.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            items(albums, key = { it.id }) { album ->
-                                AlbumCard(
-                                    album = album,
-                                    onClick = { onOpenAlbum(album) },
-                                    width = 148.dp,
+                            PlayButton(
+                                isPlaying = player.track != null && tracks.any {
+                                    it.key == player.track?.key
+                                } && player.isPlaying,
+                                onClick = { sorted.firstOrNull()?.let(onPlayTrack) },
+                                size = 46.dp,
+                            )
+                            if (loading) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    color = colors.accent,
+                                    modifier = Modifier.height(18.dp),
                                 )
                             }
                         }
                     }
                 }
-                item(key = "tracks-title") { SectionHeader(title = "Canciones") }
+            }
+
+            if (error != null && tracks.isEmpty() && albums.isEmpty()) {
+                item(key = "error") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 22.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = "No se pudo cargar el perfil",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                        )
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = onRetry) {
+                            androidx.compose.material3.Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text("Reintentar")
+                        }
+                    }
+                }
+            }
+
+            if (profile?.bio?.isNotBlank() == true) {
+                item(key = "bio") {
+                    Text(
+                        text = profile.bio.orEmpty(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 6.dp),
+                    )
+                }
+            }
+
+            if (albums.isNotEmpty()) {
+                item(key = "albums-title") { SectionHeader(title = "Discografía") }
+                item(key = "albums") {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 20.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        items(albums, key = { it.id }) { album ->
+                            AlbumCard(
+                                album = album,
+                                onClick = { onOpenAlbum(album) },
+                                width = 148.dp,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (sorted.isNotEmpty()) {
+                item(key = "tracks-title") { SectionHeader(title = "Populares") }
                 items(sorted, key = { it.key }) { track ->
                     TrackRow(
                         track = track,
@@ -145,9 +232,23 @@ fun ArtistScreen(
                         showAlbum = true,
                     )
                 }
+            } else if (!loading) {
+                item(key = "empty") {
+                    EmptyState(
+                        icon = Icons.Rounded.Refresh,
+                        title = "Sin canciones",
+                        text = "Este artista no tiene pistas en tu biblioteca ni en el catálogo.",
+                    )
+                }
             }
         }
     }
+}
+
+private fun formatFollowers(value: Long): String = when {
+    value >= 1_000_000L -> "%.1f M".format(value / 1_000_000.0)
+    value >= 1_000L -> "%.1f mil".format(value / 1_000.0)
+    else -> value.toString()
 }
 
 private fun formatTotal(ms: Long): String {

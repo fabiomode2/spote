@@ -51,7 +51,10 @@ fun LyricsScreen(
         }
     }
 
-    AppBackground(accentStart = track.cover.start) {
+    AppBackground(
+        accentStart = track.cover.start,
+        cover = track.cover,
+    ) {
         Column(modifier = modifier.fillMaxSize()) {
             TopBar(title = "Letra", onBack = onBack)
             Row(

@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import dev.spote.app.model.CoverPalette
 
 @Immutable
 data class SpoteColors(
@@ -64,4 +65,20 @@ fun SpoteColors.tintedWith(start: Color, end: Color): SpoteColors = copy(
     accentInk = if (start.luminance() > 0.55f) Color(0xFF0B0F02) else Color.White,
     coverStart = start,
     coverEnd = end,
+)
+
+/** Tema de spote con las superficies y acentos de la portada (paleta del core). */
+fun SpoteColors.withCoverPalette(palette: CoverPalette): SpoteColors = copy(
+    accent = palette.primary,
+    accentInk = if (palette.primary.luminance() > 0.55f) Color(0xFF0B0F02) else Color.White,
+    background = palette.background,
+    surface = palette.surface,
+    surfaceHigh = palette.surfaceHigh,
+    onBackground = palette.text,
+    onSurfaceVariant = palette.muted,
+    outline = palette.outline,
+    coverStart = palette.primary,
+    coverEnd = palette.secondary,
+    success = palette.success,
+    danger = palette.danger,
 )

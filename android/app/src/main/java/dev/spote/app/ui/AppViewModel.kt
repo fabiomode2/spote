@@ -9,8 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.spote.app.BuildConfig
 import dev.spote.app.artwork.ArtworkResolver
-import dev.spote.app.data.CatalogResult
-import dev.spote.app.data.DeezerCatalog
+import dev.spote.app.artwork.CoverPalettes
 import dev.spote.app.data.FavoriteStore
 import dev.spote.app.data.MockData
 import dev.spote.app.data.EmptySpoteRepository
@@ -22,6 +21,8 @@ import dev.spote.app.logging.ActionLog
 import dev.spote.app.lyrics.LyricsRepository
 import dev.spote.app.model.Album
 import dev.spote.app.model.AppUiState
+import dev.spote.app.model.Artist
+import dev.spote.app.model.ArtistProfile
 import dev.spote.app.model.DownloadStatus
 import dev.spote.app.model.DownloadUi
 import dev.spote.app.model.HomeState
@@ -43,6 +44,7 @@ import dev.spote.app.remote.RemoteTrack
 import dev.spote.app.remote.ResolvedAudio
 import dev.spote.app.rust.RustBridge
 import dev.spote.app.rust.coverFor
+import dev.spote.app.rust.toModel
 import java.io.File
 import java.net.URI
 import java.util.Locale
@@ -59,6 +61,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -72,6 +76,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     private val playback = PlaybackConnection(application)
     private val lyrics = LyricsRepository(application)
+    /** El catálogo del core es bloqueante y los proveedores limitan peticiones. */
+    private val catalogMutex = Mutex()
     private var lyricsJob: Job? = null
     private var lyricsKey: String? = null
     private var searchJob: Job? = null
@@ -87,8 +93,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val player: PlayerState,
     )
 
-    private val remoteCache = object : LinkedHashMap<String, CatalogResult>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, CatalogResult>): Boolean =
+    private data class RemoteCatalog(
+        val tracks: List<Track> = emptyList(),
+        val albums: List<Album> = emptyList(),
+        val artists: List<Artist> = emptyList(),
+    )
+
+    private suspend fun <T> withCatalog(block: () -> T): T =
+        withContext(Dispatchers.IO) { catalogMutex.withLock { block() } }
+
+    private val remoteCache = object : LinkedHashMap<String, RemoteCatalog>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RemoteCatalog>): Boolean =
             size > 40
     }
 
@@ -118,6 +133,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val messages: SharedFlow<String> = _messages.asSharedFlow()
 
     init {
+        CoverPalettes.init(application, bridge)
         SearchHistory.init(application)
         FavoriteStore.init(application)
         viewModelScope.launch {
@@ -170,20 +186,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 
-    fun setTab(tab: Tab) {
-        _state.update { it.copy(tab = tab) }
-    }
-
     fun setQuery(query: String) {
         searchJob?.cancel()
         remoteSearchJob?.cancel()
         val trimmed = query.trim()
         _state.update {
+            val changed = it.search.query.trim() != trimmed
             it.copy(
                 search = it.search.copy(
                     query = query,
                     remoteLoading = trimmed.length >= 2,
                     remoteError = null,
+                    remoteResults = if (changed) emptyList() else it.search.remoteResults,
+                    remoteAlbums = if (changed) emptyList() else it.search.remoteAlbums,
+                    remoteArtists = if (changed) emptyList() else it.search.remoteArtists,
                 ),
             )
         }
@@ -204,7 +220,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
-        if (trimmed.length < 2) return
+        if (trimmed.length < 2) {
+            _state.update {
+                it.copy(
+                    search = it.search.copy(
+                        remoteResults = emptyList(),
+                        remoteAlbums = emptyList(),
+                        remoteArtists = emptyList(),
+                        remoteLoading = false,
+                        remoteError = null,
+                    ),
+                )
+            }
+            return
+        }
 
         val normalized = trimmed.lowercase(Locale.ROOT)
         remoteCache[normalized]?.let { cached ->
@@ -216,6 +245,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         remoteAlbums = refreshed.albums,
                         remoteArtists = refreshed.artists,
                         remoteLoading = false,
+                        remoteError = null,
                     ),
                 )
             }
@@ -225,10 +255,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         remoteSearchJob = viewModelScope.launch {
             delay(350)
             if (_state.value.search.query.trim() != trimmed) return@launch
+            val engine = bridge
+            if (engine == null) {
+                _state.update { it.copy(search = it.search.copy(remoteLoading = false)) }
+                return@launch
+            }
             _state.update { it.copy(search = it.search.copy(remoteLoading = true)) }
             val startedAt = System.currentTimeMillis()
-            val result = runCatching { DeezerCatalog.search(trimmed, 25) }
-            val catalog = withFavorites(result.getOrDefault(CatalogResult()))
+            val result = runCatching {
+                withCatalog { engine.searchCatalog(trimmed, 20) }
+                    .toRemoteCatalog()
+            }
+            val catalog = withFavorites(result.getOrDefault(RemoteCatalog()))
             if (result.isSuccess) remoteCache[normalized] = catalog
             ActionLog.log(
                 "search.catalog",
@@ -254,7 +292,76 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun withFavorites(catalog: CatalogResult): CatalogResult {
+    private fun dev.spote.rust.CatalogSearchDto.toRemoteCatalog(): RemoteCatalog {
+        val mappedAlbums = albums.map { it.toModel() }
+        val extraAlbums = mutableListOf<Album>()
+        val mappedArtists = artists.map { it.toModel() }.toMutableList()
+
+        // Deezer/Spotify devuelven álbumes y artistas por búsqueda textual; si
+        // una pista trae un álbum que no salió en esa lista, se añade una
+        // ficha "lookup" para que el perfil se pueda abrir igualmente.
+        tracks.forEach { dto ->
+            val title = dto.album?.trim().orEmpty()
+            if (title.isNotEmpty()) {
+                val artist = dto.artistList.firstOrNull().orEmpty().ifBlank { dto.artists }
+                val exists = (extraAlbums + mappedAlbums).any { album ->
+                    val a = normalizeName(album.artist)
+                    val b = normalizeName(artist)
+                    normalizeName(album.title) == normalizeName(title) &&
+                        (a == b || a.contains(b) || b.contains(a))
+                }
+                if (!exists) {
+                    extraAlbums += Album(
+                        id = "lookup:${Uri.encode(title)}|${Uri.encode(artist)}",
+                        title = title,
+                        artist = artist,
+                        year = 0,
+                        cover = coverFor(title, null, dto.artUrl),
+                        tracks = emptyList(),
+                        provider = dto.provider,
+                        trackCount = 0,
+                    )
+                }
+            }
+            val names = dto.artistList.ifEmpty { listOf(dto.artists) }
+            names.forEach { name ->
+                if (name.isNotBlank() && mappedArtists.none { normalizeName(it.name) == normalizeName(name) }) {
+                    mappedArtists += Artist(
+                        id = "name:${normalizeName(name)}",
+                        name = name,
+                    )
+                }
+            }
+        }
+
+        val allAlbums = (extraAlbums + mappedAlbums).distinctBy { it.id }
+        val albumByKey = allAlbums.associateBy {
+            normalizeName(it.title) to normalizeName(it.artist)
+        }
+        val artistByName = mappedArtists.associateBy { normalizeName(it.name) }
+        val mappedTracks = tracks.map { dto ->
+            val model = dto.toModel()
+            val album = albumByKey[normalizeName(model.album.orEmpty()) to normalizeName(model.artist)]
+                ?: allAlbums.firstOrNull {
+                    normalizeName(it.title) == normalizeName(model.album.orEmpty())
+                }
+            val artistName = dto.artistList.firstOrNull().orEmpty().ifBlank { model.artist }
+            val artist = artistByName[normalizeName(artistName)]
+            model.copy(
+                albumProvider = album?.provider,
+                albumProviderId = album?.providerId,
+                artistProvider = artist?.provider,
+                artistProviderId = artist?.providerId,
+            )
+        }
+        return RemoteCatalog(
+            tracks = mappedTracks,
+            albums = allAlbums,
+            artists = mappedArtists.distinctBy { normalizeName(it.name) },
+        )
+    }
+
+    private fun withFavorites(catalog: RemoteCatalog): RemoteCatalog {
         if (catalog.tracks.isEmpty()) return catalog
         val tracks = catalog.tracks.map { track ->
             track.copy(favorite = FavoriteStore.isFavorite(track.key))
@@ -300,11 +407,300 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun album(id: String): Album? {
-        albumCache[id]?.let { return it }
         val current = _state.value
+        current.albumDetails[id]?.let { return it }
+        // Un álbum local completo siempre gana a la copia parcial de búsqueda.
+        if (id.startsWith("ralbum:") || id.startsWith("local:")) {
+            current.library.albums.firstOrNull { it.id == id }?.let { return it }
+        }
+        albumCache[id]?.let { return it }
         return current.library.albums.firstOrNull { it.id == id }
             ?: current.home.albums.firstOrNull { it.id == id }
+            ?: current.search.albums.firstOrNull { it.id == id }
+            ?: current.search.remoteAlbums.firstOrNull { it.id == id }
+            ?: current.albumDetails.values.firstOrNull { it.id == id }
     }
+
+    /**
+     * Carga un álbum bajo demanda. Los de catálogo piden la ficha completa al
+     * core (tracklist real); los locales se completan desde SQLite y, si se
+     * puede, se enriquecen con el catálogo.
+     */
+    fun loadAlbum(id: String) {
+        val current = _state.value
+        if (current.albumDetails.containsKey(id) || id in current.albumLoading) return
+        val cached = album(id)
+        if (cached != null && cached.tracks.isNotEmpty() && id.startsWith("catalog:")) {
+            albumCache[id] = cached
+            return
+        }
+        _state.update { it.copy(albumLoading = it.albumLoading + id) }
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) { loadAlbumBlocking(id) }
+            }
+            val album = result.getOrNull()
+            ActionLog.log(
+                "album.load",
+                "id" to id,
+                "tracks" to (album?.tracks?.size ?: 0),
+                "error" to result.exceptionOrNull()?.message,
+            )
+            _state.update { state ->
+                state.copy(
+                    albumDetails = if (album != null) {
+                        state.albumDetails + (id to album)
+                    } else {
+                        state.albumDetails
+                    },
+                    albumLoading = state.albumLoading - id,
+                    albumErrors = if (album == null) {
+                        state.albumErrors + (id to (result.exceptionOrNull()?.message ?: "No se encontró el álbum"))
+                    } else {
+                        state.albumErrors - id
+                    },
+                )
+            }
+            if (album != null) albumCache[id] = album
+        }
+    }
+
+    private suspend fun loadAlbumBlocking(id: String): Album {
+        if (id.startsWith("lookup:")) {
+            val parts = id.removePrefix("lookup:").split("|", limit = 2)
+            require(parts.size == 2) { "álbum inválido" }
+            val title = Uri.decode(parts[0])
+            val artist = Uri.decode(parts[1])
+            val current = _state.value
+            val dto = bridge?.let { engine ->
+                runCatching {
+                    withCatalog { engine.findAlbum(title, artist) }
+                }.getOrNull()
+            }
+            if (dto != null) {
+                val album = dto.toModel()
+                return album.copy(
+                    tracks = album.tracks.map { localizeTrack(it) },
+                    trackCount = album.tracks.size,
+                )
+            }
+            val key = normalizeName(artist)
+            val local = current.library.albums.firstOrNull {
+                val albumArtist = normalizeName(it.artist)
+                normalizeName(it.title) == normalizeName(title) &&
+                    (albumArtist == key || key.contains(albumArtist) || albumArtist.contains(key))
+            } ?: error("No se encontró el álbum")
+            val tracks = bridge?.albumTracks(local.title, local.artist)
+                ?.takeIf { it.isNotEmpty() }
+                ?: local.tracks
+            return local.copy(tracks = tracks, trackCount = tracks.size)
+        }
+
+        if (id.startsWith("catalog:")) {
+            val parts = id.removePrefix("catalog:").split(":", limit = 2)
+            require(parts.size == 2 && parts.all { it.isNotBlank() }) { "álbum de catálogo inválido" }
+            val engine = bridge ?: error("catálogo no disponible")
+            val dto = withCatalog { engine.albumInfo(parts[0], parts[1]) }
+            val album = dto.toModel()
+            return album.copy(
+                tracks = album.tracks.map { localizeTrack(it) },
+                trackCount = album.tracks.size,
+            )
+        }
+
+        val current = _state.value
+        val known = current.library.albums.firstOrNull { it.id == id }
+            ?: current.home.albums.firstOrNull { it.id == id }
+            ?: current.search.albums.firstOrNull { it.id == id }
+            ?: albumCache[id]
+            ?: error("No se encontró el álbum")
+        val variants = bridge?.albums()?.filter {
+            normalizeName(it.album) == normalizeName(known.title) &&
+                artistsMatch(it.artist, known.artist)
+        }.orEmpty()
+        val localTracks = variants
+            .flatMap { dto -> bridge?.albumTracks(dto.album, dto.artist).orEmpty() }
+            .distinctBy { it.key }
+            .ifEmpty {
+                bridge?.albumTracks(known.title, known.artist)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: known.tracks
+            }
+        val local = known.copy(
+            tracks = localTracks,
+            trackCount = localTracks.size.coerceAtLeast(known.trackCount),
+        )
+        val catalog = bridge?.let { engine ->
+            runCatching {
+                withCatalog { engine.findAlbum(local.title, local.artist) }
+            }.getOrNull()
+        }?.toModel()
+        return mergeAlbum(local, catalog)
+    }
+
+    private fun artistsMatch(a: String, b: String): Boolean {
+        val x = normalizeName(a)
+        val y = normalizeName(b)
+        return x == y || x.contains(y) || y.contains(x)
+    }
+
+    /** El catálogo manda en orden y metadatos; el archivo local manda al sonar. */
+    private fun mergeAlbum(local: Album, catalog: Album?): Album {
+        if (catalog == null) return local
+        val used = mutableSetOf<String>()
+        val merged = catalog.tracks.map { remote ->
+            val match = local.tracks.firstOrNull { sameSong(it, remote) }
+            if (match == null) {
+                localizeTrack(remote)
+            } else {
+                used += match.key
+                remote.copy(
+                    key = match.key,
+                    localPath = match.localPath,
+                    downloaded = match.downloaded,
+                    favorite = remote.favorite || match.favorite,
+                    cover = match.cover.localPath?.let { match.cover } ?: remote.cover,
+                )
+            }
+        } + local.tracks.filterNot { it.key in used }
+        return catalog.copy(
+            tracks = merged,
+            trackCount = merged.size,
+            cover = if (merged.any { it.cover.localPath != null }) {
+                merged.first { it.cover.localPath != null }.cover
+            } else {
+                catalog.cover
+            },
+        )
+    }
+
+    private fun sameSong(a: Track, b: Track): Boolean {
+        val titleSame = normalizeName(a.title) == normalizeName(b.title)
+        val artistA = normalizeName(a.artist)
+        val artistB = normalizeName(b.artist)
+        val artistSame = artistA == artistB ||
+            artistA.contains(artistB) ||
+            artistB.contains(artistA)
+        val durationSame = a.durationMs <= 0L || b.durationMs <= 0L ||
+            abs(a.durationMs - b.durationMs) <= 8_000L
+        return titleSame && artistSame && durationSame
+    }
+
+    private fun localizeTrack(track: Track): Track {
+        if (track.localPath != null) return track
+        val local = findLocalCopy(track) ?: return track
+        return track.copy(
+            key = local.key,
+            localPath = local.localPath,
+            downloaded = local.downloaded,
+            favorite = track.favorite || local.favorite,
+            cover = local.cover.localPath?.let { local.cover } ?: track.cover,
+        )
+    }
+
+    private fun findLocalCopy(track: Track): Track? {
+        val current = _state.value
+        current.library.tracks.firstOrNull { it.key == track.key }?.let { return it }
+        val bridge = bridge ?: return null
+        return runCatching {
+            bridge.findTrackByMeta(track.artist, track.title, track.durationMs)
+        }.getOrNull()?.takeIf { it.localPath != null }
+            ?: current.library.tracks.firstOrNull { sameSong(it, track) && it.localPath != null }
+    }
+
+    fun artistRef(name: String): Artist? {
+        val key = normalizeName(name)
+        val current = _state.value
+        return current.search.remoteArtists.firstOrNull { normalizeName(it.name) == key }
+            ?: current.artistDetails.values.firstOrNull {
+                normalizeName(it.artist.name) == key
+            }?.artist
+            ?: current.search.remoteAlbums.firstOrNull { normalizeName(it.artist) == key }?.let {
+                Artist(
+                    id = "name:$key",
+                    name = name,
+                    imageUrl = it.cover.remoteUrl ?: it.cover.localPath,
+                )
+            }
+            ?: current.search.remoteResults.firstOrNull { normalizeName(it.artist) == key }?.let {
+                Artist(id = "name:$key", name = name, imageUrl = it.cover.remoteUrl)
+            }
+    }
+
+    fun loadArtist(name: String, provider: String? = null, providerId: String? = null) {
+        val key = artistKey(name, provider, providerId)
+        val current = _state.value
+        if (current.artistDetails.containsKey(key) || key in current.artistLoading) return
+        _state.update { it.copy(artistLoading = it.artistLoading + key) }
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val engine = bridge ?: error("catálogo no disponible")
+                    val dto = if (provider != null && providerId != null) {
+                        withCatalog { engine.artistProfileById(provider, providerId) }
+                    } else {
+                        withCatalog { engine.artistProfile(name) }
+                    }
+                    val profile = dto.toModel()
+                    profile.copy(
+                        topTracks = profile.topTracks.map { localizeTrack(it) },
+                        albums = profile.albums.map { album ->
+                            album.copy(tracks = album.tracks.map { localizeTrack(it) })
+                        },
+                    )
+                }
+            }
+            val profile = result.getOrNull()
+            ActionLog.log(
+                "artist.load",
+                "name" to name,
+                "provider" to provider,
+                "tracks" to (profile?.topTracks?.size ?: 0),
+                "albums" to (profile?.albums?.size ?: 0),
+                "error" to result.exceptionOrNull()?.message,
+            )
+            _state.update { state ->
+                state.copy(
+                    artistDetails = if (profile != null) {
+                        state.artistDetails + (key to profile)
+                    } else {
+                        state.artistDetails
+                    },
+                    artistLoading = state.artistLoading - key,
+                    artistErrors = if (profile == null) {
+                        state.artistErrors + (key to (result.exceptionOrNull()?.message ?: "No se encontró el artista"))
+                    } else {
+                        state.artistErrors - key
+                    },
+                )
+            }
+        }
+    }
+
+    fun artistProfile(name: String, provider: String? = null, providerId: String? = null): ArtistProfile? {
+        val key = artistKey(name, provider, providerId)
+        _state.value.artistDetails[key]?.let { return it }
+        return _state.value.artistDetails.values.firstOrNull {
+            normalizeName(it.artist.name) == normalizeName(name)
+        }
+    }
+
+    fun artistLoading(name: String, provider: String? = null, providerId: String? = null): Boolean =
+        artistKey(name, provider, providerId) in _state.value.artistLoading
+
+    fun artistError(name: String, provider: String? = null, providerId: String? = null): String? =
+        _state.value.artistErrors[artistKey(name, provider, providerId)]
+
+    fun albumLoading(id: String): Boolean = id in _state.value.albumLoading
+
+    fun albumError(id: String): String? = _state.value.albumErrors[id]
+
+    private fun artistKey(name: String, provider: String?, providerId: String?): String =
+        if (provider != null && providerId != null) {
+            "catalog:$provider:$providerId"
+        } else {
+            "name:${normalizeName(name)}"
+        }
 
     fun cacheArtist(name: String) {
         val current = _state.value
@@ -316,7 +712,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 current.search.remoteResults +
                 current.player.queue
             )
-            .filter { normalizeName(it.artist) == key }
+            .filter { normalizeName(it.artist).contains(key) }
             .distinctBy { it.key }
         artistAlbumsCache[key] = (
             current.library.albums +
@@ -324,19 +720,63 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 current.search.albums +
                 current.search.remoteAlbums
             )
-            .filter { normalizeName(it.artist) == key }
+            .filter { normalizeName(it.artist).contains(key) }
             .distinctBy { it.id }
     }
 
     fun albumFor(track: Track): Album? {
+        val current = _state.value
+        val providerId = track.albumProviderId
+        if (!providerId.isNullOrBlank()) {
+            val provider = track.albumProvider ?: track.provider ?: "deezer"
+            val id = "catalog:$provider:$providerId"
+            current.albumDetails[id]?.let { return it }
+            current.search.remoteAlbums.firstOrNull {
+                it.provider == provider && it.providerId == providerId
+            }?.let { return it }
+            val title = track.album?.trim().orEmpty()
+            if (title.isNotEmpty()) {
+                return Album(
+                    id = id,
+                    title = title,
+                    artist = track.artist,
+                    year = 0,
+                    cover = track.cover,
+                    tracks = emptyList(),
+                    provider = provider,
+                    providerId = providerId,
+                    artistProvider = track.artistProvider,
+                    artistProviderId = track.artistProviderId,
+                    trackCount = 0,
+                )
+            }
+        }
         val title = track.album?.trim().orEmpty()
         if (title.isEmpty()) return null
         val key = normalizeName(track.artist)
-        return (albumCache.values + _state.value.library.albums + _state.value.home.albums +
-            _state.value.search.albums + _state.value.search.remoteAlbums)
+        val existing = (current.albumDetails.values + albumCache.values + current.library.albums +
+            current.home.albums + current.search.albums + current.search.remoteAlbums +
+            current.artistDetails.values.flatMap { it.albums })
             .firstOrNull {
-                normalizeName(it.artist) == key && it.title.equals(title, ignoreCase = true)
+                val albumArtist = normalizeName(it.artist)
+                (albumArtist == key || albumArtist.contains(key) || key.contains(albumArtist)) &&
+                    normalizeName(it.title) == normalizeName(title)
             }
+        if (existing != null) return existing
+        // Sin ficha en caché: se abre por nombre y el catálogo la completa.
+        return Album(
+            id = "lookup:${Uri.encode(title)}|${Uri.encode(track.artist)}",
+            title = title,
+            artist = track.artist,
+            year = 0,
+            cover = track.cover,
+            tracks = emptyList(),
+            provider = track.albumProvider ?: track.provider,
+            providerId = track.albumProviderId,
+            artistProvider = track.artistProvider,
+            artistProviderId = track.artistProviderId,
+            trackCount = 0,
+        )
     }
 
     fun cachedArtistTracks(name: String): List<Track> =
@@ -349,6 +789,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"), "")
             .lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9]+"), " ")
             .trim()
 
     fun playlist(id: String): Playlist? {
@@ -380,6 +821,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         val index = playable.indexOfFirst { it.key == track.key }.coerceAtLeast(0)
         requestLyrics(track)
+        playback.playQueue(playable, index)
+    }
+
+    /** Reproduce un álbum entero cuando todas sus pistas están descargadas. */
+    fun playAlbum(album: Album, shuffle: Boolean = false) {
+        val ordered = if (shuffle) album.tracks.shuffled() else album.tracks
+        val first = ordered.firstOrNull() ?: return
+        if (ordered.any { it.localPath == null }) {
+            play(first)
+            return
+        }
+        val playable = ordered.mapNotNull { it.toPlaybackTrack() }
+        if (playable.isEmpty()) {
+            play(first)
+            return
+        }
+        val index = playable.indexOfFirst { it.key == first.key }.coerceAtLeast(0)
+        _state.update {
+            it.copy(
+                player = PlayerState(
+                    track = first,
+                    isPlaying = false,
+                    positionMs = 0L,
+                    durationMs = first.durationMs,
+                    shuffle = shuffle,
+                    repeat = it.player.repeat,
+                    queue = ordered,
+                ),
+            )
+        }
+        requestLyrics(first)
         playback.playQueue(playable, index)
     }
 
@@ -688,7 +1160,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             publish(1f, DownloadStatus.Importing)
             val newKey = withContext(Dispatchers.IO) {
-                engine.importLocal(
+                engine.importLocalWithKey(
+                    key = track.key,
                     path = file.absolutePath,
                     title = track.title.ifBlank { audio.title },
                     artist = track.artist.ifBlank { audio.artist },
@@ -891,6 +1364,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             current.search.results +
             current.search.remoteResults +
             current.player.queue +
+            current.albumDetails.values.flatMap { it.tracks } +
+            current.artistDetails.values.flatMap { profile ->
+                profile.topTracks + profile.albums.flatMap { it.tracks }
+            } +
+            albumCache.values.flatMap { it.tracks } +
             listOfNotNull(current.player.track))
             .firstOrNull { it.key == key }
     }
@@ -1289,6 +1767,13 @@ private fun AppUiState.mapTrack(key: String, transform: (Track) -> Track): AppUi
             albums = library.albums.mapAlbums(),
             playlists = library.playlists.map { playlist -> playlist.copy(tracks = playlist.tracks.mapTracks()) },
         ),
+        albumDetails = albumDetails.mapValues { (_, album) -> album.copy(tracks = album.tracks.mapTracks()) },
+        artistDetails = artistDetails.mapValues { (_, profile) ->
+            profile.copy(
+                topTracks = profile.topTracks.mapTracks(),
+                albums = profile.albums.mapAlbums(),
+            )
+        },
         player = player.copy(
             track = player.track?.let { if (it.key == key) transform(it) else it },
             queue = player.queue.mapTracks(),

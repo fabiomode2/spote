@@ -96,6 +96,20 @@ object ArtworkResolver {
         download(context, target.replace("100x100bb", "600x600bb"), key)
     }
 
+    /** Guarda una portada remota en caché local para extraer su paleta. */
+    suspend fun cacheRemote(
+        context: Context,
+        url: String,
+    ): String? = withContext(Dispatchers.IO) {
+        val target = url.trim().takeIf { it.startsWith("http") } ?: return@withContext null
+        val dir = File(context.filesDir, ARTWORK_DIR).apply { mkdirs() }
+        val file = File(dir, "${safeKey("cover:$target")}.jpg")
+        if (file.exists() && file.length() > 0L) {
+            return@withContext file.absolutePath
+        }
+        download(context, target.replace("100x100bb", "600x600bb"), "cover:$target")
+    }
+
     private fun pickBest(
         root: JSONObject,
         title: String,

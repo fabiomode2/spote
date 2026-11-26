@@ -47,7 +47,10 @@ fun QueueScreen(
     val track = player.track
     val queue = player.queue
 
-    AppBackground(accentStart = track?.cover?.start ?: colors.coverStart) {
+    AppBackground(
+        accentStart = track?.cover?.start ?: colors.coverStart,
+        cover = track?.cover,
+    ) {
         Column(modifier = modifier.fillMaxSize()) {
             TopBar(title = "Cola", onBack = onBack)
             if (track != null) {

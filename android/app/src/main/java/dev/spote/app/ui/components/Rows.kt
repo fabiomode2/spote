@@ -101,7 +101,7 @@ fun TrackRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (openArtist != null) {
-                    Modifier.clickable { openArtist(track.artist) }
+                    Modifier.clickable { openArtist(track.artist.primaryArtist()) }
                 } else {
                     Modifier
                 },
@@ -182,7 +182,7 @@ fun AlbumTrackRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = if (openArtist != null) {
-                    Modifier.clickable { openArtist(track.artist) }
+                    Modifier.clickable { openArtist(track.artist.primaryArtist()) }
                 } else {
                     Modifier
                 },
@@ -463,4 +463,12 @@ fun ArtistCircle(name: String, cover: Cover, onClick: () -> Unit, modifier: Modi
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+private fun String.primaryArtist(): String {
+    val lower = lowercase()
+    val cut = listOf(",", " feat. ", " featuring ").map { lower.indexOf(it) }
+        .filter { it >= 0 }
+        .minOrNull()
+    return if (cut == null) trim() else substring(0, cut).trim()
 }

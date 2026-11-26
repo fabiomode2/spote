@@ -1,19 +1,24 @@
 package dev.spote.app.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -22,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -29,10 +35,12 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadDone
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -50,6 +58,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,20 +73,26 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalContext
-import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import dev.spote.app.artwork.rememberCoverPalette
 import dev.spote.app.model.Album
+import dev.spote.app.model.ArtistProfile
 import dev.spote.app.model.Playlist
 import dev.spote.app.model.Tab
 import dev.spote.app.logging.ActionLog
 import dev.spote.app.model.Track
 import dev.spote.app.profile.ProfileStore
+import dev.spote.app.rust.coverFor
+import dev.spote.app.ui.components.LocalAlbumNavigation
 import dev.spote.app.ui.components.LocalArtistNavigation
 import dev.spote.app.ui.components.MiniPlayer
 import dev.spote.app.ui.components.SpoteBottomBar
+import dev.spote.app.ui.components.TopBar
 import dev.spote.app.ui.nowplaying.NowPlayingScreen
 import dev.spote.app.ui.nowplaying.QueueScreen
 import dev.spote.app.ui.screens.AlbumScreen
@@ -91,13 +106,14 @@ import dev.spote.app.ui.screens.SearchScreen
 import dev.spote.app.ui.screens.SettingsScreen
 import dev.spote.app.ui.theme.LocalSpoteColors
 import dev.spote.app.ui.theme.SpoteThemeMode
+import dev.spote.app.ui.theme.withCoverPalette
 import dev.spote.app.ui.update.UpdateCard
 
 @Composable
 fun SpoteApp(
     themeMode: SpoteThemeMode = SpoteThemeMode.Midnight,
     onThemeModeChange: (SpoteThemeMode) -> Unit = {},
-    uiStyle: dev.spote.app.ui.theme.SpoteUiStyle = dev.spote.app.ui.theme.SpoteUiStyle.Medium,
+    uiStyle: dev.spote.app.ui.theme.SpoteUiStyle = dev.spote.app.ui.theme.SpoteUiStyle.Off,
     onUiStyleChange: (dev.spote.app.ui.theme.SpoteUiStyle) -> Unit = {},
 ) {
     val navController = rememberNavController()
@@ -125,7 +141,39 @@ fun SpoteApp(
     var pendingPlaylistTrack by remember { mutableStateOf<Track?>(null) }
     val backStackEntry by navController.currentBackStackEntryAsState()
     val route = backStackEntry?.destination?.route ?: "home"
-    val colors = LocalSpoteColors.current
+    val baseColors = LocalSpoteColors.current
+    val activeCover = remember(
+        route,
+        state.player.track,
+        state.home.recent,
+        state.search.results,
+        state.search.remoteResults,
+        state.library.albums,
+        state.library.tracks,
+        backStackEntry,
+    ) {
+        when {
+            route == "now" -> state.player.track?.cover
+            route.startsWith("album/") -> backStackEntry?.arguments?.getString("id")
+                ?.let { appViewModel.album(it)?.cover }
+            route.startsWith("artist/") -> {
+                val name = backStackEntry?.arguments?.getString("name").orEmpty()
+                val provider = backStackEntry?.arguments?.getString("provider")?.takeIf { it.isNotBlank() }
+                val id = backStackEntry?.arguments?.getString("id")?.takeIf { it.isNotBlank() }
+                val profile = appViewModel.artistProfile(name, provider, id)
+                profile?.artist?.imageUrl?.let { coverFor(name, null, it) }
+                    ?: profile?.albums?.firstOrNull()?.cover
+            }
+            route == "search" -> state.search.remoteResults.firstOrNull()?.cover
+                ?: state.search.results.firstOrNull()?.cover
+            route == "library" -> state.library.albums.firstOrNull()?.cover
+                ?: state.library.tracks.firstOrNull()?.cover
+            route == "home" -> state.home.recent.firstOrNull()?.cover
+            else -> state.player.track?.cover
+        }
+    }
+    val palette = rememberCoverPalette(activeCover)
+    val colors = palette?.let { baseColors.withCoverPalette(it) } ?: baseColors
     val context = LocalContext.current
     val appScope = rememberCoroutineScope()
     ProfileStore.init(context)
@@ -172,62 +220,99 @@ fun SpoteApp(
         }
     }
 
-    val topLevelRoutes = setOf("home", "search", "now", "library")
-    val fullscreenRoutes = setOf("now", "queue", "lyrics")
-    val noMiniRoutes = fullscreenRoutes + setOf("settings")
-    val showMini = route !in noMiniRoutes
-    val showBottom = route in topLevelRoutes
+    val immersiveRoutes = setOf("now", "queue", "lyrics", "settings")
+    val fullScreen = route in immersiveRoutes || route.startsWith("room/")
+    val showBottom = !fullScreen
+    val showMini = state.player.track != null && !fullScreen
+
+    var lastTab by rememberSaveable { mutableStateOf(Tab.Home) }
+    LaunchedEffect(route) {
+        when (route) {
+            "home" -> lastTab = Tab.Home
+            "search" -> lastTab = Tab.Search
+            "library" -> lastTab = Tab.Library
+        }
+    }
+    val currentTab = when (route) {
+        "home" -> Tab.Home
+        "search" -> Tab.Search
+        "library" -> Tab.Library
+        else -> lastTab
+    }
+
+    fun albumRoute(album: Album): String = "album/${Uri.encode(album.id)}"
+
+    fun artistRoute(name: String, provider: String? = null, providerId: String? = null): String {
+        val base = "artist/${Uri.encode(name)}"
+        return "$base?provider=${Uri.encode(provider.orEmpty())}&id=${Uri.encode(providerId.orEmpty())}"
+    }
+
+    fun selectTab(tab: Tab) {
+        val target = when (tab) {
+            Tab.Home -> "home"
+            Tab.Search -> "search"
+            Tab.Library -> "library"
+        }
+        if (tab == currentTab) {
+            // Reseleccionar vuelve a la raíz del tab sin recrear la pantalla.
+            if (!navController.popBackStack(target, inclusive = false)) {
+                navController.navigate(target) { launchSingleTop = true }
+            }
+            return
+        }
+        ActionLog.log("nav.tab", "from" to route, "to" to target)
+        navController.navigate(target) {
+            popUpTo("home") { saveState = false }
+            launchSingleTop = true
+        }
+    }
+
+    BackHandler(enabled = route == "search" || route == "library") {
+        navController.popBackStack("home", inclusive = false)
+    }
 
     CompositionLocalProvider(
+        LocalSpoteColors provides colors,
         LocalArtistNavigation provides { artist ->
+            val ref = appViewModel.artistRef(artist)
             appViewModel.cacheArtist(artist)
-            navController.navigate("artist/${Uri.encode(artist)}")
+            navController.navigate(artistRoute(artist, ref?.provider, ref?.providerId))
         },
-        dev.spote.app.ui.components.LocalAlbumNavigation provides { track ->
+        LocalAlbumNavigation provides { track ->
             appViewModel.albumFor(track)?.let { album ->
                 appViewModel.cacheAlbum(album)
-                navController.navigate("album/${Uri.encode(album.id)}")
+                navController.navigate(albumRoute(album))
             }
         },
     ) {
     Scaffold(
         containerColor = colors.background,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        contentWindowInsets = WindowInsets.navigationBars,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (showMini || showBottom) {
-                Column {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.background)
+                        .navigationBarsPadding(),
+                ) {
                     if (showMini) {
                         MiniPlayer(
                             player = state.player,
-                            onExpand = { navController.navigate("now") { launchSingleTop = true } },
+                            onExpand = {
+                                if (state.player.track != null) {
+                                    navController.navigate("now") { launchSingleTop = true }
+                                }
+                            },
                             onTogglePlay = appViewModel::togglePlay,
                             onNext = appViewModel::next,
                         )
                     }
                     if (showBottom) {
                         SpoteBottomBar(
-                            selected = when (route) {
-                                "search" -> Tab.Search
-                                "now" -> Tab.Now
-                                "library" -> Tab.Library
-                                else -> Tab.Home
-                            },
-                            onSelect = { tab ->
-                                val target = when (tab) {
-                                    Tab.Home -> "home"
-                                    Tab.Search -> "search"
-                                    Tab.Now -> "now"
-                                    Tab.Library -> "library"
-                                }
-                                ActionLog.log("nav.tab", "from" to route, "to" to target)
-                                navController.navigate(target) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = false
-                                    }
-                                    launchSingleTop = true
-                                }
-                            },
+                            selected = currentTab,
+                            onSelect = ::selectTab,
                         )
                     }
                 }
@@ -243,7 +328,7 @@ fun SpoteApp(
                 HomeScreen(
                     state = homeState,
                     onPlayTrack = { appViewModel.play(it) },
-                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate(albumRoute(it)) },
                     onOpenPlaylist = { navController.navigate("playlist/${Uri.encode(it.id)}") },
                     onOpenRoom = { room ->
                         socialViewModel.join(room.id)
@@ -263,12 +348,18 @@ fun SpoteApp(
                         appViewModel.commitSearch(state.search.query)
                         appViewModel.play(it)
                     },
-                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
-                    onOpenArtist = { appViewModel.cacheArtist(it); navController.navigate("artist/${Uri.encode(it)}") },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate(albumRoute(it)) },
+                    onOpenArtist = { name, provider, providerId ->
+                        appViewModel.cacheArtist(name)
+                        navController.navigate(artistRoute(name, provider, providerId))
+                    },
                     onMore = { openTrackMenu(it) },
                     onClearSearch = appViewModel::clearSearch,
                     onClearHistory = appViewModel::clearSearchHistory,
                     onSearchCommit = appViewModel::commitSearch,
+                    userName = socialState.userName.ifBlank { profileName },
+                    avatarUri = avatarPath,
+                    onOpenSettings = { navController.navigate("settings") },
                 )
             }
             composable("library") {
@@ -278,16 +369,20 @@ fun SpoteApp(
                     onToggleGrid = appViewModel::toggleGrid,
                     onPlayTrack = { appViewModel.play(it) },
                     onMore = { openTrackMenu(it) },
-                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
+                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate(albumRoute(it)) },
                     onOpenPlaylist = { navController.navigate("playlist/${Uri.encode(it.id)}") },
                     onOpenDownloads = { navController.navigate("downloads") },
-                    onOpenSearch = { navController.navigate("search") },
+                    onOpenSearch = { selectTab(Tab.Search) },
                     onOpenArtist = { artist ->
+                        val ref = appViewModel.artistRef(artist)
                         appViewModel.cacheArtist(artist)
-                        navController.navigate("artist/${Uri.encode(artist)}")
+                        navController.navigate(artistRoute(artist, ref?.provider, ref?.providerId))
                     },
                     onCreatePlaylist = { showCreatePlaylist = true },
                     onImport = { importLauncher.launch(arrayOf("audio/*")) },
+                    userName = socialState.userName.ifBlank { profileName },
+                    avatarUri = avatarPath,
+                    onOpenSettings = { navController.navigate("settings") },
                 )
             }
             composable(
@@ -297,101 +392,148 @@ fun SpoteApp(
                 popEnterTransition = { slideInHorizontally(initialOffsetX = { -it / 4 }) },
                 popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) },
             ) { entry ->
-                val albumId = Uri.decode(entry.arguments?.getString("id").orEmpty())
+                val albumId = entry.arguments?.getString("id").orEmpty()
                 val album = appViewModel.album(albumId)
+                val loading = appViewModel.albumLoading(albumId)
+                val error = appViewModel.albumError(albumId)
                 LaunchedEffect(albumId) {
+                    appViewModel.loadAlbum(albumId)
                     ActionLog.log(
                         "album.open",
                         "id" to albumId,
                         "found" to (album != null),
+                        "loading" to loading,
                         "catalogue" to state.library.albums.size,
                     )
                 }
-                if (album != null) {
-                    AlbumScreen(
-                        album = album,
-                        player = state.player,
-                        onBack = { navController.popBackStack() },
-                        onPlay = {
-                            album.tracks.firstOrNull()?.let {
-                                appViewModel.play(it)
-                            }
-                        },
-                        onShuffle = {
-                            album.tracks.shuffled().firstOrNull()?.let {
-                                appViewModel.play(it)
-                            }
-                        },
-                        onPlayTrack = { appViewModel.play(it) },
-                        onMore = { openTrackMenu(it) },
-                        onDownload = {
-                            album.tracks.firstOrNull()?.let { appViewModel.toggleDownload(it.key) }
-                        },
-                        onLike = {
-                            album.tracks.firstOrNull()?.let { appViewModel.toggleFavorite(it.key) }
-                        },
-                    )
-                } else {
-                    androidx.compose.foundation.layout.Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(32.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = "No se encontró el álbum",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                when {
+                    album != null && (
+                        album.tracks.isNotEmpty() ||
+                            state.albumDetails.containsKey(albumId)
+                        ) -> {
+                        AlbumScreen(
+                            album = album,
+                            player = state.player,
+                            onBack = { navController.popBackStack() },
+                            onPlay = {
+                                appViewModel.playAlbum(album, shuffle = false)
+                            },
+                            onShuffle = {
+                                appViewModel.playAlbum(album, shuffle = true)
+                            },
+                            onPlayTrack = { appViewModel.play(it) },
+                            onMore = { openTrackMenu(it) },
+                            onDownload = {
+                                album.tracks.firstOrNull()?.let { appViewModel.toggleDownload(it.key) }
+                            },
+                            onLike = {
+                                album.tracks.firstOrNull()?.let { appViewModel.toggleFavorite(it.key) }
+                            },
+                        )
+                    }
+                    loading || error == null -> {
+                        LoadingScreen(
+                            message = "Cargando álbum…",
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+                    else -> {
+                        MessageScreen(
+                            title = "No se encontró el álbum",
+                            text = error ?: "Puede que el catálogo no lo tenga disponible.",
+                            onBack = { navController.popBackStack() },
+                            onRetry = { appViewModel.loadAlbum(albumId) },
                         )
                     }
                 }
             }
             composable(
-                route = "artist/{name}",
+                route = "artist/{name}?provider={provider}&id={id}",
+                arguments = listOf(
+                    navArgument("provider") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("id") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                ),
                 enterTransition = { slideInHorizontally(initialOffsetX = { it }) },
                 exitTransition = { slideOutHorizontally(targetOffsetX = { -it / 4 }) },
                 popEnterTransition = { slideInHorizontally(initialOffsetX = { -it / 4 }) },
                 popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) },
             ) { entry ->
-                val rawName = entry.arguments?.getString("name").orEmpty()
-                val artistName = Uri.decode(rawName)
-                LaunchedEffect(artistName) {
+                val artistName = entry.arguments?.getString("name").orEmpty()
+                val provider = entry.arguments?.getString("provider")?.takeIf { it.isNotBlank() }
+                val providerId = entry.arguments?.getString("id")?.takeIf { it.isNotBlank() }
+                val profile = appViewModel.artistProfile(artistName, provider, providerId)
+                val loading = appViewModel.artistLoading(artistName, provider, providerId)
+                val error = appViewModel.artistError(artistName, provider, providerId)
+                LaunchedEffect(artistName, provider, providerId) {
+                    appViewModel.cacheArtist(artistName)
+                    appViewModel.loadArtist(artistName, provider, providerId)
                     ActionLog.log(
                         "artist.open",
                         "name" to artistName,
-                        "tracks" to state.library.tracks.count {
-                            it.artist.equals(artistName, ignoreCase = true)
-                        },
-                        "albums" to state.library.albums.count {
-                            it.artist.equals(artistName, ignoreCase = true)
-                        },
+                        "provider" to provider,
+                        "id" to providerId,
+                        "tracks" to (profile?.topTracks?.size ?: 0),
+                        "albums" to (profile?.albums?.size ?: 0),
                     )
                 }
-                val tracks = appViewModel.cachedArtistTracks(artistName).ifEmpty {
-                    (
-                        state.library.tracks +
-                            state.home.recent +
-                            state.search.results +
-                            state.search.remoteResults
-                        )
-                        .filter { it.artist.equals(artistName, ignoreCase = true) }
-                        .distinctBy { it.key }
-                }
-                val albums = appViewModel.cachedArtistAlbums(artistName).ifEmpty {
-                    (state.library.albums + state.home.albums + state.search.albums)
-                        .filter { it.artist.equals(artistName, ignoreCase = true) }
+                val tracks = profile?.topTracks?.takeIf { it.isNotEmpty() }
+                    ?: appViewModel.cachedArtistTracks(artistName).ifEmpty {
+                        (
+                            state.library.tracks +
+                                state.home.recent +
+                                state.search.results +
+                                state.search.remoteResults
+                            )
+                            .filter { normalizeForMatch(it.artist).contains(normalizeForMatch(artistName)) }
+                            .distinctBy { it.key }
+                    }
+                val albums = profile?.albums?.takeIf { it.isNotEmpty() }
+                    ?: (appViewModel.cachedArtistAlbums(artistName) + state.search.remoteAlbums)
+                        .filter { normalizeForMatch(it.artist).contains(normalizeForMatch(artistName)) }
                         .distinctBy { it.id }
+                when {
+                    profile != null || tracks.isNotEmpty() || albums.isNotEmpty() -> {
+                        ArtistScreen(
+                            name = artistName,
+                            tracks = tracks,
+                            albums = albums,
+                            profile = profile,
+                            player = state.player,
+                            loading = loading,
+                            error = error,
+                            onBack = { navController.popBackStack() },
+                            onPlayTrack = { appViewModel.play(it) },
+                            onOpenAlbum = {
+                                appViewModel.cacheAlbum(it)
+                                navController.navigate(albumRoute(it))
+                            },
+                            onMore = { openTrackMenu(it) },
+                            onRetry = { appViewModel.loadArtist(artistName, provider, providerId) },
+                        )
+                    }
+                    loading || error == null -> {
+                        LoadingScreen(
+                            message = "Cargando artista…",
+                            onBack = { navController.popBackStack() },
+                        )
+                    }
+                    else -> {
+                        MessageScreen(
+                            title = "No se encontró el artista",
+                            text = error ?: "El catálogo no devolvió resultados.",
+                            onBack = { navController.popBackStack() },
+                            onRetry = { appViewModel.loadArtist(artistName, provider, providerId) },
+                        )
+                    }
                 }
-                ArtistScreen(
-                    name = artistName,
-                    tracks = tracks,
-                    albums = albums,
-                    player = state.player,
-                    onBack = { navController.popBackStack() },
-                    onPlayTrack = { appViewModel.play(it) },
-                    onOpenAlbum = { appViewModel.cacheAlbum(it); navController.navigate("album/${Uri.encode(it.id)}") },
-                    onMore = { openTrackMenu(it) },
-                )
             }
             composable(
                 route = "playlist/{id}",
@@ -547,7 +689,11 @@ fun SpoteApp(
             ) {
                 NowPlayingScreen(
                     player = state.player,
-                    onClose = { navController.popBackStack() },
+                    onClose = {
+                        if (!navController.popBackStack()) {
+                            navController.navigate("home") { launchSingleTop = true }
+                        }
+                    },
                     onTogglePlay = appViewModel::togglePlay,
                     onNext = appViewModel::next,
                     onPrevious = appViewModel::previous,
@@ -619,6 +765,20 @@ fun SpoteApp(
                 menuTrack = null
                 appViewModel.toggleFavorite(track.key)
             },
+            onOpenArtist = {
+                menuTrack = null
+                val name = track.artist.substringBefore(",").substringBefore(" feat.").trim()
+                val ref = appViewModel.artistRef(name)
+                appViewModel.cacheArtist(name)
+                navController.navigate(artistRoute(name, ref?.provider, ref?.providerId))
+            },
+            onOpenAlbum = {
+                menuTrack = null
+                appViewModel.albumFor(track)?.let { album ->
+                    appViewModel.cacheAlbum(album)
+                    navController.navigate(albumRoute(album))
+                }
+            },
             onAddToPlaylist = {
                 pickerTrack = track
                 menuTrack = null
@@ -688,6 +848,77 @@ fun SpoteApp(
     }
 }
 
+private fun normalizeForMatch(value: String): String =
+    java.text.Normalizer.normalize(value, java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(java.util.Locale.ROOT)
+        .replace(Regex("[^a-z0-9]+"), " ")
+        .trim()
+
+@Composable
+private fun LoadingScreen(
+    message: String,
+    onBack: () -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        TopBar(onBack = onBack)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = LocalSpoteColors.current.accent)
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageScreen(
+    title: String,
+    text: String,
+    onBack: () -> Unit,
+    onRetry: (() -> Unit)? = null,
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        TopBar(onBack = onBack)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .padding(horizontal = 32.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (onRetry != null) {
+                    TextButton(onClick = onRetry) { Text("Reintentar") }
+                }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TrackActionsSheet(
@@ -696,6 +927,8 @@ private fun TrackActionsSheet(
     onPlay: () -> Unit,
     onDownload: () -> Unit,
     onFavorite: () -> Unit,
+    onOpenArtist: () -> Unit = {},
+    onOpenAlbum: () -> Unit = {},
     playlistId: String? = null,
     queueIndex: Int? = null,
     queueSize: Int = 0,
@@ -736,6 +969,17 @@ private fun TrackActionsSheet(
                 icon = Icons.Rounded.PlayArrow,
                 text = "Reproducir",
                 onClick = onPlay,
+            )
+            SheetAction(
+                icon = Icons.Rounded.Person,
+                text = "Ir al artista",
+                onClick = onOpenArtist,
+            )
+            SheetAction(
+                icon = Icons.Rounded.Album,
+                text = "Ir al álbum",
+                enabled = !track.album.isNullOrBlank(),
+                onClick = onOpenAlbum,
             )
             SheetAction(
                 icon = Icons.Rounded.QueueMusic,

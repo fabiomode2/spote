@@ -11,21 +11,25 @@ catálogo, letras, paleta y salas.
 | Biblioteca local SQLite/FTS5 (`crates/core` vía UniFFI) | ✅ |
 | Importar audio del teléfono (SAF + `MediaMetadataRetriever`) | ✅ |
 | Reproducción Media3 + `MediaSessionService` + notificación | ✅ |
-| Letras: LRCLIB y respaldo de texto Genius, integradas bajo los controles | ✅ |
-| Buscar en YouTube y SoundCloud on-device (NewPipeExtractor) | ✅ |
+| Letras: LRCLIB, LyricsPlus (Apple/Spotify/QQ) y respaldo de texto Genius, con tarjeta en el player y vista completa con scroll | ✅ |
+| Búsqueda de canciones en el catálogo real (Spotify con respaldo Deezer), no vídeos sueltos | ✅ |
+| Fichas de álbum con tracklist completo, año, portada y orden del proveedor | ✅ |
+| Perfiles de artista con imagen, seguidores, géneros, top tracks y discografía | ✅ |
+| YouTube/SoundCloud on-device (NewPipeExtractor) solo para resolver el audio elegido | ✅ |
 | Resolver stream al reproducir (URLs caducan → se resuelven al momento) | ✅ |
 | Reproducir HLS de SoundCloud con Media3 | ✅ |
-| Descargar una pista remota e indexarla en el SQLite del core | ✅ |
+| Descargar una pista remota e indexarla en el SQLite del core conservando su clave canónica | ✅ |
 | Descargas con progreso real y cancelación | ✅ |
 | Playlists: crear, borrar, añadir y quitar canciones | ✅ |
 | Cola: elegir pista, mover arriba/abajo y quitar | ✅ |
 | Salas sociales (`spoted`): login, lista, chat, cola y play/pause sincronizado | ✅ |
 | Perfil con nombre, foto local y avatar compartido en salas | ✅ |
 | QR/enlace `spote://setup` para configurar servidor y entrar solo | ✅ |
-| Tema cover-driven, Midnight y Nocturno editorial | ✅ |
-| Estilo TUI conmutable: apagado, sutil (mono) o medio (mono + scanlines + espectro) | ✅ |
+| Tema cover-driven con la paleta real del core: la portada tiñe fondo, superficies y acento | ✅ |
+| Navegación Spotify: Inicio, Buscar, Biblioteca; mini player sobre las tabs y Sonando a pantalla completa | ✅ |
+| Avatar de perfil en la cabecera de las tres tabs, siempre a un toque de Ajustes | ✅ |
+| Estilo TUI conmutable: apagado (por defecto), sutil (mono) o medio (mono + scanlines + espectro) | ✅ |
 | Búsqueda con historial persistente, caché y limpieza | ✅ |
-| Perfiles de artista con álbumes, populares y todas las canciones; el autor de cualquier fila es clicable | ✅ |
 | Portadas: arte embebido, `art_url` del core y backfill desde iTunes | ✅ |
 | Fusión de duplicados con copia de seguridad previa | ✅ |
 | Registro local de acciones exportable desde Ajustes | ✅ |
@@ -34,6 +38,23 @@ catálogo, letras, paleta y salas.
 La app usa la librería real por defecto. Si el `.so` no carga, arranca con una
 biblioteca vacía (no inventa datos). `spoteMockData=true` cambia a datos mock
 para iterar el diseño sin NDK ni dispositivo.
+
+## Navegación y catálogo
+
+- La barra inferior tiene tres tabs: **Inicio**, **Buscar** y **Biblioteca**.
+  Al reproducir aparece un mini player encima de las tabs; al tocarlo se abre
+  **Sonando** a pantalla completa, sin tabs y con el inset de la barra del
+  sistema aplicado una sola vez.
+- Las fichas de álbum y artista se cargan del catálogo del core por
+  `provider:id`, no a partir de una página de resultados. Si una pista trae un
+  álbum que no salió en la búsqueda textual, se abre por nombre con
+  `find_album` y se completa el tracklist.
+- La búsqueda mixta usa `spotify_api::search_all`: Spotify con respaldo Deezer.
+  Devuelve pistas, álbumes y artistas reales; YouTube solo resuelve el audio.
+- Las descargas conservan la clave canónica (`isrc:` o `sha1:`) para que la
+  copia local y la ficha del catálogo sigan siendo la misma canción.
+- La paleta se extrae con el mismo `Palette::from_image` que la TUI: fondo,
+  superficies y acento salen de la portada, manteniendo la base oscura de spote.
 
 ## Iterar la UI sin emulador
 
@@ -136,6 +157,8 @@ background desde la iTunes Search API: se guarda el JPEG en
 se completa el álbum. Las descargas nuevas guardan la miniatura del stream
 antes de importar. También se respeta el `art_url` que ya traiga la base de
 datos del desktop, así que las bibliotecas antiguas no se quedan sin portada.
+La paleta de cada portada se cachea y se usa para teñir la pantalla y el
+mini player, igual que hace la TUI.
 
 ## Registro de acciones
 
@@ -186,10 +209,8 @@ sistema. Android exige confirmación del usuario: no hay instalación silenciosa
 
 - Reanudar descargas tras matar el proceso (ahora viven en el ViewModel; el
   `.part` se borra al cancelar).
-- Descargar la miniatura remota como carátula local al importar.
 - Importar playlists de Spotify y reordenar canciones dentro de una playlist.
 - ASR local para letras (requiere runtime whisper.cpp y un modelo en el APK).
 - Alinear en el tiempo la letra plana de Genius (ahora se muestra sin tiempos).
 - `MediaProjection` para grabar el monitor.
 - Resolver de golpe toda una cola remota en vez de pista a pista.
-- Reordenar canciones dentro de una playlist (añadir/quitar ya funciona).

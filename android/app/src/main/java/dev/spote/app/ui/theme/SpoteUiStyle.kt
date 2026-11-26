@@ -11,8 +11,8 @@ enum class SpoteUiStyle(val label: String, val subtitle: String) {
 
     companion object {
         fun fromName(value: String?): SpoteUiStyle =
-            entries.firstOrNull { it.name == value } ?: Medium
+            entries.firstOrNull { it.name == value } ?: Off
     }
 }
 
-val LocalSpoteUiStyle = staticCompositionLocalOf { SpoteUiStyle.Medium }
+val LocalSpoteUiStyle = staticCompositionLocalOf { SpoteUiStyle.Off }

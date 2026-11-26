@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use spote_core::artwork::{decode_image, Palette};
 use spote_core::config;
 use spote_core::library::{Library, SourceStatus, TrackRow};
+use spote_core::spotify_api;
 use spote_core::util;
 use spote_protocol::TrackRef;
 
@@ -23,6 +24,8 @@ pub enum SpoteError {
     Io { detail: String },
     #[error("image: {detail}")]
     Image { detail: String },
+    #[error("catalog: {detail}")]
+    Catalog { detail: String },
 }
 
 impl SpoteError {
@@ -34,6 +37,12 @@ impl SpoteError {
 
     fn io(err: impl std::fmt::Display) -> Self {
         Self::Io {
+            detail: err.to_string(),
+        }
+    }
+
+    fn catalog(err: impl std::fmt::Display) -> Self {
+        Self::Catalog {
             detail: err.to_string(),
         }
     }
@@ -66,10 +75,86 @@ pub struct LibraryStatsDto {
 pub struct PaletteDto {
     pub background: String,
     pub surface: String,
+    pub surface_alt: String,
+    pub bg_deep: String,
     pub text: String,
+    pub muted: String,
+    pub border: String,
     pub primary: String,
     pub secondary: String,
     pub accent: String,
+    pub ok: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogTrackDto {
+    /// Clave canónica (`isrc:…` o `sha1:…`), igual que en la TUI.
+    pub key: String,
+    pub provider: String,
+    /// Id del proveedor (`deezer` numérico o `dz:…`).
+    pub provider_id: String,
+    pub title: String,
+    pub artists: String,
+    pub artist_list: Vec<String>,
+    pub album: Option<String>,
+    pub duration_ms: u64,
+    pub art_url: Option<String>,
+    pub isrc: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogAlbumDto {
+    pub provider: String,
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub cover_url: Option<String>,
+    pub release_year: Option<u32>,
+    pub track_count: u32,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogArtistDto {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub image_url: Option<String>,
+    pub followers: u64,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogSearchDto {
+    pub provider: String,
+    pub tracks: Vec<CatalogTrackDto>,
+    pub albums: Vec<CatalogAlbumDto>,
+    pub artists: Vec<CatalogArtistDto>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogAlbumInfoDto {
+    pub provider: String,
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub cover_url: Option<String>,
+    pub release_date: Option<String>,
+    pub year: Option<u32>,
+    pub tracks: Vec<CatalogTrackDto>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct CatalogArtistProfileDto {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub image_url: Option<String>,
+    pub genres: Vec<String>,
+    pub followers: u64,
+    pub popularity: u32,
+    pub top_tracks: Vec<CatalogTrackDto>,
+    pub albums: Vec<CatalogAlbumDto>,
+    pub bio: Option<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -144,14 +229,165 @@ impl SpoteEngine {
 
     pub fn all_tracks(&self, limit: u32) -> Result<Vec<TrackDto>, SpoteError> {
         let lib = self.lib()?;
-        let rows = lib.all_tracks(limit as usize).map_err(SpoteError::library)?;
+        let rows = lib
+            .all_tracks(limit as usize)
+            .map_err(SpoteError::library)?;
         Ok(rows.iter().map(TrackDto::from).collect())
     }
 
     pub fn search(&self, query: String, limit: u32) -> Result<Vec<TrackDto>, SpoteError> {
         let lib = self.lib()?;
-        let rows = lib.search(&query, limit as usize).map_err(SpoteError::library)?;
+        let rows = lib
+            .search(&query, limit as usize)
+            .map_err(SpoteError::library)?;
         Ok(rows.iter().map(TrackDto::from).collect())
+    }
+
+    /// Búsqueda mixta en el catálogo (Spotify con respaldo Deezer), igual que
+    /// la TUI. Devuelve pistas, álbumes y artistas reales, no derivados.
+    pub fn search_catalog(
+        &self,
+        query: String,
+        limit: u32,
+    ) -> Result<CatalogSearchDto, SpoteError> {
+        let result =
+            spotify_api::search_all(&query, limit as usize).map_err(SpoteError::catalog)?;
+        Ok(CatalogSearchDto {
+            provider: result.provider,
+            tracks: result.tracks.iter().map(catalog_track_dto).collect(),
+            albums: result.albums.iter().map(catalog_album_dto).collect(),
+            artists: result.artists.iter().map(catalog_artist_dto).collect(),
+        })
+    }
+
+    /// Ficha completa de un álbum del catálogo, con su tracklist.
+    pub fn album_info(
+        &self,
+        provider: String,
+        id: String,
+    ) -> Result<CatalogAlbumInfoDto, SpoteError> {
+        let info = spotify_api::album(&provider, &id).map_err(SpoteError::catalog)?;
+        Ok(catalog_album_info_dto(&info))
+    }
+
+    /// Perfil de artista por nombre, como el que abre la TUI desde cualquier
+    /// crédito. Incluye top tracks y discografía.
+    pub fn artist_profile(&self, name: String) -> Result<CatalogArtistProfileDto, SpoteError> {
+        let profile = spotify_api::artist(&name).map_err(SpoteError::catalog)?;
+        Ok(catalog_artist_profile_dto(&profile))
+    }
+
+    /// Perfil de artista por id de proveedor (el que viene de la búsqueda).
+    pub fn artist_profile_by_id(
+        &self,
+        provider: String,
+        id: String,
+    ) -> Result<CatalogArtistProfileDto, SpoteError> {
+        let profile = spotify_api::artist_by_id(&provider, &id).map_err(SpoteError::catalog)?;
+        Ok(catalog_artist_profile_dto(&profile))
+    }
+
+    pub fn artist_albums(
+        &self,
+        provider: String,
+        id: String,
+    ) -> Result<Vec<CatalogAlbumDto>, SpoteError> {
+        let albums = spotify_api::albums_of(&provider, &id).map_err(SpoteError::catalog)?;
+        Ok(albums.iter().map(catalog_album_dto).collect())
+    }
+
+    /// Busca un álbum por artista + título y devuelve su ficha completa.
+    /// Es el mismo emparejamiento que usa la TUI al abrir un álbum local.
+    pub fn find_album(
+        &self,
+        album: String,
+        artist: String,
+    ) -> Result<Option<CatalogAlbumInfoDto>, SpoteError> {
+        let query = format!("{artist} {album}");
+        let results = spotify_api::search_all(&query, 8).map_err(SpoteError::catalog)?;
+        let wanted = util::normalize(&album);
+        let candidate = results
+            .albums
+            .into_iter()
+            .filter(|item| {
+                let got = util::normalize(&item.title);
+                got == wanted || got.contains(&wanted) || wanted.contains(&got)
+            })
+            .max_by_key(|item| {
+                let artist_match =
+                    util::normalize(&item.artist).contains(&util::normalize(&artist));
+                (artist_match, item.track_count)
+            });
+        let Some(candidate) = candidate else {
+            return Ok(None);
+        };
+        let info =
+            spotify_api::album(&candidate.provider, &candidate.id).map_err(SpoteError::catalog)?;
+        Ok(Some(catalog_album_info_dto(&info)))
+    }
+
+    /// Metadatos de una pista local: elige la coincidencia que más se parece
+    /// en título, artista y duración, no simplemente la primera.
+    pub fn find_track_metadata(
+        &self,
+        artist: String,
+        title: String,
+    ) -> Result<Option<CatalogTrackDto>, SpoteError> {
+        let query = format!("{artist} {title}");
+        let tracks = spotify_api::search(&query, 8).map_err(SpoteError::catalog)?;
+        let wanted_title = util::normalize(&title);
+        let wanted_artist = util::normalize(&artist);
+        let best = tracks
+            .into_iter()
+            .filter_map(|track| {
+                let got_title = util::normalize(&track.title);
+                let got_artist = util::normalize(&track.artists);
+                let mut score = 0i32;
+                if got_title == wanted_title {
+                    score += 60;
+                } else if got_title.contains(&wanted_title) || wanted_title.contains(&got_title) {
+                    score += 30;
+                }
+                if got_artist == wanted_artist {
+                    score += 40;
+                } else if got_artist.contains(&wanted_artist) || wanted_artist.contains(&got_artist)
+                {
+                    score += 20;
+                }
+                if score >= 30 {
+                    Some((score, track))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, track)| track);
+        Ok(best.as_ref().map(catalog_track_dto))
+    }
+
+    /// Tracklist real de un álbum local, agrupado por el core (incluye
+    /// colaboraciones y respeta la identidad `album_artist`).
+    pub fn album_tracks(&self, album: String, artist: String) -> Result<Vec<TrackDto>, SpoteError> {
+        let lib = self.lib()?;
+        let rows = lib
+            .album_tracks(&album, &artist)
+            .map_err(SpoteError::library)?;
+        Ok(rows.iter().map(TrackDto::from).collect())
+    }
+
+    /// Busca la copia local de una pista del catálogo por metadatos. Evita
+    /// duplicar una canción ya descargada de otra fuente.
+    pub fn find_track_by_meta(
+        &self,
+        artist: String,
+        title: String,
+        duration_ms: u64,
+    ) -> Result<Option<TrackDto>, SpoteError> {
+        let lib = self.lib()?;
+        let row = lib
+            .find_by_meta(&artist, &title, duration_ms)
+            .map_err(SpoteError::library)?;
+        Ok(row.as_ref().map(TrackDto::from))
     }
 
     pub fn albums(&self) -> Result<Vec<AlbumDto>, SpoteError> {
@@ -275,7 +511,8 @@ impl SpoteEngine {
 
     pub fn delete_playlist(&self, playlist_id: i64) -> Result<(), SpoteError> {
         let mut lib = self.lib()?;
-        lib.delete_playlist(playlist_id).map_err(SpoteError::library)
+        lib.delete_playlist(playlist_id)
+            .map_err(SpoteError::library)
     }
 
     pub fn add_to_playlist(&self, playlist_id: i64, key: String) -> Result<(), SpoteError> {
@@ -302,6 +539,47 @@ impl SpoteEngine {
         art_path: Option<String>,
     ) -> Result<String, SpoteError> {
         let key = util::fallback_key(&artist, &title, duration_ms);
+        let track = TrackRef {
+            key: key.clone(),
+            title,
+            artist,
+            album,
+            duration_ms,
+            art_url: None,
+            source_hint: None,
+        };
+        let mut lib = self.lib()?;
+        let id = lib.upsert_track(&track).map_err(SpoteError::library)?;
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        lib.set_source(
+            id,
+            "local",
+            None,
+            Some(std::path::Path::new(&path)),
+            SourceStatus::Ready,
+            Some(size),
+        )
+        .map_err(SpoteError::library)?;
+        if let Some(art) = art_path {
+            lib.set_art(&key, Some(std::path::Path::new(&art)), None)
+                .map_err(SpoteError::library)?;
+        }
+        Ok(key)
+    }
+
+    /// Indexa un fichero conservando la clave canónica del catálogo. Así una
+    /// descarga mantiene la misma identidad que la pista remota y el álbum
+    /// sigue marcándola como disponible.
+    pub fn import_local_with_key(
+        &self,
+        key: String,
+        path: String,
+        title: String,
+        artist: String,
+        album: Option<String>,
+        duration_ms: u64,
+        art_path: Option<String>,
+    ) -> Result<String, SpoteError> {
         let track = TrackRef {
             key: key.clone(),
             title,
@@ -369,10 +647,16 @@ impl SpoteEngine {
         Ok(PaletteDto {
             background: hex(palette.bg),
             surface: hex(palette.surface),
+            surface_alt: hex(palette.surface_alt),
+            bg_deep: hex(palette.bg_deep),
             text: hex(palette.text),
+            muted: hex(palette.muted),
+            border: hex(palette.border),
             primary: hex(palette.primary),
             secondary: hex(palette.secondary),
             accent: hex(palette.accent),
+            ok: hex(palette.ok),
+            error: hex(palette.error),
         })
     }
 }
@@ -382,6 +666,89 @@ impl SpoteEngine {
         self.library.lock().map_err(|_| SpoteError::Library {
             detail: "la librería quedó bloqueada".to_string(),
         })
+    }
+}
+
+fn catalog_track_dto(track: &spotify_api::SpotifyTrack) -> CatalogTrackDto {
+    let key = track
+        .isrc
+        .as_ref()
+        .map(|isrc| format!("isrc:{}", isrc.to_lowercase()))
+        .unwrap_or_else(|| util::fallback_key(&track.artists, &track.title, track.duration_ms));
+    CatalogTrackDto {
+        key,
+        provider: track.provider.clone(),
+        provider_id: track.id.clone(),
+        title: track.title.clone(),
+        artists: track.artists.clone(),
+        artist_list: split_artists(&track.artists),
+        album: Some(track.album.clone()).filter(|album| !album.is_empty()),
+        duration_ms: track.duration_ms,
+        art_url: track.art_url.clone(),
+        isrc: track.isrc.clone(),
+    }
+}
+
+fn split_artists(artists: &str) -> Vec<String> {
+    artists
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn catalog_album_dto(album: &spotify_api::AlbumSummary) -> CatalogAlbumDto {
+    CatalogAlbumDto {
+        provider: album.provider.clone(),
+        id: album.id.clone(),
+        title: album.title.clone(),
+        artist: album.artist.clone(),
+        cover_url: album.cover_url.clone(),
+        release_year: album.release_year.map(u32::from),
+        track_count: album.track_count,
+    }
+}
+
+fn catalog_artist_dto(artist: &spotify_api::ArtistSummary) -> CatalogArtistDto {
+    CatalogArtistDto {
+        provider: artist.provider.clone(),
+        id: artist.id.clone(),
+        name: artist.name.clone(),
+        image_url: artist.image_url.clone(),
+        followers: artist.followers,
+    }
+}
+
+fn catalog_album_info_dto(info: &spotify_api::AlbumInfo) -> CatalogAlbumInfoDto {
+    CatalogAlbumInfoDto {
+        provider: info.provider.clone(),
+        id: info.id.clone(),
+        title: info.title.clone(),
+        artist: info.artist.clone(),
+        cover_url: info.cover_url.clone(),
+        release_date: info.release_date.clone(),
+        year: info
+            .release_date
+            .as_deref()
+            .and_then(|date| date.trim().get(..4))
+            .and_then(|year| year.parse::<u32>().ok()),
+        tracks: info.tracks.iter().map(catalog_track_dto).collect(),
+    }
+}
+
+fn catalog_artist_profile_dto(profile: &spotify_api::ArtistProfile) -> CatalogArtistProfileDto {
+    CatalogArtistProfileDto {
+        provider: profile.provider.clone(),
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        image_url: profile.image_url.clone(),
+        genres: profile.genres.clone(),
+        followers: profile.followers,
+        popularity: profile.popularity,
+        top_tracks: profile.top_tracks.iter().map(catalog_track_dto).collect(),
+        albums: profile.albums.iter().map(catalog_album_dto).collect(),
+        bio: profile.bio.clone(),
     }
 }
 

@@ -161,7 +161,7 @@ private val SpoteShapes = Shapes(
 @Composable
 fun SpoteTheme(
     mode: SpoteThemeMode = SpoteThemeMode.Midnight,
-    uiStyle: SpoteUiStyle = SpoteUiStyle.Medium,
+    uiStyle: SpoteUiStyle = SpoteUiStyle.Off,
     content: @Composable () -> Unit,
 ) {
     val colors = mode.colors()
