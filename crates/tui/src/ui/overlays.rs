@@ -40,6 +40,7 @@ pub(super) fn draw_overlay(app: &mut App, buf: &mut Buffer, layout: &Layout, pal
             album,
             artist,
             tracks,
+            ..
         } => draw_confirm_delete_album(app, buf, layout, pal, &album, &artist, tracks),
         Overlay::AddToPlaylist { key, selected } => {
             draw_add_to_playlist(app, buf, layout, pal, &key, selected)

@@ -237,6 +237,9 @@ pub enum Overlay {
         album: String,
         artist: String,
         tracks: usize,
+        /// Claves exactas a ocultar: la ficha puede fusionar variantes de
+        /// artista que `album_tracks` agrupa por separado.
+        keys: Vec<String>,
     },
     /// Elegir lista destino para la pista seleccionada.
     AddToPlaylist {
@@ -1346,7 +1349,6 @@ pub struct App {
     /// Filtro inline de ajustes (mismo patrón que discos y biblioteca).
     pub settings_query: String,
     pub settings_search_focus: bool,
-    pub show_bpm: bool,
     pub viz: Viz,
     pub fps: FpsMeter,
     pub frame_ms: f32,
@@ -1619,7 +1621,6 @@ impl App {
             settings_selected: 0,
             settings_query: String::new(),
             settings_search_focus: false,
-            show_bpm: cfg.ui.show_bpm,
             viz,
             fps: FpsMeter::new(),
             frame_ms: 0.0,
@@ -1822,7 +1823,16 @@ impl App {
             LibFilter::Recent,
         ];
         if let Ok(lists) = self.lib.playlists() {
-            options.extend(lists.into_iter().map(|list| LibFilter::Playlist(list.id)));
+            // Los discos guardados no son listas de usuario: si se colaran
+            // aquí, `[`/`]` abriría un filtro sin entrada en la navegación.
+            options.extend(
+                lists
+                    .into_iter()
+                    .filter(|list| {
+                        !spote_core::library::is_album_playlist_description(&list.description)
+                    })
+                    .map(|list| LibFilter::Playlist(list.id)),
+            );
         }
         let current = options
             .iter()
@@ -4367,6 +4377,12 @@ impl App {
     /// Mantiene los datos de Tunebat de la pista actual. Solo hay una
     /// petición por pista y las respuestas de una pista anterior se ignoran.
     fn poll_tunebat(&mut self) {
+        if !self.cfg.ui.tunebat {
+            self.tunebat = None;
+            self.tunebat_loading = false;
+            self.tunebat_key.clear();
+            return;
+        }
         while let Some(event) = self.tunebat_worker.try_recv() {
             let TunebatEvent::Info { key, result } = event;
             let info = result.ok().flatten();

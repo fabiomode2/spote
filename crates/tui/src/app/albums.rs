@@ -56,40 +56,28 @@ impl App {
             self.toast("elige un disco para quitarlo", ToastKind::Warn);
             return;
         };
-        self.open_delete_album_named(&album.album, &album.artist);
+        let keys: Vec<String> = self
+            .lib
+            .album_tracks(&album.album, &album.artist)
+            .map(|rows| rows.into_iter().map(|row| row.track.key).collect())
+            .unwrap_or_default();
+        self.confirm_delete_album(&album.album, &album.artist, keys);
     }
 
-    pub(super) fn open_delete_album_named(&mut self, album: &str, artist: &str) {
-        let tracks = self
-            .lib
-            .album_tracks(album, artist)
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        if tracks == 0 {
+    /// Confirmación con las claves exactas que se van a ocultar. La ficha
+    /// abierta fusiona variantes de artista («Biberon» / «Bíberon»), así que
+    /// no basta con resolver por nombre otra vez al confirmar.
+    pub(super) fn confirm_delete_album(&mut self, album: &str, artist: &str, keys: Vec<String>) {
+        if keys.is_empty() {
             self.toast("ese disco ya no está en la biblioteca", ToastKind::Warn);
             return;
         }
         self.overlay = Overlay::ConfirmDeleteAlbum {
             album: album.to_string(),
             artist: artist.to_string(),
-            tracks,
+            tracks: keys.len(),
+            keys,
         };
-    }
-
-    /// `x` en el tracklist: quita la pista seleccionada de la biblioteca.
-    pub(super) fn remove_album_track_selected(&mut self) {
-        let Some(row) = self.selected_row().cloned() else {
-            self.toast("no hay una pista seleccionada", ToastKind::Warn);
-            return;
-        };
-        if self.hide_library_keys(std::slice::from_ref(&row.track.key)) > 0 {
-            self.toast(
-                format!("«{}» fuera de la biblioteca", row.track.title),
-                ToastKind::Ok,
-            );
-        } else {
-            self.toast("esa pista ya no estaba en la biblioteca", ToastKind::Warn);
-        }
     }
 
     /// `x` en la ficha remota de un álbum: quita la pista si está en la
@@ -370,10 +358,29 @@ impl App {
             KeyCode::Char('s') => self.save_album_page_playlist(),
             KeyCode::Char('x') => self.remove_album_page_track(),
             KeyCode::Char('X') => {
-                if let Some(page) = &self.album_page {
-                    if page.provider == "local" {
-                        let (album, artist) = (page.title.clone(), page.artist.clone());
-                        self.open_delete_album_named(&album, &artist);
+                if let Some(page) = self.album_page.clone() {
+                    // La ficha puede venir del catálogo (`provider` ya no es
+                    // «local») y mezclar pistas que no están descargadas. Se
+                    // ocultan solo las que existen en la biblioteca.
+                    let keys: Vec<String> = page
+                        .tracks
+                        .iter()
+                        .filter(|track| {
+                            self.lib
+                                .track_by_key(&track.key)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        })
+                        .map(|track| track.key.clone())
+                        .collect();
+                    if keys.is_empty() {
+                        self.toast(
+                            "ese disco es del catálogo y no está en la biblioteca",
+                            ToastKind::Warn,
+                        );
+                    } else {
+                        self.confirm_delete_album(&page.title, &page.artist, keys);
                     }
                 }
             }
@@ -542,7 +549,11 @@ impl App {
             return;
         }
         let name = format!("{} — {}", album.artist, album.album);
-        let description = format!("álbum · {} pistas", tracks.len());
+        let description = format!(
+            "{} · {} pistas",
+            spote_core::library::ALBUM_PLAYLIST_PREFIX,
+            tracks.len()
+        );
         let cover_url = album.art_url.as_deref();
         let id = match self
             .lib

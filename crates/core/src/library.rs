@@ -176,6 +176,16 @@ pub struct WrappedAlbum {
     pub art_url: Option<String>,
 }
 
+/// Prefijo de las listas que en realidad son discos guardados o importados.
+/// Viven en la pestaña de discos y no se listan como listas de usuario.
+pub const ALBUM_PLAYLIST_PREFIX: &str = "álbum";
+
+/// ¿La descripción marca la lista como un disco guardado?
+pub fn is_album_playlist_description(description: &str) -> bool {
+    let description = description.trim_start().to_lowercase();
+    description.starts_with("álbum") || description.starts_with("album")
+}
+
 pub struct Library {
     conn: Connection,
     path: PathBuf,
@@ -1734,16 +1744,15 @@ impl Library {
 
     /// Oculta todas las pistas visibles de un disco. Devuelve sus claves.
     pub fn hide_album(&mut self, album: &str, artist: &str) -> Result<Vec<String>> {
-        let keys: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT key FROM track
-                 WHERE album = ?1 AND artist = ?2 AND hidden = 0",
-            )?;
-            let keys = stmt
-                .query_map(params![album, artist], |row| row.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            keys
-        };
+        // Se resuelve con `album_tracks` para compartir su criterio de
+        // agrupación: el artista del disco puede ser `album_artist` y no el
+        // crédito de cada pista, y una consulta con `artist = ?` dejaría
+        // pistas atrás (o no encontraría nada).
+        let keys: Vec<String> = self
+            .album_tracks(album, artist)?
+            .into_iter()
+            .map(|row| row.track.key)
+            .collect();
         if !keys.is_empty() {
             self.hide_tracks(&keys)?;
         }
@@ -2016,6 +2025,28 @@ mod tests {
         // Volver a importarla/reproducirla la devuelve a la biblioteca.
         lib.upsert_track(&track("k", "Song", "Artist")).unwrap();
         assert_eq!(lib.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn album_playlist_description_is_marked_by_prefix() {
+        assert!(is_album_playlist_description("álbum · 12 pistas"));
+        assert!(is_album_playlist_description("Álbum importado"));
+        assert!(!is_album_playlist_description("Mis favoritas"));
+        assert!(!is_album_playlist_description(""));
+    }
+
+    #[test]
+    fn hide_album_uses_album_artist_for_grouping() {
+        let mut lib = Library::open_in_memory().unwrap();
+        let mut one = track("k1", "One More Time", "Daft Punk feat. Romanthony");
+        one.album = Some("Discovery".into());
+        lib.upsert_track(&one).unwrap();
+        lib.set_album_artist("k1", "Daft Punk").unwrap();
+        let albums = lib.albums().unwrap();
+        assert_eq!(albums.len(), 1);
+        let keys = lib.hide_album(&albums[0].album, &albums[0].artist).unwrap();
+        assert_eq!(keys, vec!["k1".to_string()]);
+        assert!(lib.albums().unwrap().is_empty());
     }
 
     #[test]

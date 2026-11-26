@@ -72,12 +72,12 @@ la propia TUI.
 - **Discos guardados**: pestaña `discos` con portadas, orden por artista y
   buscador (`/`); `z` alterna tarjetas y lista compacta. Abrir un disco lo
   apila en el historial.
-  `X` o ⇧clic en la × oculta una pista de la biblioteca sin borrar el audio
-  ni su historial; en favoritas quita el corazón. `d` sobre una lista y `X`
-  sobre un disco piden confirmación y quitan **todas sus canciones** de la
-  biblioteca (el audio sigue en disco). En la lista se conservan por defecto y
-  `t` permite quitarlas también. `spote dedupe` fusiona duplicados de forma
-  explícita, con `--dry-run` y backup previo.
+  `X` sobre un disco (o ⇧clic en la ×) pide confirmación y quita **todas sus
+  canciones** de la biblioteca sin borrar el audio; dentro de la ficha, `x`
+  quita solo la pista seleccionada. `d` sobre una lista también pide
+  confirmación: por defecto borra la lista y conserva sus canciones, y `t` en
+  el diálogo permite quitarlas también. `spote dedupe` fusiona duplicados de
+  forma explícita, con `--dry-run` y backup previo.
 - **Artistas completos**: las pistas guardan todos los artistas de Spotify
   (principal + features) y `album_artist` para no fragmentar discos. Las
   pistas antiguas se reprocesan en segundo plano; `spote artistas` lo relanza
@@ -103,7 +103,8 @@ la propia TUI.
   caliente y se puede apagar desde la propia pestaña o desde ajustes. Dentro de
   la pestaña, `←`/`→` cambia de control y `↑`/`↓` ajusta el valor.
 - **Amigos y Tunebat**: el panel de amigos muestra, además de la presencia,
-  los datos de **Tunebat** de la pista sonando: BPM, tonalidad, Camelot,
+  los datos de **Tunebat** de la pista sonando (`[ui] tunebat = false` lo
+  desactiva): BPM, tonalidad, Camelot,
   energy, danceability, happiness y popularidad. Se consulta solo al cambiar
   de canción, se cachea en memoria y tiene respaldo compacto en paneles bajos.
 - **Salas**: `spoted` añade presencia, chat y cola compartida. La API exige una
@@ -166,6 +167,7 @@ art_mode = "default"   # default | half | pixel | braille | off
 viz = "clean"          # clean | aurora | bloom | inferno | crt | lcd | rack | braille | stage
 fps = 60               # frames de la UI (20-60)
 fx_fps = 60            # ritmo de los efectos; a pantalla completa va a la mitad
+tunebat = true         # BPM/tonalidad de la pista en el panel de amigos (API no oficial)
 
 panel_opacity = 72     # 55-100; transparencia real de paneles
 chrome_opacity = 40    # 0-100; barra superior y navegación

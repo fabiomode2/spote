@@ -395,11 +395,11 @@ fn run_import(args: &Args) -> Result<()> {
                 // Marca los álbumes importados para que la navegación de
                 // biblioteca no los confunda con listas de usuario.
                 let description = if catalog.kind == "album" {
-                    "álbum importado"
+                    format!("{} importado", spote_core::library::ALBUM_PLAYLIST_PREFIX)
                 } else {
-                    ""
+                    String::new()
                 };
-                lib.create_playlist_full(&catalog.name, description, None, None)?
+                lib.create_playlist_full(&catalog.name, &description, None, None)?
             }
         };
         for track in &refs {

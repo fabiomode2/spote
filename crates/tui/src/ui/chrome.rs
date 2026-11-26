@@ -329,7 +329,9 @@ pub(super) fn draw_nav(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &P
         .playlists()
         .unwrap_or_default()
         .into_iter()
-        .filter(|playlist| !is_album_playlist(&playlist.description))
+        .filter(|playlist| {
+            !spote_core::library::is_album_playlist_description(&playlist.description)
+        })
         .collect();
     let block = (Tab::ALL.len() + 3 + playlists.len().min(6) + 3) as u16;
     let offset = if app.vcenter {
@@ -1215,13 +1217,6 @@ pub(super) fn draw_progress_bar(
             Alignment::Left,
         );
     }
-}
-
-/// `save_album_playlist` marca las listas de disco con «álbum · N pistas».
-/// Esas listas no se pintan en la navegación de biblioteca.
-fn is_album_playlist(description: &str) -> bool {
-    let description = description.trim_start().to_lowercase();
-    description.starts_with("álbum") || description.starts_with("album")
 }
 
 pub(super) fn draw_hint(app: &mut App, buf: &mut Buffer, layout: &Layout, pal: &Palette) {

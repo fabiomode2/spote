@@ -149,34 +149,37 @@ impl App {
                 }
                 _ => {}
             },
-            Overlay::ConfirmDeleteAlbum { album, artist, .. } => match key.code {
+            Overlay::ConfirmDeleteAlbum {
+                album,
+                artist,
+                keys,
+                ..
+            } => match key.code {
                 KeyCode::Esc => self.overlay = Overlay::None,
                 KeyCode::Enter => {
-                    match self.lib.hide_album(&album, &artist) {
-                        Ok(keys) => {
-                            if keys.is_empty() {
-                                self.refresh_library();
-                                self.toast(
-                                    "el disco ya no estaba en la biblioteca",
-                                    ToastKind::Warn,
-                                );
-                            } else {
-                                if self.album_open.as_ref().is_some_and(|open| {
-                                    open.album == album && open.artist == artist
-                                }) {
-                                    self.close_album();
-                                }
-                                self.cleanup_hidden_keys(&keys);
-                                let songs = if keys.len() == 1 {
-                                    "1 canción".to_string()
-                                } else {
-                                    format!("{} canciones", keys.len())
-                                };
-                                self.toast(
-                                    format!("disco quitado · {songs} fuera de la biblioteca"),
-                                    ToastKind::Ok,
-                                );
+                    match self.lib.hide_tracks(&keys) {
+                        Ok(0) => {
+                            self.refresh_library();
+                            self.toast("el disco ya no estaba en la biblioteca", ToastKind::Warn);
+                        }
+                        Ok(hidden) => {
+                            if self
+                                .album_open
+                                .as_ref()
+                                .is_some_and(|open| open.album == album && open.artist == artist)
+                            {
+                                self.close_album();
                             }
+                            self.cleanup_hidden_keys(&keys);
+                            let songs = if hidden == 1 {
+                                "1 canción".to_string()
+                            } else {
+                                format!("{hidden} canciones")
+                            };
+                            self.toast(
+                                format!("disco quitado · {songs} fuera de la biblioteca"),
+                                ToastKind::Ok,
+                            );
                         }
                         Err(err) => {
                             self.toast(format!("no pude quitar el disco: {err}"), ToastKind::Error)
@@ -337,7 +340,7 @@ impl App {
             id,
             name,
             tracks,
-            remove_tracks: true,
+            remove_tracks: false,
         };
     }
 }

@@ -609,15 +609,16 @@ impl App {
                     self.open_delete_playlist();
                 }
             }
-            KeyCode::Char('x' | 'X') if self.tab == Tab::Albums => {
-                if self.album_open.is_some() {
-                    if upper {
-                        self.open_delete_album();
-                    } else {
-                        self.remove_album_track_selected();
-                    }
-                } else {
+            KeyCode::Char('X' | 'x') if self.tab == Tab::Albums => {
+                // La lista de discos no tiene pista seleccionable: `x` solo
+                // avisa y `X` pide confirmación para quitar el disco entero.
+                if upper {
                     self.open_delete_album();
+                } else {
+                    self.toast(
+                        "abre el disco para quitar una pista (enter)",
+                        ToastKind::Warn,
+                    );
                 }
             }
             KeyCode::Char('x' | 'X') if upper && self.tab == Tab::Library => {

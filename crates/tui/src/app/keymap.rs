@@ -1,7 +1,7 @@
 //! Fuente única de leyendas y ayuda. Si una tecla no está aquí, no existe:
 //! así la barra inferior no miente.
 
-use super::{App, CenterFocus, Overlay, Pane, Tab};
+use super::{App, CenterFocus, Detail, Overlay, Pane, Tab};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Hint {
@@ -351,6 +351,36 @@ impl App {
                 },
             ];
         }
+        // El panel lateral de álbum captura sus teclas aunque la pestaña de
+        // debajo sea otra; los atajos se anuncian aquí.
+        if self.detail == Some(Detail::Album) {
+            return vec![
+                Hint {
+                    key: "enter",
+                    label: "reproducir",
+                },
+                Hint {
+                    key: "↑↓",
+                    label: "mover",
+                },
+                Hint {
+                    key: "x",
+                    label: "quitar pista",
+                },
+                Hint {
+                    key: "X",
+                    label: "quitar disco",
+                },
+                Hint {
+                    key: "s",
+                    label: "guardar lista",
+                },
+                Hint {
+                    key: "esc",
+                    label: "volver",
+                },
+            ];
+        }
         match self.tab {
             Tab::Now => {
                 let mut hints = vec![
@@ -457,79 +487,40 @@ impl App {
                     label: "ayuda",
                 },
             ],
-            Tab::Albums => {
-                if self.album_open.is_some() {
-                    vec![
-                        Hint {
-                            key: "enter",
-                            label: "reproducir",
-                        },
-                        Hint {
-                            key: "↑↓",
-                            label: "mover",
-                        },
-                        Hint {
-                            key: "d",
-                            label: "bajar álbum",
-                        },
-                        Hint {
-                            key: "x",
-                            label: "quitar pista",
-                        },
-                        Hint {
-                            key: "X",
-                            label: "quitar disco",
-                        },
-                        Hint {
-                            key: "s",
-                            label: "guardar lista",
-                        },
-                        Hint {
-                            key: "esc",
-                            label: "volver",
-                        },
-                        Hint {
-                            key: "?",
-                            label: "ayuda",
-                        },
-                    ]
-                } else {
-                    vec![
-                        Hint {
-                            key: "enter",
-                            label: "abrir álbum",
-                        },
-                        Hint {
-                            key: "↑↓",
-                            label: "mover",
-                        },
-                        Hint {
-                            key: "d",
-                            label: "bajar todo",
-                        },
-                        Hint {
-                            key: "X",
-                            label: "quitar disco",
-                        },
-                        Hint {
-                            key: "s",
-                            label: "guardar lista",
-                        },
-                        Hint {
-                            key: "g",
-                            label: "artista",
-                        },
-                        Hint {
-                            key: "E",
-                            label: "diseño",
-                        },
-                        Hint {
-                            key: "?",
-                            label: "ayuda",
-                        },
-                    ]
-                }
-            }
+            Tab::Albums => vec![
+                Hint {
+                    key: "enter",
+                    label: "abrir álbum",
+                },
+                Hint {
+                    key: "↑↓",
+                    label: "mover",
+                },
+                Hint {
+                    key: "d",
+                    label: "bajar todo",
+                },
+                Hint {
+                    key: "X",
+                    label: "quitar disco",
+                },
+                Hint {
+                    key: "s",
+                    label: "guardar lista",
+                },
+                Hint {
+                    key: "g",
+                    label: "artista",
+                },
+                Hint {
+                    key: "E",
+                    label: "diseño",
+                },
+                Hint {
+                    key: "?",
+                    label: "ayuda",
+                },
+            ],
             Tab::Search => vec![
                 Hint {
                     key: "escribe",

@@ -351,8 +351,12 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         rect.height.saturating_sub(3),
     );
     // Geometría compartida: la lista de amigos no puede pisar ni el bloque
-    // de Tunebat ni el pie.
-    let tunebat_data_lines = if rect.height >= 14 {
+    // de Tunebat ni el pie. Con una descarga activa, la barra ocupa las dos
+    // filas de abajo: Tunebat se esconde y la lista termina por encima.
+    let downloading = rect.height > 8 && app.downloads.iter().any(|info| info.active());
+    let tunebat_data_lines = if downloading {
+        0
+    } else if rect.height >= 14 {
         4
     } else if rect.height >= 11 {
         3
@@ -365,7 +369,13 @@ fn draw_friends(app: &mut App, buf: &mut Buffer, rect: Rect, pal: &Palette) {
         (tunebat_data_lines > 0).then(|| rect.y + rect.height - (tunebat_data_lines + 2));
     let list_bottom = tunebat_base
         .map(|base| base.saturating_sub(1))
-        .unwrap_or_else(|| rect.y + rect.height - 3);
+        .unwrap_or_else(|| {
+            if downloading {
+                rect.y + rect.height - 5
+            } else {
+                rect.y + rect.height - 3
+            }
+        });
     let mut y = inner.y;
     if app.social.is_none() {
         text_at(

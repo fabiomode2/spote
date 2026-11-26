@@ -231,7 +231,8 @@ pub struct UiCfg {
     /// fondo/mosaico para que la animación empiece más abajo.
     pub zen_viz_pct: u8,
     /// Número de bandas del ecualizador del header.
-    pub show_bpm: bool,
+    /// Consulta BPM/tonalidad de la pista actual en Tunebat (API no oficial).
+    pub tunebat: bool,
     /// Tamaño/zoom de la letra: 0 compacta, 1 normal, 2 grande.
     pub lyrics_size: u8,
     /// Opacidad de los paneles, en % (55-100). El fondo se sigue viendo.
@@ -445,7 +446,7 @@ impl Default for UiCfg {
             button_pad: 2,
             zen: false,
             zen_viz_pct: 55,
-            show_bpm: true,
+            tunebat: true,
             lyrics_size: 1,
             panel_opacity: 72,
             chrome_opacity: 40,
