@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.MaterialTheme
@@ -49,6 +50,7 @@ fun AlbumScreen(
     onMore: (Track) -> Unit,
     onDownload: () -> Unit,
     onLike: () -> Unit,
+    isFavorite: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val colors = LocalSpoteColors.current
@@ -136,12 +138,24 @@ fun AlbumScreen(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         CircleIconButton(
-                            icon = Icons.Rounded.FavoriteBorder,
-                            contentDescription = "Favorito",
+                            icon = if (isFavorite) {
+                                Icons.Rounded.Favorite
+                            } else {
+                                Icons.Rounded.FavoriteBorder
+                            },
+                            contentDescription = if (isFavorite) {
+                                "Quitar álbum de favoritos"
+                            } else {
+                                "Añadir álbum a favoritos"
+                            },
                             onClick = onLike,
                             size = 44.dp,
                             iconSize = 23.dp,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            tint = if (isFavorite) {
+                                colors.accent
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
                         )
                     }
                 }

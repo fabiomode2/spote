@@ -50,6 +50,8 @@ data class Track(
     /** Consulta de catálogo (artista + título) para resolver el audio bajo demanda. */
     val remoteQuery: String? = null,
     val sourceLabel: String? = null,
+    /** Todos los artistas/créditos de interpretación, en orden. */
+    val artists: List<String> = emptyList(),
     /** `spotify` / `deezer` cuando la pista viene del catálogo. */
     val provider: String? = null,
     val providerId: String? = null,

@@ -123,6 +123,10 @@ dependencies {
     implementation(libs.newpipe)
     implementation(libs.zxing.core)
     implementation(libs.zxing.android.embedded)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode)
     implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
     coreLibraryDesugaring(libs.desugar)

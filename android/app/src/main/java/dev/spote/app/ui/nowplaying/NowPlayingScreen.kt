@@ -224,7 +224,9 @@ fun NowPlayingScreen(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = if (openArtist != null) {
-                                            Modifier.clickable { openArtist(track.artist) }
+                                            Modifier.clickable {
+                                                openArtist(track.artists.firstOrNull() ?: track.artist)
+                                            }
                                         } else {
                                             Modifier
                                         },
@@ -472,10 +474,10 @@ private fun LyricsOverlay(
         if (!player.lyricsSynced) -1
         else player.lyrics.indexOfLast { it.startMs <= player.positionMs }
     }
-    val startIndex = 1
+    val startIndex = 0
     LaunchedEffect(activeIndex) {
         if (player.lyricsSynced && activeIndex >= 0) {
-            listState.animateScrollToItem((startIndex + activeIndex - 2).coerceAtLeast(startIndex))
+            listState.animateScrollToItem((activeIndex - 3).coerceAtLeast(startIndex))
         }
     }
 
@@ -542,21 +544,19 @@ private fun LyricsOverlay(
                         }
                     }
                 } else {
-                    LazyColumn(
-                        state = listState,
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .weight(1f),
-                        contentPadding = PaddingValues(
-                            start = 28.dp,
-                            end = 28.dp,
-                            top = 18.dp,
-                            bottom = 32.dp,
-                        ),
-                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        item(key = "overlay-header") {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 28.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
                                 Text(
                                     text = "LETRA",
                                     style = MaterialTheme.typography.labelSmall,
@@ -573,38 +573,55 @@ private fun LyricsOverlay(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                        }
-                        itemsIndexed(
-                            player.lyrics,
-                            key = { index, line -> "$index-${line.startMs}" },
-                        ) { index, line ->
-                            val active = player.lyricsSynced && index == activeIndex
-                            Text(
-                                text = line.text,
-                                style = if (active) {
-                                    MaterialTheme.typography.headlineSmall
-                                } else {
-                                    MaterialTheme.typography.titleLarge
-                                },
-                                color = if (active) {
-                                    colors.accent
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
-                                        alpha = if (player.lyricsSynced) 0.62f else 0.9f,
-                                    )
-                                },
+                            Spacer(Modifier.height(10.dp))
+                            LazyColumn(
+                                state = listState,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .then(
-                                        if (player.lyricsSynced) {
-                                            Modifier.clickable {
-                                                scope.launch { onSeek(line.startMs) }
-                                            }
+                                    .height(294.dp),
+                                contentPadding = PaddingValues(
+                                    start = 28.dp,
+                                    end = 28.dp,
+                                    top = 4.dp,
+                                    bottom = 4.dp,
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                itemsIndexed(
+                                    player.lyrics,
+                                    key = { index, line -> "$index-${line.startMs}" },
+                                ) { index, line ->
+                                    val active = player.lyricsSynced && index == activeIndex
+                                    Text(
+                                        text = line.text,
+                                        style = if (active) {
+                                            MaterialTheme.typography.headlineSmall
                                         } else {
-                                            Modifier
+                                            MaterialTheme.typography.titleLarge
                                         },
-                                    ),
-                            )
+                                        color = if (active) {
+                                            colors.accent
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                                alpha = if (player.lyricsSynced) 0.62f else 0.9f,
+                                            )
+                                        },
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .then(
+                                                if (player.lyricsSynced) {
+                                                    Modifier.clickable {
+                                                        scope.launch { onSeek(line.startMs) }
+                                                    }
+                                                } else {
+                                                    Modifier
+                                                },
+                                            ),
+                                    )
+                                }
+                            }
                         }
                     }
                 }

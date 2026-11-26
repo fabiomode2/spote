@@ -43,6 +43,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".setup.QrScannerActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Spote" />
+
         <service
             android:name=".playback.SpotePlaybackService"
             android:foregroundServiceType="mediaPlayback"

@@ -53,6 +53,8 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -396,9 +398,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 withCatalog { CatalogClient.findAlbum(title, artist) }
             }.getOrNull()
             if (album != null) {
-                return album.copy(
-                    tracks = album.tracks.map { localizeTrack(it) },
-                    trackCount = album.tracks.size,
+                val enriched = enrichAlbumCredits(album)
+                return enriched.copy(
+                    tracks = enriched.tracks.map { localizeTrack(it) },
+                    trackCount = enriched.tracks.size,
                 )
             }
             val key = normalizeName(artist)
@@ -417,9 +420,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val parts = id.removePrefix("catalog:").split(":", limit = 2)
             require(parts.size == 2 && parts.all { it.isNotBlank() }) { "álbum de catálogo inválido" }
             val album = withCatalog { CatalogClient.album(parts[0], parts[1]) }
-            return album.copy(
-                tracks = album.tracks.map { localizeTrack(it) },
-                trackCount = album.tracks.size,
+            val enriched = enrichAlbumCredits(album)
+            return enriched.copy(
+                tracks = enriched.tracks.map { localizeTrack(it) },
+                trackCount = enriched.tracks.size,
             )
         }
 
@@ -447,7 +451,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
         val catalog = runCatching {
             withCatalog { CatalogClient.findAlbum(local.title, local.artist) }
-        }.getOrNull()
+        }.getOrNull()?.let { enrichAlbumCredits(it) }
         return mergeAlbum(local, catalog)
     }
 
@@ -455,6 +459,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val x = normalizeName(a)
         val y = normalizeName(b)
         return x == y || x.contains(y) || y.contains(x)
+    }
+
+    private suspend fun enrichAlbumCredits(album: Album): Album {
+        if (album.tracks.isEmpty()) return album
+        return kotlinx.coroutines.coroutineScope {
+            val enriched = album.tracks.map { track ->
+                async {
+                    val providerId = track.providerId ?: return@async track
+                    val credits = runCatching {
+                        CatalogClient.trackCredits(track.provider ?: "deezer", providerId)
+                    }.getOrNull().orEmpty()
+                    if (credits.size > 1) {
+                        track.copy(
+                            artist = credits.joinToString(", "),
+                            artists = credits,
+                        )
+                    } else {
+                        track
+                    }
+                }
+            }.awaitAll()
+            album.copy(tracks = enriched)
+        }
     }
 
     /** El catálogo manda en orden y metadatos; el archivo local manda al sonar. */
@@ -832,6 +859,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             rememberInLibrary(resolved)
+            enrichTrackCredits(resolved)
             requestLyrics(resolved)
             val playbackTrack = resolved.toPlaybackTrack()
             if (playbackTrack == null) {
@@ -842,8 +870,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun rememberInLibrary(track: Track) {
-        if (track.downloaded || track.localPath != null) return
+    /** Completa artistas invitados del catálogo sin bloquear la reproducción. */
+    private fun enrichTrackCredits(track: Track) {
+        val providerId = track.providerId ?: return
+        if (track.artists.size > 1) return
+        viewModelScope.launch {
+            val credits = runCatching {
+                CatalogClient.trackCredits(track.provider ?: "deezer", providerId)
+            }.getOrNull().orEmpty()
+            if (credits.size <= 1) return@launch
+            val joined = credits.joinToString(", ")
+            _state.update { ui ->
+                ui.mapTrack(track.key) { current ->
+                    current.copy(artist = joined, artists = credits)
+                }
+            }
+        }
+    }
+
+    private fun rememberInLibrary(track: Track) {        if (track.downloaded || track.localPath != null) return
         if (track.providerId.isNullOrBlank()) return
         if (_state.value.library.tracks.any { it.key == track.key }) return
         viewModelScope.launch {
@@ -1008,8 +1053,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (playback.connected.value) playback.cycleRepeat()
     }
 
-    fun toggleFavorite(key: String) {
-        val current = findTrack(key) ?: return
+    /**
+     * Like de álbum: si todas las pistas ya son favoritas, las quita; si no,
+     * marca todas. Se usa para el corazón de la cabecera del álbum.
+     */
+    fun toggleAlbumFavorite(album: Album) {
+        val tracks = album.tracks.distinctBy { it.key }
+        if (tracks.isEmpty()) return
+        val allFavorite = tracks.all { track ->
+            track.favorite || FavoriteStore.isFavorite(track.key)
+        }
+        val target = !allFavorite
+        ActionLog.log(
+            "favorite.album",
+            "album" to album.title,
+            "artist" to album.artist,
+            "favorite" to target,
+            "tracks" to tracks.size,
+        )
+        viewModelScope.launch {
+            tracks.forEach { track ->
+                val current = findTrack(track.key) ?: track
+                val isFavorite = current.favorite || FavoriteStore.isFavorite(track.key)
+                if (isFavorite != target) toggleFavorite(track.key)
+            }
+        }
+    }
+
+    fun toggleFavorite(key: String) {        val current = findTrack(key) ?: return
         val next = !current.favorite
         ActionLog.log("favorite.toggle", "track" to key, "next" to next)
         if (current.isRemote) {

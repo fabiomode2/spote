@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.roundToLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.Call
@@ -38,6 +39,54 @@ import org.jsoup.parser.Parser
  * cancellation is always rethrown.
  */
 class LyricsClient(context: Context) {
+
+    private data class LyricsBundle(
+        val genius: LyricsDoc?,
+        val lrclib: LyricsDoc?,
+        val lrcmux: LyricsDoc?,
+        val plus: LyricsDoc?,
+    )
+
+    private suspend fun <T> safe(block: suspend () -> T): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * Conserva el texto de Genius y solo acepta los tiempos del proveedor si
+     * su letra se parece lo suficiente. Es la regla de la TUI: antes una letra
+     * plana correcta que un karaoke de otra canción.
+     */
+    private fun resolveGenius(genius: LyricsDoc, timing: LyricsDoc): LyricsDoc {
+        if (lyricsSimilarity(genius, timing) < GENIUS_TEXT_MATCH) return genius
+        return if (genius.lines.size == timing.lines.size) {
+            timing.copy(
+                lines = timing.lines.mapIndexed { index, line ->
+                    line.copy(text = genius.lines[index].text)
+                },
+                source = "genius",
+            )
+        } else {
+            timing.copy(source = "genius")
+        }
+    }
+
+    private fun lyricsSimilarity(a: LyricsDoc, b: LyricsDoc): Double {
+        val left = lyricWords(a)
+        val right = lyricWords(b)
+        if (left.isEmpty() || right.isEmpty()) return 0.0
+        val intersection = left.intersect(right).size
+        return (2.0 * intersection) / (left.size + right.size)
+    }
+
+    private fun lyricWords(doc: LyricsDoc): Set<String> =
+        normalizeText(doc.lines.joinToString(" ") { it.text })
+            .split(' ')
+            .filter { it.length >= 3 }
+            .toSet()
 
     private val appContext: Context = context.applicationContext ?: context
     private val cacheDir = File(appContext.filesDir, CACHE_DIR)
@@ -69,26 +118,61 @@ class LyricsClient(context: Context) {
         cached(key)?.let { return@withContext it }
 
         val doc = try {
-            val lrclib = runCatching {
-                fetchLrclib(title = title, artist = artist, album = album, durationMs = durationMs)
-            }.getOrNull()
-            if (lrclib?.synced == true) {
-                lrclib
-            } else {
-                val plus = runCatching {
-                    fetchLyricsPlus(
-                        title = title,
-                        artist = artist,
-                        album = album,
-                        durationMs = durationMs,
-                    )
-                }.getOrNull()
-                when {
-                    plus?.synced == true -> plus
-                    lrclib != null -> lrclib
-                    else -> runCatching { fetchGenius(title = title, artist = artist) }
-                        .getOrNull() ?: plus
+            // Genius es la fuente autoritativa del texto (como en la TUI).
+            // LRCLIB/lrcmux/LyricsPlus solo pueden prestar tiempos si su
+            // letra coincide con la de Genius.
+            val bundle = kotlinx.coroutines.coroutineScope {
+                val genius = async {
+                    safe { fetchGenius(title = title, artist = artist) }
                 }
+                val lrclib = async {
+                    safe {
+                        fetchLrclib(
+                            title = title,
+                            artist = artist,
+                            album = album,
+                            durationMs = durationMs,
+                        )
+                    }
+                }
+                val lrcmux = async {
+                    safe {
+                        fetchLrcmux(
+                            title = title,
+                            artist = artist,
+                            album = album,
+                            durationMs = durationMs,
+                        )
+                    }
+                }
+                val plus = async {
+                    safe {
+                        fetchLyricsPlus(
+                            title = title,
+                            artist = artist,
+                            album = album,
+                            durationMs = durationMs,
+                        )
+                    }
+                }
+                LyricsBundle(
+                    genius = genius.await(),
+                    lrclib = lrclib.await(),
+                    lrcmux = lrcmux.await(),
+                    plus = plus.await(),
+                )
+            }
+            val timing = listOf(bundle.lrclib, bundle.lrcmux, bundle.plus)
+                .firstOrNull { it?.synced == true }
+            val plain = bundle.lrclib?.takeIf { !it.synced }
+                ?: bundle.lrcmux?.takeIf { !it.synced }
+                ?: bundle.plus?.takeIf { !it.synced }
+            when {
+                bundle.genius != null && timing != null ->
+                    resolveGenius(bundle.genius, timing)
+                bundle.genius != null -> bundle.genius
+                timing != null -> timing
+                else -> plain
             }
         } catch (e: CancellationException) {
             throw e
@@ -252,8 +336,150 @@ class LyricsClient(context: Context) {
      * Fallback de texto cuando LRCLIB no conoce la pista. Genius no da tiempos,
      * así que se devuelve como letra plana (la UI no finge sincronización).
      */
-    private suspend fun fetchGenius(title: String, artist: String): LyricsDoc? {
-        val query = "${nfc(title)} ${nfc(artist)}".trim()
+    /**
+     * lrcmux es el agregador que usa la TUI (Apple/Spotify/QQ). Su endpoint
+     * compatible devuelve el mismo formato LRC que LRCLIB; se valida título,
+     * artista y duración antes de aceptar nada.
+     */
+    private suspend fun fetchLrcmux(
+        title: String,
+        artist: String,
+        album: String?,
+        durationMs: Long,
+    ): LyricsDoc? {
+        if (title.isBlank() || artist.isBlank()) return null
+        val compat = LRC_MUX_COMPAT.toHttpUrl().newBuilder()
+            .addQueryParameter("track_name", nfc(title))
+            .addQueryParameter("artist_name", nfc(artist))
+            .apply {
+                if (!album.isNullOrBlank()) addQueryParameter("album_name", nfc(album))
+                if (durationMs > 0L) addQueryParameter("duration", (durationMs / 1000L).toString())
+            }
+            .build()
+        val compatBody = safe { executeJson(compat) }
+        if (compatBody != null) {
+            val root = runCatching { JSONObject(compatBody) }.getOrNull()
+            if (root != null) {
+                val providerTitle = root.optString("trackName")
+                val providerArtist = root.optString("artistName")
+                val providerAlbum = root.optString("albumName")
+                val providerDuration = root.optDouble("duration", 0.0)
+                if (
+                    providerMetadataMatches(
+                        wantedTitle = title,
+                        wantedArtist = artist,
+                        wantedAlbum = album,
+                        wantedDurationMs = durationMs,
+                        providerTitle = providerTitle,
+                        providerArtist = providerArtist,
+                        providerAlbum = providerAlbum,
+                        providerDurationSec = providerDuration,
+                    )
+                ) {
+                    val synced = root.optString("syncedLyrics").trim()
+                    if (synced.isNotEmpty()) {
+                        val doc = LrcParser.parse(synced, source = "lrcmux")
+                        if (doc.synced && doc.lines.size >= 2) return doc
+                    }
+                    val plain = root.optString("plainLyrics").trim()
+                    if (plain.isNotEmpty()) return LrcParser.parsePlain(plain, source = "lrcmux")
+                }
+            }
+        }
+
+        // Endpoint nativo: líneas separadas con `start` opcional en segundos.
+        val native = LRC_MUX_NATIVE.toHttpUrl().newBuilder()
+            .addQueryParameter("artist", nfc(artist))
+            .addQueryParameter("title", nfc(title))
+            .apply { if (durationMs > 0L) addQueryParameter("duration", (durationMs / 1000L).toString()) }
+            .addQueryParameter("format", "json")
+            .build()
+        val nativeBody = safe { executeJson(native) } ?: return null
+        val root = runCatching { JSONObject(nativeBody) }.getOrNull() ?: return null
+        val track = root.optJSONObject("track") ?: return null
+        if (
+            !providerMetadataMatches(
+                wantedTitle = title,
+                wantedArtist = artist,
+                wantedAlbum = album,
+                wantedDurationMs = durationMs,
+                providerTitle = track.optString("title"),
+                providerArtist = track.optString("artist"),
+                providerAlbum = track.optString("album"),
+                providerDurationSec = track.optDouble("duration", 0.0),
+            )
+        ) {
+            return null
+        }
+        val rows = root.optJSONArray("lines") ?: return null
+        val timed = mutableListOf<LyricLine>()
+        val plain = mutableListOf<String>()
+        for (index in 0 until rows.length()) {
+            val item = rows.optJSONObject(index) ?: continue
+            val text = item.optString("text").trim()
+            if (text.isEmpty()) continue
+            plain += text
+            if (item.has("start") && !item.isNull("start")) {
+                val seconds = item.optDouble("start", -1.0)
+                if (seconds.isFinite() && seconds >= 0.0) {
+                    timed += LyricLine((seconds * 1000.0).toLong(), text)
+                }
+            }
+        }
+        if (timed.size >= 2 && timed.size * 100 >= plain.size * 60) {
+            return LyricsDoc(
+                lines = timed.sortedBy { it.startMs },
+                synced = true,
+                source = "lrcmux",
+            )
+        }
+        if (plain.isEmpty()) return null
+        return LrcParser.parsePlain(plain.joinToString("\n"), source = "lrcmux")
+    }
+
+    private fun providerMetadataMatches(
+        wantedTitle: String,
+        wantedArtist: String,
+        wantedAlbum: String?,
+        wantedDurationMs: Long,
+        providerTitle: String,
+        providerArtist: String,
+        providerAlbum: String?,
+        providerDurationSec: Double,
+    ): Boolean {
+        val wanted = normalizeText(wantedTitle)
+        val got = normalizeText(providerTitle)
+        if (wanted.isEmpty() || got.isEmpty()) return false
+        if (got != wanted && !got.contains(wanted) && !wanted.contains(got)) return false
+
+        val wantedPerformer = normalizeText(wantedArtist.substringBefore(","))
+        val gotPerformer = normalizeText(providerArtist.substringBefore(","))
+        if (
+            wantedPerformer.isNotEmpty() && gotPerformer.isNotEmpty() &&
+            !gotPerformer.contains(wantedPerformer) &&
+            !wantedPerformer.contains(gotPerformer)
+        ) {
+            return false
+        }
+        if (
+            wantedDurationMs > 0L && providerDurationSec.isFinite() && providerDurationSec > 0.0 &&
+            kotlin.math.abs(providerDurationSec * 1000.0 - wantedDurationMs) > 8_000.0
+        ) {
+            return false
+        }
+        if (!wantedAlbum.isNullOrBlank() && !providerAlbum.isNullOrBlank()) {
+            val wantedA = normalizeText(wantedAlbum)
+            val gotA = normalizeText(providerAlbum)
+            if (wantedA.isNotEmpty() && gotA.isNotEmpty() &&
+                !gotA.contains(wantedA) && !wantedA.contains(gotA)
+            ) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private suspend fun fetchGenius(title: String, artist: String): LyricsDoc? {        val query = "${nfc(title)} ${nfc(artist)}".trim()
         if (query.isEmpty()) return null
         val url = GENIUS_SEARCH.toHttpUrl().newBuilder()
             .addQueryParameter("per_page", "5")
@@ -558,11 +784,14 @@ class LyricsClient(context: Context) {
         private const val USER_AGENT = "spote-android"
         private const val GENIUS_SEARCH = "https://genius.com/api/search/multi"
         private const val LYRICS_PLUS_API = "https://lyricsplus.prjktla.my.id/v2/lyrics/get"
+        private const val LRC_MUX_COMPAT = "https://api.lrcmux.dev/compat/lrclib/api/get"
+        private const val LRC_MUX_NATIVE = "https://api.lrcmux.dev/get"
+        private const val GENIUS_TEXT_MATCH = 0.55
         private const val GENIUS_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0 Mobile Safari/537.36"
         private const val CACHE_DIR = "lyrics"
-        private const val CACHE_VERSION = 2
+        private const val CACHE_VERSION = 3
         private const val CACHE_TTL_MS = 30L * 24L * 60L * 60L * 1000L
         private const val FUTURE_SKEW_MS = 5L * 60L * 1000L
         private const val MAX_FILE_KEY_LENGTH = 100

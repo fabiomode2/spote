@@ -429,8 +429,10 @@ fun SpoteApp(
                                 album.tracks.firstOrNull()?.let { appViewModel.toggleDownload(it.key) }
                             },
                             onLike = {
-                                album.tracks.firstOrNull()?.let { appViewModel.toggleFavorite(it.key) }
+                                appViewModel.toggleAlbumFavorite(album)
                             },
+                            isFavorite = album.tracks.isNotEmpty() &&
+                                album.tracks.all { it.favorite },
                         )
                     }
                     loading || error == null -> {

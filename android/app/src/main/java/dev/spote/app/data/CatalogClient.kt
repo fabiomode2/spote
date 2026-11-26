@@ -36,6 +36,12 @@ object CatalogClient {
 
     private const val API = "https://api.deezer.com"
     private const val USER_AGENT = "spote-android/0.5 (catalog)"
+    private val FEATURED_IN_TITLE = Regex(
+        "(?i)[\\(\\[]\\s*(?:feat\\.?|ft\\.?|with|con)\\s+([^\\)\\]]+)",
+    )
+    private val FEATURED_SUFFIX = Regex(
+        "(?i)\\s+(?:feat\\.?|ft\\.?|with|con)\\s+(.+)$",
+    )
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -113,8 +119,19 @@ object CatalogClient {
         artistById("deezer", id)
     }
 
-    suspend fun artistById(provider: String, id: String): ArtistProfile = withContext(Dispatchers.IO) {
-        require(provider == "deezer" || provider.isBlank()) { "Proveedor no soportado: $provider" }
+    /**
+     * Créditos completos de una pista (Deezer los da en `/track/{id}`).
+     * La búsqueda solo devuelve el artista principal; esto añade invitados.
+     */
+    suspend fun trackCredits(provider: String, id: String): List<String> = withContext(Dispatchers.IO) {
+        if (provider.isNotBlank() && provider != "deezer") return@withContext emptyList()
+        val root = get("/track/$id")
+        val primary = root.optJSONObject("artist")?.optString("name").orEmpty().trim()
+        if (primary.isEmpty()) return@withContext emptyList()
+        creditsOf(root, primary, root.optString("title"))
+    }
+
+    suspend fun artistById(provider: String, id: String): ArtistProfile = withContext(Dispatchers.IO) {        require(provider == "deezer" || provider.isBlank()) { "Proveedor no soportado: $provider" }
         artistCache["deezer:$id"]?.let { return@withContext it }
         val root = get("/artist/$id")
         val artist = mapArtist(root) ?: throw IOException("artista vacío")
@@ -185,6 +202,7 @@ object CatalogClient {
         val extraAlbums = mutableListOf<Album>()
         val extraArtists = mutableListOf<Artist>()
         tracks.forEach { track ->
+            val primaryArtist = track.artists.firstOrNull() ?: track.artist
             val albumId = track.albumProviderId
             if (!albumId.isNullOrBlank() && track.album?.isNotBlank() == true) {
                 if (extraAlbums.none { it.providerId == albumId } &&
@@ -193,7 +211,7 @@ object CatalogClient {
                     extraAlbums += Album(
                         id = "catalog:deezer:$albumId",
                         title = track.album.orEmpty(),
-                        artist = track.artist,
+                        artist = primaryArtist,
                         year = 0,
                         cover = track.cover,
                         tracks = emptyList(),
@@ -203,18 +221,29 @@ object CatalogClient {
                     )
                 }
             }
-            val artistId = track.artistProviderId
-            if (!artistId.isNullOrBlank() &&
-                extraArtists.none { it.providerId == artistId } &&
-                searchedArtists.none { it.providerId == artistId }
-            ) {
-                extraArtists += Artist(
-                    id = "catalog:deezer:$artistId",
-                    name = track.artist,
-                    imageUrl = null,
-                    provider = "deezer",
-                    providerId = artistId,
-                )
+            val names = track.artists.ifEmpty { listOf(track.artist) }
+            names.forEachIndexed { index, name ->
+                val artistId = if (index == 0) track.artistProviderId else null
+                val already = if (!artistId.isNullOrBlank()) {
+                    extraArtists.any { it.providerId == artistId } ||
+                        searchedArtists.any { it.providerId == artistId }
+                } else {
+                    extraArtists.any { norm(it.name) == norm(name) } ||
+                        searchedArtists.any { norm(it.name) == norm(name) }
+                }
+                if (name.isNotBlank() && !already) {
+                    extraArtists += Artist(
+                        id = if (!artistId.isNullOrBlank()) {
+                            "catalog:deezer:$artistId"
+                        } else {
+                            "name:${norm(name)}"
+                        },
+                        name = name,
+                        imageUrl = null,
+                        provider = if (!artistId.isNullOrBlank()) "deezer" else null,
+                        providerId = artistId,
+                    )
+                }
             }
         }
         return CatalogSnapshot(
@@ -229,8 +258,8 @@ object CatalogClient {
         val title = item.optString("title").trim()
         if (id <= 0L || title.isEmpty()) return null
         val artistObj = item.optJSONObject("artist")
-        val artist = artistObj?.optString("name").orEmpty().trim()
-        if (artist.isEmpty()) return null
+        val primaryArtist = artistObj?.optString("name").orEmpty().trim()
+        if (primaryArtist.isEmpty()) return null
         val artistId = artistObj?.optLong("id", 0L)?.takeIf { it > 0L }
         val albumObj = item.optJSONObject("album")
         val album = albumObj?.optString("title")?.trim()?.takeIf { it.isNotEmpty() }
@@ -238,11 +267,13 @@ object CatalogClient {
         val cover = albumObj?.let(::coverOf)
         val durationMs = item.optLong("duration", 0L) * 1000L
         val isrc = item.optString("isrc").trim().takeIf { it.isNotEmpty() }
+        val credits = creditsOf(item, primaryArtist, title)
         return Track(
             key = isrc?.let { "isrc:${it.lowercase(Locale.ROOT)}" }
-                ?: fallbackKey(artist, title, durationMs),
+                ?: fallbackKey(primaryArtist, title, durationMs),
             title = title,
-            artist = artist,
+            artist = credits.joinToString(", "),
+            artists = credits,
             album = album,
             durationMs = durationMs,
             cover = coverFor(title, null, cover),
@@ -255,8 +286,28 @@ object CatalogClient {
             artistProviderId = artistId?.toString(),
             isrc = isrc,
             sourceLabel = "Deezer",
-            remoteQuery = "$artist $title",
+            remoteQuery = "$primaryArtist $title",
         )
+    }
+
+    /** Artistas principales, invitados y colaboraciones del título. */
+    private fun creditsOf(item: JSONObject, primary: String, title: String): List<String> {
+        val credits = mutableListOf(primary)
+        item.optJSONArray("contributors")?.let { array ->
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.optString("name")?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let(credits::add)
+            }
+        }
+        FEATURED_IN_TITLE.findAll(title).forEach { match ->
+            match.groupValues.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
+                ?.let(credits::add)
+        }
+        FEATURED_SUFFIX.find(title)?.groupValues?.getOrNull(1)?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let(credits::add)
+        return credits.distinctBy(::norm)
     }
 
     private fun mapAlbumSummary(item: JSONObject, fallbackArtist: String? = null): Album? {

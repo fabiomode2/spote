@@ -1,49 +1,43 @@
 package dev.spote.app.setup
 
+import android.app.Activity
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import com.google.zxing.BarcodeFormat
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
+import androidx.compose.ui.platform.LocalContext
 
 private const val DEFAULT_SCAN_PROMPT = "Apunta al QR de configuración de Spote"
 
-/** Opciones del escáner embebido; la UI puede personalizar el texto. */
-fun qrScanOptions(prompt: String = DEFAULT_SCAN_PROMPT): ScanOptions =
-    ScanOptions().apply {
-        setDesiredBarcodeFormats(BarcodeFormat.QR_CODE.name)
-        setPrompt(prompt)
-        setBeepEnabled(false)
-        setOrientationLocked(false)
-    }
-
 /**
- * Devuelve una función que abre el escáner de ZXing y entrega el texto leído.
+ * Abre el escáner CameraX + ML Kit y entrega el texto leído.
  *
- * Uso desde un composable:
- *
- * ```
- * val scan = rememberQrScanner { raw -> SetupLink.parse(raw)?.let { ... } }
- * Button(onClick = scan) { Text("Escanear QR") }
- * ```
- *
- * Si el usuario cancela no se llama a [onResult]. La Activity de captura la
- * aporta `zxing-android-embedded`; no hace falta declarar ninguna propia.
+ * Si el usuario cancela no se llama a [onResult]. La Activity de captura está
+ * declarada en el manifest y pide el permiso de cámara en el momento.
  */
 @Composable
 fun rememberQrScanner(
     onResult: (String) -> Unit,
     prompt: String = DEFAULT_SCAN_PROMPT,
 ): () -> Unit {
+    val context = LocalContext.current
     val currentOnResult by rememberUpdatedState(onResult)
-    val launcher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val contents = result.contents
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val contents = result.data?.getStringExtra(QrScannerActivity.EXTRA_RESULT)
         if (!contents.isNullOrBlank()) currentOnResult(contents)
     }
-    return remember(launcher, prompt) {
-        { launcher.launch(qrScanOptions(prompt)) }
+    return remember(launcher, prompt, context) {
+        {
+            launcher.launch(
+                Intent(context, QrScannerActivity::class.java)
+                    .putExtra(QrScannerActivity.EXTRA_PROMPT, prompt),
+            )
+        }
     }
 }
