@@ -48,6 +48,86 @@ impl App {
         self.spectrum.stop();
     }
 
+    /// Limpia la UI cuando una o varias pistas ya no están en la biblioteca:
+    /// cola, contexto, historial, detalle de álbum abierto y vistas.
+    pub(super) fn cleanup_hidden_keys(&mut self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+        let hidden: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
+        for key in keys {
+            self.stop_current_if_key(key);
+        }
+        if self
+            .pending_play
+            .as_deref()
+            .is_some_and(|key| hidden.contains(key))
+        {
+            self.pending_play = None;
+            self.pending_seek_ms = None;
+            self.pending_seek_key = None;
+        }
+        if self
+            .pending_stream
+            .as_deref()
+            .is_some_and(|key| hidden.contains(key))
+        {
+            self.stream_resolver.cancel();
+            self.pending_stream = None;
+        }
+        if self
+            .stream_cache_pending
+            .as_ref()
+            .is_some_and(|(key, _)| hidden.contains(key.as_str()))
+        {
+            self.stream_cache_pending = None;
+        }
+        if let Some(page) = &mut self.album_page {
+            page.tracks
+                .retain(|track| !hidden.contains(track.key.as_str()));
+            if page.selected >= page.tracks.len() {
+                page.selected = page.tracks.len().saturating_sub(1);
+            }
+        }
+        // Si el disco local abierto se quedó vacío, se cierra; si no, se
+        // recarga la vista para que desaparezcan la pista o el disco.
+        let album_empty = self.album_open.clone().is_some_and(|open| {
+            self.lib
+                .album_tracks(&open.album, &open.artist)
+                .map(|rows| rows.is_empty())
+                .unwrap_or(false)
+        });
+        if album_empty {
+            self.close_album();
+        } else {
+            self.refresh_library();
+        }
+        if self
+            .album_page
+            .as_ref()
+            .is_some_and(|page| page.tracks.is_empty())
+        {
+            self.close_detail();
+        }
+    }
+
+    /// Oculta pistas en la biblioteca y sincroniza todas las vistas.
+    /// Devuelve cuántas seguían visibles.
+    pub(super) fn hide_library_keys(&mut self, keys: &[String]) -> usize {
+        if keys.is_empty() {
+            return 0;
+        }
+        let hidden = match self.lib.hide_tracks(keys) {
+            Ok(hidden) => hidden,
+            Err(err) => {
+                self.toast(format!("no pude quitarlas: {err}"), ToastKind::Error);
+                return 0;
+            }
+        };
+        self.cleanup_hidden_keys(keys);
+        hidden
+    }
+
     /// Quita de la biblioteca la fila `index` de la vista actual. Es el atajo
     /// rápido (`X` o ⇧clic en la ×). En «todo»/«recientes»/«descargadas»
     /// oculta la pista sin borrar historial ni audio; en favoritas quita el
@@ -72,13 +152,10 @@ impl App {
             self.toggle_favorite_key(&key);
             return;
         }
-        match self.lib.remove_from_library(&key) {
-            Ok(_) => {
-                self.stop_current_if_key(&key);
-                self.toast(format!("«{title}» fuera de la biblioteca"), ToastKind::Ok);
-                self.refresh_library();
-            }
-            Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
+        if self.hide_library_keys(std::slice::from_ref(&key)) > 0 {
+            self.toast(format!("«{title}» fuera de la biblioteca"), ToastKind::Ok);
+        } else {
+            self.toast("esa pista ya no estaba en la biblioteca", ToastKind::Warn);
         }
     }
 
@@ -307,14 +384,13 @@ impl App {
             ContextAction::Cover => {
                 self.request_spotify_metadata_forced(&menu.key, true);
             }
-            ContextAction::RemoveLibrary => match self.lib.remove_from_library(&menu.key) {
-                Ok(()) => {
-                    self.stop_current_if_key(&menu.key);
-                    self.toast("pista oculta de la biblioteca", ToastKind::Ok);
-                    self.refresh_library();
+            ContextAction::RemoveLibrary => {
+                if self.hide_library_keys(std::slice::from_ref(&menu.key)) > 0 {
+                    self.toast("pista quitada de la biblioteca", ToastKind::Ok);
+                } else {
+                    self.toast("esa pista ya no estaba en la biblioteca", ToastKind::Warn);
                 }
-                Err(err) => self.toast(format!("no pude quitarla: {err}"), ToastKind::Error),
-            },
+            }
             ContextAction::DeleteFile => {
                 let path = menu.path.clone().or_else(|| self.lib.local_path(&menu.key));
                 if let Some(path) = path {

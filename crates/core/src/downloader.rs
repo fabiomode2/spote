@@ -713,6 +713,7 @@ fn download(
         .arg("--write-thumbnail")
         .arg("--convert-thumbnails")
         .arg("jpg")
+        .args(crate::stream::ytdlp_auth_args())
         .arg("--extractor-args")
         .arg("youtube:player_client=default,web_safari")
         .arg("--progress-template")
