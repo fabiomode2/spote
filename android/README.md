@@ -45,12 +45,13 @@ para iterar el diseño sin NDK ni dispositivo.
   Al reproducir aparece un mini player encima de las tabs; al tocarlo se abre
   **Sonando** a pantalla completa, sin tabs y con el inset de la barra del
   sistema aplicado una sola vez.
-- Las fichas de álbum y artista se cargan del catálogo del core por
-  `provider:id`, no a partir de una página de resultados. Si una pista trae un
-  álbum que no salió en la búsqueda textual, se abre por nombre con
-  `find_album` y se completa el tracklist.
-- La búsqueda mixta usa `spotify_api::search_all`: Spotify con respaldo Deezer.
+- La búsqueda mixta habla con la API pública de Deezer desde Kotlin/OkHttp.
   Devuelve pistas, álbumes y artistas reales; YouTube solo resuelve el audio.
+  El catálogo no usa HTTP nativo en Android: el core Rust se queda para la
+  biblioteca SQLite, las portadas y la paleta, donde es estable.
+- Las fichas de álbum y artista se cargan por `provider:id`, no a partir de una
+  página de resultados. Si una pista trae un álbum que no salió en la búsqueda
+  textual, se abre por nombre y se completa el tracklist.
 - Las descargas conservan la clave canónica (`isrc:` o `sha1:`) para que la
   copia local y la ficha del catálogo sigan siendo la misma canción.
 - La paleta se extrae con el mismo `Palette::from_image` que la TUI: fondo,
