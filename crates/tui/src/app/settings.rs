@@ -195,6 +195,12 @@ impl App {
     }
 
     pub fn adjust_setting(&mut self, row: usize, delta: i32) {
+        // Con un filtro sin resultados no hay fila activa. Sin este guardado,
+        // ←/→ seguía cambiando el ajuste que quedó seleccionado antes de
+        // filtrar, invisible para el usuario.
+        if self.tab == Tab::Settings && !self.settings_visible().contains(&row) {
+            return;
+        }
         let Some(setting) = SettingRow::from_index(row) else {
             return;
         };
@@ -347,6 +353,11 @@ impl App {
 
 
     pub fn toggle_setting(&mut self, row: usize) {
+        // Mismo caso que en `adjust_setting`: enter no debe alternar una fila
+        // que el filtro de ajustes tiene oculta.
+        if self.tab == Tab::Settings && !self.settings_visible().contains(&row) {
+            return;
+        }
         let Some(setting) = SettingRow::from_index(row) else {
             return;
         };
@@ -438,6 +449,8 @@ mod tests {
         }
         assert_eq!(SettingRow::from_index(SettingRow::ALL.len()), None);
         assert!(SettingRow::BarWidth.adjustable());
+        assert!(SettingRow::RimIntensity.adjustable());
+        assert!(SettingRow::BorderOpacity.adjustable());
         assert!(!SettingRow::Save.adjustable());
     }
 }

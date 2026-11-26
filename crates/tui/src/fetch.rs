@@ -998,6 +998,41 @@ mod tests {
         let drawn = art.cells.iter().filter(|cell| cell.ch != ' ').count();
         assert!(drawn > 100, "drawn={drawn}");
     }
+
+    fn album_summary(
+        title: &str,
+        artist: &str,
+        track_count: u32,
+    ) -> spote_core::spotify_api::AlbumSummary {
+        spote_core::spotify_api::AlbumSummary {
+            provider: "deezer".into(),
+            id: "1".into(),
+            title: title.into(),
+            artist: artist.into(),
+            cover_url: None,
+            release_year: None,
+            track_count,
+        }
+    }
+
+    #[test]
+    fn album_search_prefers_exact_title_over_a_sibling_with_more_tracks() {
+        let exact = album_summary("DEAF AF", "Bíberon", 7);
+        let sibling = album_summary("DEAF AF 2", "Bíberon", 8);
+        let exact_score = album_match_score("DEAF AF", "Bíberon", &exact).expect("coincide");
+        let sibling_score =
+            album_match_score("DEAF AF", "Bíberon", &sibling).expect("también coincide");
+        assert!(
+            exact_score > sibling_score,
+            "exact={exact_score} sibling={sibling_score}"
+        );
+    }
+
+    #[test]
+    fn album_search_accepts_an_edition_when_there_is_no_exact_title() {
+        let deluxe = album_summary("Discovery (Deluxe Edition)", "Daft Punk", 15);
+        assert!(album_match_score("Discovery", "Daft Punk", &deluxe).is_some());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,20 +1264,51 @@ impl TunebatWorker {
 fn search_album(artist: &str, album: &str) -> Option<spote_core::spotify_api::AlbumInfo> {
     let query = format!("{artist} {album}");
     let results = spotify_api::search_all(&query, 8).ok()?;
-    let wanted = spote_core::util::normalize(album);
     let candidate = results
         .albums
         .into_iter()
-        .filter(|item| {
-            let got = spote_core::util::normalize(&item.title);
-            got == wanted || got.contains(&wanted) || wanted.contains(&got)
-        })
-        .max_by_key(|item| {
-            let artist_match = spote_core::util::normalize(&item.artist)
-                .contains(&spote_core::util::normalize(artist));
-            (artist_match, item.track_count)
-        })?;
+        .filter_map(|item| album_match_score(album, artist, &item).map(|score| (score, item)))
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, item)| item)?;
     spotify_api::album(&candidate.provider, &candidate.id).ok()
+}
+
+/// Puntúa un resultado contra el disco local. El título exacto pesa mucho más
+/// que una variante con más pistas: al abrir «DEAF AF» no debe cargarse
+/// «DEAF AF 2» solo porque su edición tenga una pista extra.
+fn album_match_score(
+    album: &str,
+    artist: &str,
+    item: &spote_core::spotify_api::AlbumSummary,
+) -> Option<i32> {
+    let wanted = spote_core::util::normalize(album);
+    let got = spote_core::util::normalize(&item.title);
+    if wanted.is_empty() || got.is_empty() {
+        return None;
+    }
+    let title = if got == wanted {
+        100
+    } else if got.starts_with(&wanted) || wanted.starts_with(&got) {
+        20
+    } else if got.contains(&wanted) || wanted.contains(&got) {
+        10
+    } else {
+        return None;
+    };
+    let wanted_artist = spote_core::util::normalize(artist);
+    let artist_score = if wanted_artist.is_empty() {
+        0
+    } else {
+        let got_artist = spote_core::util::normalize(&item.artist);
+        if got_artist == wanted_artist {
+            40
+        } else if got_artist.contains(&wanted_artist) || wanted_artist.contains(&got_artist) {
+            20
+        } else {
+            0
+        }
+    };
+    Some(title + artist_score + i32::from(item.track_count.min(9) as u8))
 }
 
 /// Busca metadatos y se queda con la pista que mejor coincide. Evita coger una

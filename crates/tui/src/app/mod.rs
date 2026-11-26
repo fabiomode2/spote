@@ -923,6 +923,8 @@ impl SettingRow {
                 | Self::BottomOpacity
                 | Self::OverlayScrim
                 | Self::PanelBorder
+                | Self::BorderOpacity
+                | Self::RimIntensity
                 | Self::NavPosition
                 | Self::DetailMode
                 | Self::Backdrop
