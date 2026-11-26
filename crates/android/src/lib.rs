@@ -681,12 +681,21 @@ fn catalog_track_dto(track: &spotify_api::SpotifyTrack) -> CatalogTrackDto {
         provider_id: track.id.clone(),
         title: track.title.clone(),
         artists: track.artists.clone(),
-        artist_list: track.artist_list.clone(),
+        artist_list: split_artists(&track.artists),
         album: Some(track.album.clone()).filter(|album| !album.is_empty()),
         duration_ms: track.duration_ms,
         art_url: track.art_url.clone(),
         isrc: track.isrc.clone(),
     }
+}
+
+fn split_artists(artists: &str) -> Vec<String> {
+    artists
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn catalog_album_dto(album: &spotify_api::AlbumSummary) -> CatalogAlbumDto {
