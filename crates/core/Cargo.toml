@@ -33,3 +33,9 @@ percent-encoding = "2"
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# En Android no hay inicialización de rustls-platform-verifier (necesita el
+# Context/JVM); usamos las raíces webpki empaquetadas para que reqwest no
+# intente el verificador del sistema.
+[target.'cfg(target_os = "android")'.dependencies]
+webpki-root-certs = "1"

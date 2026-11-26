@@ -4155,6 +4155,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "webpki-root-certs",
  "zbus",
 ]
 

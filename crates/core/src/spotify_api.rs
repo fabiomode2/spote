@@ -184,11 +184,23 @@ fn token_slot() -> &'static Mutex<Option<(String, Instant)>> {
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+    let builder = reqwest::blocking::Client::builder()
         .user_agent(UA)
-        .timeout(Duration::from_secs(8))
-        .build()
-        .context("cliente http")
+        .timeout(Duration::from_secs(8));
+
+    #[cfg(target_os = "android")]
+    let builder = {
+        let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .map(|cert| reqwest::Certificate::from_der(cert.as_ref()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("certificados webpki")?;
+        // Sin esto reqwest usa rustls-platform-verifier, que en Android
+        // panickea si la app no ha inicializado el Context de Java.
+        builder.tls_certs_only(certs)
+    };
+
+    builder.build().context("cliente http")
 }
 
 /// Token anónimo, cacheado hasta poco antes de caducar.
