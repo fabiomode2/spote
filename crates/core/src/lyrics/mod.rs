@@ -458,6 +458,7 @@ pub struct LyricsService {
 
 impl LyricsService {
     pub fn new() -> Self {
+        crate::crypto::install();
         let client = reqwest::Client::builder()
             .user_agent(concat!("spote/", env!("CARGO_PKG_VERSION")))
             .timeout(std::time::Duration::from_secs(8))

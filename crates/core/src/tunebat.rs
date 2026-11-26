@@ -197,6 +197,7 @@ pub fn lookup(
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
+    crate::crypto::install();
     reqwest::blocking::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(UA)

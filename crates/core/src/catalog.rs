@@ -128,6 +128,7 @@ fn is_spotify_id(value: &str) -> bool {
 
 /// Descarga y parsea una colección pública. Bloquea: llámalo desde un hilo.
 pub fn fetch(input: &str) -> Result<Catalog> {
+    crate::crypto::install();
     let client = reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(Duration::from_secs(20))

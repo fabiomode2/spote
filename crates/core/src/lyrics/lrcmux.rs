@@ -806,6 +806,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "diagnóstico manual con red"]
     async fn live_lrcmux_returns_something() {
+        crate::crypto::install();
         let client = reqwest::Client::new();
         let mut t = track();
         t.title = "Borderline".into();
@@ -820,6 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_title_returns_none_without_touching_the_network() {
+        crate::crypto::install();
         let client = reqwest::Client::new();
         let mut blank = track();
         blank.title = "   ".into();

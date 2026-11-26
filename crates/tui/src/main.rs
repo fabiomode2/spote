@@ -116,6 +116,7 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    spote_core::crypto::install();
     let args = Args::parse();
     match args.command.as_deref() {
         Some("ingest") => return run_ingest(&args),

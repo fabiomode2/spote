@@ -184,6 +184,8 @@ fn token_slot() -> &'static Mutex<Option<(String, Instant)>> {
 }
 
 fn client() -> Result<reqwest::blocking::Client> {
+    crate::crypto::install();
+
     let builder = reqwest::blocking::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(8));

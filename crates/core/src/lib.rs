@@ -9,6 +9,7 @@ pub mod audio_fx;
 pub mod audio_map;
 pub mod catalog;
 pub mod config;
+pub mod crypto;
 pub mod discord;
 pub mod downloader;
 #[cfg(feature = "desktop")]
